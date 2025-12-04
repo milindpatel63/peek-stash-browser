@@ -1,0 +1,34 @@
+name: Sync Fork with Upstream
+
+on:
+  schedule:
+    - cron: "0 */12 * * *"   # runs twice a day
+  workflow_dispatch:          # manual trigger allowed
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout your fork
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Git
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+
+      - name: Add upstream
+        run: |
+          git remote add upstream https://github.com/carrotwaxr/peek-stash-browser.git
+          git fetch upstream
+
+      - name: Merge upstream changes (stop on conflict)
+        run: |
+          git merge upstream/main --no-edit
+
+      - name: Push if merge succeeded
+        run: |
+          git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }} HEAD:main
