@@ -1,34 +1,42 @@
-name: Sync Fork with Upstream
+name: Sync fork with upstream (master)
 
+# Run on schedule and allow manual runs
 on:
   schedule:
-    - cron: "0 */12 * * *"   # runs twice a day
-  workflow_dispatch:          # manual trigger allowed
+    - cron: "0 */12 * * *"   # every 6 hours (adjust as you like)
+  workflow_dispatch:        # allows manual trigger
 
 jobs:
   sync:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout your fork
+      - name: Checkout this repository (fork)
         uses: actions/checkout@v4
         with:
-          persist-credentials: false
+          fetch-depth: 0
+          persist-credentials: false   # we will push with explicit token URL
 
-      - name: Set up Git
+      - name: Configure git user
         run: |
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
 
-      - name: Add upstream
+      - name: Add upstream and fetch
         run: |
           git remote add upstream https://github.com/carrotwaxr/peek-stash-browser.git
           git fetch upstream
 
-      - name: Merge upstream changes (stop on conflict)
+      - name: Ensure we're on master
         run: |
-          git merge upstream/main --no-edit
+          git checkout master
 
-      - name: Push if merge succeeded
+      - name: Merge upstream/master (will fail on conflicts)
         run: |
-          git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }} HEAD:main
+          git merge upstream/master --no-edit
+
+      - name: Push merged master to fork
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # push using token so the action can write to the fork
+          git push https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }} HEAD:master
