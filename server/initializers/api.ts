@@ -137,9 +137,9 @@ export const setupAPI = () => {
   app.use("/api", videoRoutes);
 
   // Start API server immediately so /api/setup/status is available
-  app.listen(8000, () => {
+  app.listen(8100, () => {
     logger.info("Server is running", {
-      url: "http://localhost:8000",
+      url: "http://localhost:8100",
       transcodingSystem: "session-based",
     });
   });
