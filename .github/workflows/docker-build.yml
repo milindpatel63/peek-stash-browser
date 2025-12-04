@@ -7,7 +7,7 @@ on:
 
 env:
   REGISTRY: docker.io
-  IMAGE_NAME: carrotwaxr/peek-stash-browser
+  IMAGE_NAME: milindpatel63/peek-stash-browser
 
 jobs:
   build:

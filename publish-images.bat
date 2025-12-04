@@ -2,7 +2,7 @@
 REM Build and publish Docker images for unRAID (Windows version)
 
 REM Configuration
-set DOCKER_REGISTRY=carrotwaxr
+set DOCKER_REGISTRY=milindpatel63
 set VERSION=1.0.0
 
 REM Build and tag image

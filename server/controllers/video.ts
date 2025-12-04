@@ -2,6 +2,10 @@ import { Request, Response } from "express";
 import { stashInstanceManager } from "../services/StashInstanceManager.js";
 import { logger } from "../utils/logger.js";
 
+// Track active upstream stream controllers per scene to ensure
+// only one proxied stream is active at any time.
+const activeStreamControllers = new Map<string, AbortController>();
+
 // ============================================================================
 // STASH STREAM PROXY
 // ============================================================================
@@ -40,12 +44,40 @@ export const proxyStashStream = async (req: Request, res: Response) => {
 
     logger.info(`[PROXY] Proxying stream: ${req.url} -> ${stashUrl}`);
 
+    // Abort any existing upstream request for this scene before starting a new one.
+    const previousController = activeStreamControllers.get(sceneId);
+    if (previousController) {
+      logger.debug(`[PROXY] Aborting previous stream for scene ${sceneId}`);
+      previousController.abort();
+    }
+
+    const controller = new AbortController();
+    activeStreamControllers.set(sceneId, controller);
+
+    const cleanup = () => {
+      const current = activeStreamControllers.get(sceneId);
+      if (current === controller) {
+        activeStreamControllers.delete(sceneId);
+      }
+    };
+
+    const abortUpstream = () => {
+      if (!controller.signal.aborted) {
+        logger.debug(`[PROXY] Client disconnected, aborting stream for scene ${sceneId}`);
+        controller.abort();
+      }
+    };
+
+    req.on("close", abortUpstream);
+    res.on("close", abortUpstream);
+
     // Forward request to Stash using fetch
     const response = await fetch(stashUrl, {
       headers: {
         'ApiKey': apiKey,
         'Range': req.headers.range || '', // Forward range requests for seeking
       },
+      signal: controller.signal,
     });
 
     if (!response.ok) {
@@ -80,6 +112,11 @@ export const proxyStashStream = async (req: Request, res: Response) => {
       const pump = async () => {
         try {
           while (true) {
+            if (res.writableEnded || res.destroyed) {
+              controller.abort();
+              break;
+            }
+
             const { done, value } = await reader.read();
             if (done) break;
             if (!res.write(value)) {
@@ -89,15 +126,24 @@ export const proxyStashStream = async (req: Request, res: Response) => {
           }
           res.end();
         } catch (error) {
-          logger.error("[PROXY] Error streaming response", { error });
-          if (!res.headersSent) {
-            res.status(500).send("Stream proxy error");
+          if (!controller.signal.aborted) {
+            logger.error("[PROXY] Error streaming response", { error });
+            if (!res.headersSent) {
+              res.status(500).send("Stream proxy error");
+            }
           }
+        } finally {
+          req.off("close", abortUpstream);
+          res.off("close", abortUpstream);
+          cleanup();
         }
       };
       await pump();
     } else {
       res.end();
+      req.off("close", abortUpstream);
+      res.off("close", abortUpstream);
+      cleanup();
     }
 
     logger.debug(`[PROXY] Stream proxied successfully: ${streamPath}`);
@@ -108,6 +154,9 @@ export const proxyStashStream = async (req: Request, res: Response) => {
     if (!res.headersSent) {
       res.status(500).send("Stream proxy failed");
     }
+    // Ensure controller map is cleared if an error occurs before cleanup.
+    const { sceneId } = req.params;
+    activeStreamControllers.delete(sceneId);
   }
 };
 

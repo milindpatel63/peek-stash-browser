@@ -2,7 +2,7 @@
 # Build and publish Docker images for unRAID
 
 # Configuration
-DOCKER_REGISTRY="carrotwaxr"  # Replace with your Docker Hub username
+DOCKER_REGISTRY="milindpatel63"  # Replace with your Docker Hub username
 VERSION="1.0.0"
 
 # Build and tag images
