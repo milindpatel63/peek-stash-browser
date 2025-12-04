@@ -19,14 +19,6 @@ function offsetMiddleware(player) {
   let offsetStart;
   let seeking = 0;
   let loadSourceTimeout = null;
-  
-  // Track rapid seeks to detect scrubbing
-  // If seeks happen faster than SCRUB_DETECTION_DELAY, we're scrubbing
-  const SCRUB_DETECTION_DELAY = 300; // ms between seeks to consider it scrubbing
-  let lastSeekTime = 0;
-  let isScrubbing = false;
-  let scrubDetectionTimeout = null;
-  let pendingSeekTime = null;
 
   function updateOffsetStart(offset) {
     offsetStart = offset;
@@ -52,14 +44,6 @@ function offsetMiddleware(player) {
   }
 
   function loadSource(seconds) {
-    // CRITICAL: Never generate streams while scrubbing
-    // This is a safety check in case setCurrentTime blocking doesn't catch everything
-    if (isScrubbing) {
-      // Store the target time but don't generate stream
-      pendingSeekTime = seconds;
-      return; // Exit early - no stream generation
-    }
-    
     // Add ?start=X parameter to source URL
     const srcUrl = new URL(source.src, window.location.origin);
     srcUrl.searchParams.set('start', seconds.toString());
@@ -138,56 +122,6 @@ function offsetMiddleware(player) {
     },
 
     setCurrentTime(seconds) {
-      const now = Date.now();
-      const timeSinceLastSeek = now - lastSeekTime;
-      
-      // Detect rapid seeks (scrubbing) - if seeks happen faster than SCRUB_DETECTION_DELAY
-      if (timeSinceLastSeek < SCRUB_DETECTION_DELAY) {
-        // Rapid seeks detected - we're scrubbing
-        isScrubbing = true;
-        pendingSeekTime = seconds;
-        
-        // Clear any pending scrub detection timeout
-        if (scrubDetectionTimeout) {
-          clearTimeout(scrubDetectionTimeout);
-        }
-        
-        // Set timeout to detect when scrubbing ends (no seeks for SCRUB_DETECTION_DELAY)
-        scrubDetectionTimeout = setTimeout(() => {
-          isScrubbing = false;
-          
-          // Execute the final seek that was stored during scrubbing
-          if (pendingSeekTime !== null && player) {
-            const finalSeekTime = pendingSeekTime;
-            pendingSeekTime = null;
-            
-            // Small delay to ensure scrubbing flag is cleared, then execute final seek
-            setTimeout(() => {
-              // Use player's currentTime setter which will go through middleware
-              // This will generate the stream for the final position
-              try {
-                player.currentTime(finalSeekTime);
-              } catch (err) {
-                console.debug("[offsetMiddleware] Final seek failed:", err);
-              }
-            }, 50);
-          }
-        }, SCRUB_DETECTION_DELAY);
-        
-        // Block the seek while scrubbing - return current tech time
-        const currentTechTime = tech ? tech.currentTime() : 0;
-        lastSeekTime = now;
-        return currentTechTime;
-      }
-      
-      // Normal seek (not rapid) - clear scrubbing state
-      isScrubbing = false;
-      if (scrubDetectionTimeout) {
-        clearTimeout(scrubDetectionTimeout);
-        scrubDetectionTimeout = null;
-      }
-      lastSeekTime = now;
-
       if (offsetStart === undefined) {
         return seconds;
       }
