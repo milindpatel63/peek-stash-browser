@@ -6,7 +6,7 @@ import { usePageTitle } from "../../hooks/usePageTitle.js";
 import { useTVMode } from "../../hooks/useTVMode.js";
 import SceneGrid from "../scene-search/SceneGrid.jsx";
 import {
-  CacheLoadingBanner,
+  SyncProgressBanner,
   PageHeader,
   PageLayout,
   Pagination,
@@ -24,6 +24,7 @@ const Recommended = () => {
   const [totalCount, setTotalCount] = useState(0);
   const [message, setMessage] = useState(null);
   const [initMessage, setInitMessage] = useState(null);
+  const [criteria, setCriteria] = useState(null);
 
   // Get pagination params from URL
   const page = parseInt(searchParams.get("page")) || 1;
@@ -49,10 +50,16 @@ const Recommended = () => {
           { withCredentials: true }
         );
 
-        const { scenes: fetchedScenes, count, message: msg } = response.data;
+        const {
+          scenes: fetchedScenes,
+          count,
+          message: msg,
+          criteria: criteriaCounts,
+        } = response.data;
 
         setScenes(fetchedScenes);
         setTotalCount(count);
+        setCriteria(criteriaCounts || null);
         if (msg) {
           setMessage(msg);
         }
@@ -65,7 +72,7 @@ const Recommended = () => {
           err.response?.status === 503 && err.response?.data?.ready === false;
 
         if (isInitializing && retryCount < MAX_RETRIES) {
-          setInitMessage("Server is loading cache, please wait...");
+          setInitMessage("Server is syncing library, please wait...");
           retryCount++;
           setTimeout(() => {
             fetchRecommended();
@@ -73,7 +80,10 @@ const Recommended = () => {
           return;
         }
 
-        setError(err.response?.data?.error || "Failed to load recommendations");
+        setError({
+          message: err.response?.data?.error || "Failed to load recommendations",
+          errorType: err.response?.data?.errorType || null,
+        });
         setLoading(false);
       }
     };
@@ -129,6 +139,64 @@ const Recommended = () => {
     !loading && scenes.length > 0 && isTVMode
   );
 
+  // Render criteria feedback for empty state
+  const renderCriteriaFeedback = () => {
+    if (!criteria) return null;
+
+    const hasAnyActivity =
+      criteria.favoritedPerformers > 0 ||
+      criteria.ratedPerformers > 0 ||
+      criteria.favoritedStudios > 0 ||
+      criteria.ratedStudios > 0 ||
+      criteria.favoritedTags > 0 ||
+      criteria.ratedTags > 0 ||
+      criteria.favoritedScenes > 0 ||
+      criteria.ratedScenes > 0;
+
+    if (!hasAnyActivity) {
+      return (
+        <div className="text-gray-400 text-sm mt-2">
+          <p>
+            To get personalized suggestions, try favoriting or rating (7.0+)
+            performers, studios, tags, or scenes you enjoy.
+          </p>
+        </div>
+      );
+    }
+
+    return (
+      <div className="text-gray-400 text-sm mt-2">
+        <p className="mb-2">Your current activity:</p>
+        <ul className="list-disc list-inside space-y-1">
+          <li>
+            {criteria.favoritedPerformers} favorited performer
+            {criteria.favoritedPerformers !== 1 ? "s" : ""},{" "}
+            {criteria.ratedPerformers} highly-rated
+          </li>
+          <li>
+            {criteria.favoritedStudios} favorited studio
+            {criteria.favoritedStudios !== 1 ? "s" : ""},{" "}
+            {criteria.ratedStudios} highly-rated
+          </li>
+          <li>
+            {criteria.favoritedTags} favorited tag
+            {criteria.favoritedTags !== 1 ? "s" : ""}, {criteria.ratedTags}{" "}
+            highly-rated
+          </li>
+          <li>
+            {criteria.favoritedScenes} favorited scene
+            {criteria.favoritedScenes !== 1 ? "s" : ""}, {criteria.ratedScenes}{" "}
+            rated scene
+            {criteria.ratedScenes !== 1 ? "s" : ""}
+          </li>
+        </ul>
+        <p className="mt-2 italic">
+          Tip: Rating more scenes helps us learn your preferences!
+        </p>
+      </div>
+    );
+  };
+
   return (
     <PageLayout>
       <div ref={pageRef}>
@@ -137,7 +205,7 @@ const Recommended = () => {
           subtitle="Personalized recommendations based on your favorites and ratings"
         />
 
-        {initMessage && <CacheLoadingBanner message={initMessage} />}
+        {initMessage && <SyncProgressBanner message={initMessage} />}
 
         {/* Top Pagination */}
         {!loading && !error && !message && !initMessage && totalPages > 1 && (
@@ -153,11 +221,18 @@ const Recommended = () => {
           </div>
         )}
 
+        {/* Error type display */}
+        {error && error.errorType && (
+          <div className="mb-4 text-sm text-gray-500">
+            (Error type: {error.errorType})
+          </div>
+        )}
+
         {/* Scene Grid (includes bottom pagination) */}
         <SceneGrid
           scenes={scenes}
           loading={loading}
-          error={!initMessage ? error : null}
+          error={!initMessage && error ? error.message : null}
           currentPage={page}
           totalPages={totalPages}
           onPageChange={handlePageChange}
@@ -165,8 +240,12 @@ const Recommended = () => {
           perPage={perPage}
           onPerPageChange={handlePerPageChange}
           totalCount={totalCount}
-          emptyMessage="No Recommendations Yet"
-          emptyDescription="Rate or Favorite more items to get personalized recommendations."
+          emptyMessage={message || "No Recommendations Yet"}
+          emptyDescription={
+            criteria
+              ? renderCriteriaFeedback()
+              : "Rate or Favorite more items to get personalized recommendations."
+          }
         />
       </div>
     </PageLayout>

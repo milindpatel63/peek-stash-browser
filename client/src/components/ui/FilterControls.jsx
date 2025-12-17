@@ -1,3 +1,4 @@
+import { forwardRef, useEffect } from "react";
 import Button from "./Button.jsx";
 import SearchableSelect from "./SearchableSelect.jsx";
 
@@ -47,7 +48,7 @@ export const SortControl = ({
 /**
  * Reusable Filter Control Component
  */
-export const FilterControl = ({
+export const FilterControl = forwardRef(({
   type = "select",
   label,
   value,
@@ -66,7 +67,8 @@ export const FilterControl = ({
   hierarchyLabel = "Include children",
   hierarchyValue, // current depth value (undefined/0 = off, -1 = all)
   onHierarchyChange, // hierarchy change handler
-}) => {
+  isHighlighted = false, // for highlight animation when chip is clicked
+}, ref) => {
   // Standardized styles for all inputs in the filter panel
   const baseInputStyle = {
     backgroundColor: "var(--bg-card)",
@@ -133,16 +135,25 @@ export const FilterControl = ({
             </select>
           </div>
         );
-      case "searchable-select":
+      case "searchable-select": {
+        // When hierarchy is enabled, force modifier to INCLUDES
+        const isHierarchyEnabled = hierarchyValue === -1;
+        const effectiveModifierValue = isHierarchyEnabled ? "INCLUDES" : modifierValue;
+
         return (
           <div className="space-y-2">
             {/* Modifier dropdown (if provided) */}
             {modifierOptions && modifierOptions.length > 0 && (
               <select
-                value={modifierValue}
+                value={effectiveModifierValue}
                 onChange={(e) => onModifierChange(e.target.value)}
                 className={inputClasses}
-                style={baseInputStyle}
+                style={{
+                  ...baseInputStyle,
+                  ...(isHierarchyEnabled ? { opacity: 0.6, cursor: "not-allowed" } : {}),
+                }}
+                disabled={isHierarchyEnabled}
+                title={isHierarchyEnabled ? "Locked to 'Has ANY' when hierarchy is enabled" : undefined}
               >
                 {modifierOptions.map((option) => (
                   <option key={option.value} value={option.value}>
@@ -165,7 +176,14 @@ export const FilterControl = ({
                 <input
                   type="checkbox"
                   checked={hierarchyValue === -1}
-                  onChange={(e) => onHierarchyChange(e.target.checked ? -1 : undefined)}
+                  onChange={(e) => {
+                    const newHierarchyValue = e.target.checked ? -1 : undefined;
+                    onHierarchyChange(newHierarchyValue);
+                    // When enabling hierarchy, force modifier to INCLUDES
+                    if (e.target.checked && onModifierChange) {
+                      onModifierChange("INCLUDES");
+                    }
+                  }}
                   className="w-4 h-4 rounded border cursor-pointer"
                   style={{
                     accentColor: "var(--accent-primary)",
@@ -181,6 +199,7 @@ export const FilterControl = ({
             )}
           </div>
         );
+      }
       case "number":
         return (
           <input
@@ -238,6 +257,100 @@ export const FilterControl = ({
               className={inputClasses}
               style={baseInputStyle}
             />
+          </div>
+        );
+      case "imperial-height-range":
+        // Imperial height input with feet and inches fields
+        return (
+          <div className="space-y-2">
+            <fieldset>
+              <legend
+                className="text-xs"
+                style={{ color: "var(--text-muted)" }}
+              >
+                Min Height:
+              </legend>
+              <div className="flex space-x-2 mt-1">
+                <div className="flex-1">
+                  <label htmlFor="height-feet-min" className="sr-only">
+                    Minimum height feet
+                  </label>
+                  <input
+                    id="height-feet-min"
+                    type="number"
+                    value={value?.feetMin || ""}
+                    onChange={(e) => onChange({ ...value, feetMin: e.target.value })}
+                    placeholder="Feet"
+                    min={0}
+                    max={8}
+                    aria-label="Minimum height in feet"
+                    className={inputClasses}
+                    style={baseInputStyle}
+                  />
+                </div>
+                <div className="flex-1">
+                  <label htmlFor="height-inches-min" className="sr-only">
+                    Minimum height inches
+                  </label>
+                  <input
+                    id="height-inches-min"
+                    type="number"
+                    value={value?.inchesMin || ""}
+                    onChange={(e) => onChange({ ...value, inchesMin: e.target.value })}
+                    placeholder="Inches"
+                    min={0}
+                    max={11}
+                    aria-label="Minimum height in inches"
+                    className={inputClasses}
+                    style={baseInputStyle}
+                  />
+                </div>
+              </div>
+            </fieldset>
+            <fieldset>
+              <legend
+                className="text-xs"
+                style={{ color: "var(--text-muted)" }}
+              >
+                Max Height:
+              </legend>
+              <div className="flex space-x-2 mt-1">
+                <div className="flex-1">
+                  <label htmlFor="height-feet-max" className="sr-only">
+                    Maximum height feet
+                  </label>
+                  <input
+                    id="height-feet-max"
+                    type="number"
+                    value={value?.feetMax || ""}
+                    onChange={(e) => onChange({ ...value, feetMax: e.target.value })}
+                    placeholder="Feet"
+                    min={0}
+                    max={8}
+                    aria-label="Maximum height in feet"
+                    className={inputClasses}
+                    style={baseInputStyle}
+                  />
+                </div>
+                <div className="flex-1">
+                  <label htmlFor="height-inches-max" className="sr-only">
+                    Maximum height inches
+                  </label>
+                  <input
+                    id="height-inches-max"
+                    type="number"
+                    value={value?.inchesMax || ""}
+                    onChange={(e) => onChange({ ...value, inchesMax: e.target.value })}
+                    placeholder="Inches"
+                    min={0}
+                    max={11}
+                    aria-label="Maximum height in inches"
+                    className={inputClasses}
+                    style={baseInputStyle}
+                  />
+                </div>
+              </div>
+            </fieldset>
           </div>
         );
       case "date-range":
@@ -302,7 +415,10 @@ export const FilterControl = ({
   };
 
   return (
-    <div className="flex flex-col">
+    <div
+      ref={ref}
+      className={`flex flex-col ${isHighlighted ? "filter-highlight" : ""}`}
+    >
       <label
         className="text-sm font-medium mb-2"
         style={{ color: "var(--text-primary)" }}
@@ -312,7 +428,9 @@ export const FilterControl = ({
       {renderInput()}
     </div>
   );
-};
+});
+
+FilterControl.displayName = "FilterControl";
 
 /**
  * Collapsible Filter Panel Component with manual submit
@@ -324,7 +442,21 @@ export const FilterPanel = ({
   isOpen,
   onToggle,
   onSubmit,
+  highlightedFilterKey,
+  filterRefs,
 }) => {
+  // Scroll to highlighted filter when it changes
+  useEffect(() => {
+    if (highlightedFilterKey && filterRefs?.current?.[highlightedFilterKey]) {
+      const element = filterRefs.current[highlightedFilterKey];
+
+      // Small delay to ensure panel is rendered
+      setTimeout(() => {
+        element.scrollIntoView({ behavior: "smooth", block: "center" });
+      }, 100);
+    }
+  }, [highlightedFilterKey, filterRefs]);
+
   if (!isOpen) {
     return null; // Don't render when closed
   }

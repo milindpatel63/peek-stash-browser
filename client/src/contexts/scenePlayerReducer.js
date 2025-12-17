@@ -254,6 +254,8 @@ export function scenePlayerReducer(state, action) {
         ready: false,
         // Reset quality to "direct" for new scene - will be auto-selected based on codec
         quality: "direct",
+        // Reset O counter immediately - will be set correctly when new scene loads
+        oCounter: 0,
       };
     }
 
@@ -286,6 +288,8 @@ export function scenePlayerReducer(state, action) {
             ready: false,
             // Reset quality to "direct" for new scene - will be auto-selected based on codec
             quality: "direct",
+            // Reset O counter immediately - will be set correctly when new scene loads
+            oCounter: 0,
           };
         } else {
           // No history - pick a random scene (excluding current)
@@ -319,6 +323,8 @@ export function scenePlayerReducer(state, action) {
         ready: false,
         // Reset quality to "direct" for new scene - will be auto-selected based on codec
         quality: "direct",
+        // Reset O counter immediately - will be set correctly when new scene loads
+        oCounter: 0,
       };
     }
 
@@ -346,6 +352,8 @@ export function scenePlayerReducer(state, action) {
         shouldAutoplay: shouldAutoplay,
         // Reset quality to "direct" for new scene - will be auto-selected based on codec
         quality: "direct",
+        // Reset O counter immediately - will be set correctly when new scene loads
+        oCounter: 0,
       };
     }
 
@@ -424,7 +432,7 @@ export function scenePlayerReducer(state, action) {
           : null,
       };
 
-    case "TOGGLE_SHUFFLE":
+    case "TOGGLE_SHUFFLE": {
       const newShuffle = !state.shuffle;
       return {
         ...state,
@@ -440,8 +448,9 @@ export function scenePlayerReducer(state, action) {
             }
           : null,
       };
+    }
 
-    case "TOGGLE_REPEAT":
+    case "TOGGLE_REPEAT": {
       // Cycle through: none → all → one → none
       const repeatModes = ["none", "all", "one"];
       const currentIdx = repeatModes.indexOf(state.repeat);
@@ -454,6 +463,7 @@ export function scenePlayerReducer(state, action) {
           ? { ...state.playlist, repeat: nextRepeat }
           : null,
       };
+    }
 
     case "SET_SHUFFLE_HISTORY":
       return {

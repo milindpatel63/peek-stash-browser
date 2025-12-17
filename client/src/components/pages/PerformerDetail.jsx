@@ -14,13 +14,15 @@ import {
 } from "lucide-react";
 import { usePageTitle } from "../../hooks/usePageTitle.js";
 import { useRatingHotkeys } from "../../hooks/useRatingHotkeys.js";
+import { useUnitPreference } from "../../contexts/UnitPreferenceContext.js";
+import { formatHeight, formatWeight, formatLength } from "../../utils/unitConversions.js";
 import { libraryApi } from "../../services/api.js";
 import SceneSearch from "../scene-search/SceneSearch.jsx";
 import {
   Button,
-  EntityGrid,
   FavoriteButton,
   GenderIcon,
+  LazyImage,
   Lightbox,
   LoadingSpinner,
   PageHeader,
@@ -28,6 +30,7 @@ import {
   RatingSlider,
   TabNavigation,
 } from "../ui/index.js";
+import { GalleryGrid, GroupGrid } from "../grids/index.js";
 import ViewInStashButton from "../ui/ViewInStashButton.jsx";
 
 // Helper to detect and map URLs to known sites with colors
@@ -260,9 +263,8 @@ const PerformerDetail = () => {
           )}
 
           {activeTab === 'galleries' && (
-            <EntityGrid
-              entityType="gallery"
-              filters={{
+            <GalleryGrid
+              lockedFilters={{
                 gallery_filter: {
                   performers: {
                     value: [parseInt(performerId, 10)],
@@ -270,6 +272,8 @@ const PerformerDetail = () => {
                   },
                 },
               }}
+              hideLockedFilters
+              syncToUrl={false}
               emptyMessage={`No galleries found for ${performer.name}`}
             />
           )}
@@ -279,9 +283,8 @@ const PerformerDetail = () => {
           )}
 
           {activeTab === 'groups' && (
-            <EntityGrid
-              entityType="group"
-              filters={{
+            <GroupGrid
+              lockedFilters={{
                 group_filter: {
                   performers: {
                     value: [parseInt(performerId, 10)],
@@ -289,6 +292,8 @@ const PerformerDetail = () => {
                   },
                 },
               }}
+              hideLockedFilters
+              syncToUrl={false}
               emptyMessage={`No collections found for ${performer.name}`}
             />
           )}
@@ -408,6 +413,8 @@ const SectionLink = ({ url }) => {
 };
 
 const PerformerDetails = ({ performer }) => {
+  const { unitPreference, isLoading: isLoadingUnits } = useUnitPreference();
+
   // Calculate age from birthdate
   const getAge = (birthdate) => {
     if (!birthdate) return null;
@@ -477,17 +484,29 @@ const PerformerDetails = ({ performer }) => {
           <DetailField label="Hair Color" value={performer?.hair_color} />
           <DetailField
             label="Height"
-            value={performer?.height_cm && `${performer.height_cm} cm`}
+            value={
+              isLoadingUnits
+                ? "..."
+                : performer?.height_cm && formatHeight(performer.height_cm, unitPreference)
+            }
           />
           <DetailField
             label="Weight"
-            value={performer?.weight && `${performer.weight} kg`}
+            value={
+              isLoadingUnits
+                ? "..."
+                : performer?.weight && formatWeight(performer.weight, unitPreference)
+            }
           />
           <DetailField label="Measurements" value={performer?.measurements} />
           <DetailField label="Fake Tits" value={performer?.fake_tits} />
           <DetailField
             label="Penis Length"
-            value={performer?.penis_length && `${performer.penis_length} cm`}
+            value={
+              isLoadingUnits
+                ? "..."
+                : performer?.penis_length && formatLength(performer.penis_length, unitPreference)
+            }
           />
           <DetailField label="Circumcised" value={performer?.circumcised} />
         </div>
@@ -536,7 +555,7 @@ const PerformerDetails = ({ performer }) => {
   );
 };
 
-const PerformerStats = ({ performer, performerId }) => {
+const PerformerStats = ({ performer, performerId: _performerId }) => { // eslint-disable-line no-unused-vars
   const [searchParams, setSearchParams] = useSearchParams();
   const activeTab = searchParams.get('tab') || 'scenes';
 
@@ -866,8 +885,10 @@ const ImagesTab = ({ performerId, performerName }) => {
 
       <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-7 gap-3 mt-6">
         {images.map((image, index) => (
-          <div
+          <LazyImage
             key={image.id}
+            src={image.paths?.thumbnail}
+            alt={image.title || `Image ${index + 1}`}
             className="aspect-square rounded-lg overflow-hidden cursor-pointer hover:opacity-80 hover:scale-105 transition-all border"
             style={{
               backgroundColor: "var(--bg-secondary)",
@@ -877,23 +898,7 @@ const ImagesTab = ({ performerId, performerName }) => {
               setLightboxIndex(index);
               setLightboxOpen(true);
             }}
-          >
-            {image.paths?.thumbnail ? (
-              <img
-                src={image.paths.thumbnail}
-                alt={image.title || `Image ${index + 1}`}
-                className="w-full h-full object-cover"
-                loading="lazy"
-              />
-            ) : (
-              <div
-                className="w-full h-full flex items-center justify-center text-sm"
-                style={{ color: "var(--text-muted)" }}
-              >
-                No Preview
-              </div>
-            )}
-          </div>
+          />
         ))}
       </div>
 

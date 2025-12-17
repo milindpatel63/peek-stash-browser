@@ -1,4 +1,5 @@
-import { forwardRef, useMemo, useRef, useState } from "react";
+/* eslint-disable react-refresh/only-export-components */
+import { forwardRef, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { useHiddenEntities } from "../../hooks/useHiddenEntities.js";
 import { libraryApi } from "../../services/api";
@@ -70,35 +71,214 @@ export const CardContainer = forwardRef(
 CardContainer.displayName = "CardContainer";
 
 /**
- * Card image container with aspect ratio
+ * CardImage - Image container with aspect ratio and built-in lazy loading
+ * @param {Object} props
+ * @param {string} [props.src] - Image source URL
+ * @param {string} [props.alt] - Alt text for image
+ * @param {string} [props.aspectRatio] - CSS aspect ratio (e.g., "16/9", "2/3")
+ * @param {string} [props.entityType] - Entity type for placeholder icon
+ * @param {'cover'|'contain'} [props.objectFit] - How image should fit container (default: 'contain')
+ * @param {React.ReactNode} [props.children] - Overlay content
+ * @param {string} [props.className] - Additional CSS classes
+ * @param {Object} [props.style] - Additional inline styles
+ * @param {Function} [props.onClick] - Click handler
  */
-export const CardImage = ({ aspectRatio, children, className = "" }) => {
+export const CardImage = ({
+  src,
+  alt = "",
+  aspectRatio = "16/9",
+  entityType,
+  objectFit = "contain",
+  children,
+  className = "",
+  style = {},
+  onClick,
+}) => {
+  const [ref, isVisible] = useLazyLoad();
+  const [hasError, setHasError] = useState(false);
+  const [isLoaded, setIsLoaded] = useState(false);
+
+  const showPlaceholder = !src || hasError;
+
+  const getPlaceholderIcon = () => {
+    const icons = {
+      performer: (
+        <svg className="w-16 h-16" fill="currentColor" viewBox="0 0 20 20">
+          <path fillRule="evenodd" d="M10 9a3 3 0 100-6 3 3 0 000 6zm-7 9a7 7 0 1114 0H3z" clipRule="evenodd" />
+        </svg>
+      ),
+      scene: (
+        <svg className="w-16 h-16" fill="currentColor" viewBox="0 0 20 20">
+          <path fillRule="evenodd" d="M4 3a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V5a2 2 0 00-2-2H4zm3 2h6v4H7V5zm8 8v2h1v-2h-1zm-2-2H7v4h6v-4zm2 0h1V9h-1v2zm1-4V5h-1v2h1zM5 5v2H4V5h1zm0 4H4v2h1V9zm-1 4h1v2H4v-2z" clipRule="evenodd" />
+        </svg>
+      ),
+      gallery: (
+        <svg className="w-16 h-16" fill="currentColor" viewBox="0 0 20 20">
+          <path fillRule="evenodd" d="M4 3a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V5a2 2 0 00-2-2H4zm12 12H4l4-8 3 6 2-4 3 6z" clipRule="evenodd" />
+        </svg>
+      ),
+      default: (
+        <svg className="w-16 h-16" fill="currentColor" viewBox="0 0 20 20">
+          <path fillRule="evenodd" d="M4 3a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V5a2 2 0 00-2-2H4zm12 12H4l4-8 3 6 2-4 3 6z" clipRule="evenodd" />
+        </svg>
+      ),
+    };
+    return icons[entityType] || icons.default;
+  };
+
   return (
     <div
-      className={`w-full mb-3 overflow-hidden rounded-lg ${className}`}
-      style={{ aspectRatio }}
+      ref={ref}
+      className={`w-full mb-3 overflow-hidden rounded-lg relative ${className}`}
+      style={{
+        aspectRatio,
+        backgroundColor: "var(--bg-secondary)",
+        ...style,
+      }}
+      onClick={onClick}
     >
+      {showPlaceholder ? (
+        <div
+          className="absolute inset-0 flex items-center justify-center"
+          style={{ color: "var(--text-muted)" }}
+        >
+          {getPlaceholderIcon()}
+        </div>
+      ) : (
+        <>
+          {/* Placeholder shown while loading */}
+          {!isLoaded && (
+            <div
+              className="absolute inset-0 animate-pulse"
+              style={{ backgroundColor: "var(--bg-tertiary)" }}
+            />
+          )}
+          {/* Actual image - only render when visible for lazy loading */}
+          {isVisible && (
+            <img
+              src={src}
+              alt={alt}
+              className={`absolute inset-0 w-full h-full transition-opacity duration-200 ${
+                isLoaded ? "opacity-100" : "opacity-0"
+              }`}
+              style={{ objectFit }}
+              onLoad={() => setIsLoaded(true)}
+              onError={() => setHasError(true)}
+            />
+          )}
+        </>
+      )}
+      {/* Children rendered as overlay */}
       {children}
     </div>
   );
 };
 
 /**
- * Default card image component
- * Uses object-contain to show full image without cropping
- * Letterboxing uses theme background color for consistency
+ * Hook for true lazy loading via IntersectionObserver
+ * Returns [ref, shouldLoad] - attach ref to container, use shouldLoad to conditionally set src
+ */
+export const useLazyLoad = (rootMargin = "200px") => {
+  const ref = useRef(null);
+  const [shouldLoad, setShouldLoad] = useState(false);
+
+  useEffect(() => {
+    if (!ref.current || shouldLoad) return;
+
+    // Check for IntersectionObserver support (for SSR or old browsers)
+    if (typeof IntersectionObserver === "undefined") {
+      setShouldLoad(true);
+      return;
+    }
+
+    let observer;
+    try {
+      observer = new IntersectionObserver(
+        ([entry]) => {
+          if (entry.isIntersecting) {
+            setShouldLoad(true);
+            observer.disconnect();
+          }
+        },
+        { rootMargin, threshold: 0 }
+      );
+      observer.observe(ref.current);
+    } catch {
+      // Fallback: load immediately if observer fails
+      setShouldLoad(true);
+      return;
+    }
+
+    return () => observer?.disconnect();
+  }, [shouldLoad, rootMargin]);
+
+  return [ref, shouldLoad];
+};
+
+/**
+ * Lazy-loaded image component
+ * Uses IntersectionObserver to only load images when they enter the viewport
+ * This prevents overwhelming the proxy with 24+ simultaneous requests
+ */
+export const LazyImage = ({ src, alt, className, style, onClick }) => {
+  const [ref, shouldLoad] = useLazyLoad();
+
+  return (
+    <div ref={ref} className={className} style={style} onClick={onClick}>
+      {shouldLoad && src ? (
+        <img src={src} alt={alt} className="w-full h-full object-cover" />
+      ) : (
+        <div
+          className="w-full h-full"
+          style={{ backgroundColor: "var(--bg-secondary)" }}
+        />
+      )}
+    </div>
+  );
+};
+
+/**
+ * Default card image component with true lazy loading
+ * Uses IntersectionObserver to only load images when they enter the viewport
+ * This prevents overwhelming the proxy with 24+ simultaneous requests
  */
 export const CardDefaultImage = ({ src, alt, entityType }) => {
+  const [ref, shouldLoad] = useLazyLoad();
+
   return (
     <div
+      ref={ref}
       className="w-full h-full flex items-center justify-center"
       style={{ backgroundColor: "var(--bg-secondary)" }}
     >
       <img
         className="w-full h-full object-contain"
-        src={src}
+        src={shouldLoad ? src : undefined}
         alt={alt || `${entityType} image`}
       />
+    </div>
+  );
+};
+
+/**
+ * CardOverlay - Positioned overlay container for progress bars, selection checkboxes, etc.
+ * @param {Object} props
+ * @param {'top-left'|'top-right'|'bottom-left'|'bottom-right'|'full'} props.position - Position of overlay
+ * @param {React.ReactNode} props.children - Content to render in overlay
+ * @param {string} [props.className] - Additional CSS classes
+ */
+export const CardOverlay = ({ position = "bottom-left", children, className = "" }) => {
+  const positionClasses = {
+    "top-left": "absolute top-0 left-0",
+    "top-right": "absolute top-0 right-0",
+    "bottom-left": "absolute bottom-0 left-0",
+    "bottom-right": "absolute bottom-0 right-0",
+    "full": "absolute inset-0",
+  };
+
+  return (
+    <div className={`${positionClasses[position]} ${className}`}>
+      {children}
     </div>
   );
 };
@@ -247,6 +427,19 @@ export const CardRatingRow = ({
   const [pendingHide, setPendingHide] = useState(null);
   const badgeRef = useRef(null);
   const { hideEntity, hideConfirmationDisabled } = useHiddenEntities();
+
+  // Sync state when initial values change (e.g., on data refresh)
+  useEffect(() => {
+    setRating(initialRating);
+  }, [initialRating]);
+
+  useEffect(() => {
+    setIsFavorite(initialFavorite);
+  }, [initialFavorite]);
+
+  useEffect(() => {
+    setOCounter(initialOCounter);
+  }, [initialOCounter]);
 
   const handleRatingSave = async (newRating) => {
     setRating(newRating);

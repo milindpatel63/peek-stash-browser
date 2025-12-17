@@ -111,6 +111,7 @@ export type NormalizedStudio = Studio & {
  * - favorite: Whether user favorited this tag
  * - o_counter: Aggregated orgasm count from scenes with this tag
  * - play_count: Aggregated play count from scenes with this tag
+ * - performer_count: Count of performers with this tag
  */
 export type NormalizedTag = Tag & {
   rating: number | null;
@@ -118,6 +119,7 @@ export type NormalizedTag = Tag & {
   favorite: boolean;
   o_counter: number;
   play_count: number;
+  performer_count: number;
 };
 
 /**
@@ -147,3 +149,16 @@ export type NormalizedGroup = Group & {
   rating: number | null;
   favorite: boolean;
 };
+
+/**
+ * Lightweight scene data for scoring operations
+ * Contains only IDs needed for similarity/recommendation scoring
+ */
+export interface SceneScoringData {
+  id: string;
+  studioId: string | null;
+  performerIds: string[];
+  tagIds: string[];
+  oCounter: number;
+  date: string | null;
+}

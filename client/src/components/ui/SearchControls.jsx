@@ -4,6 +4,7 @@ import { LucideArrowDown, LucideArrowUp } from "lucide-react";
 import { apiGet } from "../../services/api.js";
 import { useTVMode } from "../../hooks/useTVMode.js";
 import { useHorizontalNavigation } from "../../hooks/useHorizontalNavigation.js";
+import { useUnitPreference } from "../../contexts/UnitPreferenceContext.js";
 import {
   GALLERY_FILTER_OPTIONS,
   GALLERY_SORT_OPTIONS,
@@ -12,7 +13,9 @@ import {
   PERFORMER_FILTER_OPTIONS,
   PERFORMER_SORT_OPTIONS,
   SCENE_FILTER_OPTIONS,
+  SCENE_INDEX_SORT_OPTION,
   SCENE_SORT_OPTIONS,
+  SCENE_SORT_OPTIONS_BASE,
   STUDIO_FILTER_OPTIONS,
   STUDIO_SORT_OPTIONS,
   TAG_FILTER_OPTIONS,
@@ -36,10 +39,10 @@ import {
   SortControl,
 } from "./index.js";
 
-const buildFilter = (artifactType, filters) => {
+const buildFilter = (artifactType, filters, unitPreference) => {
   switch (artifactType) {
     case "performer":
-      return { performer_filter: buildPerformerFilter(filters) };
+      return { performer_filter: buildPerformerFilter(filters, unitPreference) };
     case "studio":
       return { studio_filter: buildStudioFilter(filters) };
     case "tag":
@@ -94,11 +97,16 @@ const SearchControls = ({
   const [searchParams, setSearchParams] = useSearchParams();
   const [isFilterPanelOpen, setIsFilterPanelOpen] = useState(false);
   const [isInitialized, setIsInitialized] = useState(false);
+  const [highlightedFilterKey, setHighlightedFilterKey] = useState(null);
   const hasInitialized = useRef(false); // Prevent double initialization
   const topPaginationRef = useRef(null); // Ref for top pagination element
+  const filterRefs = useRef({}); // Refs for filter controls (for scroll-to-highlight)
 
   // TV Mode
   const { isTVMode } = useTVMode();
+
+  // Unit preference for filter conversions
+  const { unitPreference } = useUnitPreference();
 
   // Search zone items: SearchInput, SortControl, SortDirection, Filters, FilterPresets
   const searchZoneItems = useMemo(() => [
@@ -150,9 +158,44 @@ const SearchControls = ({
 
   // Get filter options for this artifact type
   const filterOptions = useMemo(() => {
+    // Transform filter options based on unit preference
+    const transformForUnits = (options) => {
+      if (unitPreference !== "imperial") return options;
+      return options.map((opt) => {
+        // Transform height filter for imperial
+        if (opt.key === "height") {
+          return {
+            ...opt,
+            label: "Height (ft/in)",
+            type: "imperial-height-range",
+            // Store in separate keys that buildPerformerFilter will convert
+          };
+        }
+        // Transform weight filter for imperial
+        if (opt.key === "weight") {
+          return {
+            ...opt,
+            label: "Weight (lbs)",
+            min: 50,
+            max: 500,
+          };
+        }
+        // Transform penisLength filter for imperial
+        if (opt.key === "penisLength") {
+          return {
+            ...opt,
+            label: "Penis Length (inches)",
+            min: 1,
+            max: 15,
+          };
+        }
+        return opt;
+      });
+    };
+
     switch (artifactType) {
       case "performer":
-        return [...PERFORMER_FILTER_OPTIONS];
+        return transformForUnits([...PERFORMER_FILTER_OPTIONS]);
       case "studio":
         return [...STUDIO_FILTER_OPTIONS];
       case "tag":
@@ -165,7 +208,7 @@ const SearchControls = ({
       default:
         return [...SCENE_FILTER_OPTIONS];
     }
-  }, [artifactType]);
+  }, [artifactType, unitPreference]);
 
   // Track collapsed state for each filter section
   const [collapsedSections, setCollapsedSections] = useState(() => {
@@ -304,7 +347,7 @@ const SearchControls = ({
           q: initialState.searchText,
           sort: initialState.sortField,
         },
-        ...buildFilter(artifactType, initialState.filters),
+        ...buildFilter(artifactType, initialState.filters, unitPreference),
       };
       onQueryChange(query);
 
@@ -314,7 +357,7 @@ const SearchControls = ({
 
     initializeState();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // Only run once on mount
+  }, [unitPreference]); // Re-run when unit preference changes
 
   // Update URL params whenever state changes (one-way: State → URL)
   useEffect(() => {
@@ -370,7 +413,7 @@ const SearchControls = ({
         q: searchText,
         sort: sortField,
       },
-      ...buildFilter(artifactType, { ...permanentFilters }),
+      ...buildFilter(artifactType, { ...permanentFilters }, unitPreference),
     };
 
     onQueryChange(query);
@@ -398,7 +441,7 @@ const SearchControls = ({
         q: searchText,
         sort: sortField,
       },
-      ...buildFilter(artifactType, filters),
+      ...buildFilter(artifactType, filters, unitPreference),
     };
 
     onQueryChange(query);
@@ -426,7 +469,7 @@ const SearchControls = ({
           q: searchText,
           sort: sortField,
         },
-        ...buildFilter(artifactType, updatedFilters),
+        ...buildFilter(artifactType, updatedFilters, unitPreference),
       };
 
       onQueryChange(query);
@@ -440,8 +483,49 @@ const SearchControls = ({
       sortField,
       artifactType,
       onQueryChange,
+      unitPreference,
     ]
   );
+
+  // Handle clicking on a filter chip to highlight that filter
+  const handleFilterChipClick = useCallback(
+    (filterKey) => {
+      // Open filter panel if not already open
+      setIsFilterPanelOpen(true);
+
+      // Find which section this filter belongs to
+      let sectionKey = null;
+      for (let i = 0; i < filterOptions.length; i++) {
+        if (filterOptions[i].type === "section-header") {
+          sectionKey = filterOptions[i].key;
+        } else if (filterOptions[i].key === filterKey) {
+          break;
+        }
+      }
+
+      // Expand the section if it's collapsed
+      if (sectionKey && collapsedSections[sectionKey]) {
+        setCollapsedSections((prev) => ({
+          ...prev,
+          [sectionKey]: false,
+        }));
+      }
+
+      // Set the highlighted filter key (triggers scroll and animation)
+      setHighlightedFilterKey(filterKey);
+    },
+    [filterOptions, collapsedSections]
+  );
+
+  // Clear highlight after animation completes
+  useEffect(() => {
+    if (highlightedFilterKey) {
+      const timer = setTimeout(() => {
+        setHighlightedFilterKey(null);
+      }, 1500);
+      return () => clearTimeout(timer);
+    }
+  }, [highlightedFilterKey]);
 
   // Handle loading a saved preset
   const handleLoadPreset = useCallback(
@@ -462,12 +546,12 @@ const SearchControls = ({
         ...buildFilter(artifactType, {
           ...permanentFilters,
           ...preset.filters,
-        }),
+        }, unitPreference),
       };
 
       onQueryChange(query);
     },
-    [permanentFilters, perPage, searchText, artifactType, onQueryChange]
+    [permanentFilters, perPage, searchText, artifactType, onQueryChange, unitPreference]
   );
 
   const handlePageChange = (page) => {
@@ -482,7 +566,7 @@ const SearchControls = ({
         q: searchText,
         sort: sortField,
       },
-      ...buildFilter(artifactType, filters),
+      ...buildFilter(artifactType, filters, unitPreference),
     };
 
     onQueryChange(query);
@@ -525,7 +609,7 @@ const SearchControls = ({
         q: searchStr,
         sort: sortField,
       },
-      ...buildFilter(artifactType, filters),
+      ...buildFilter(artifactType, filters, unitPreference),
     };
 
     onQueryChange(query);
@@ -554,7 +638,7 @@ const SearchControls = ({
         q: searchText,
         sort: newSortField,
       },
-      ...buildFilter(artifactType, filters),
+      ...buildFilter(artifactType, filters, unitPreference),
     };
 
     onQueryChange(query);
@@ -577,7 +661,7 @@ const SearchControls = ({
         q: searchText,
         sort: sortField,
       },
-      ...buildFilter(artifactType, filters),
+      ...buildFilter(artifactType, filters, unitPreference),
     };
 
     onQueryChange(query);
@@ -594,10 +678,20 @@ const SearchControls = ({
     );
   }, [filters]);
 
-  const sortOptions = useMemo(
-    () => getSortOptions(artifactType),
-    [artifactType]
-  );
+  const sortOptions = useMemo(() => {
+    const baseOptions = getSortOptions(artifactType);
+    
+    // For scenes, conditionally include scene_index based on group filter
+    if (artifactType === "scene") {
+      const hasGroupFilter = filters?.groups?.length > 0;
+      if (hasGroupFilter) {
+        return SCENE_SORT_OPTIONS; // Full list with scene_index
+      }
+      return SCENE_SORT_OPTIONS_BASE; // Without scene_index
+    }
+    
+    return baseOptions;
+  }, [artifactType, filters?.groups]);
 
   // Show loading state while fetching default presets
   if (isLoadingDefaults) {
@@ -745,6 +839,7 @@ const SearchControls = ({
         filters={filters}
         filterOptions={filterOptions}
         onRemoveFilter={handleRemoveFilter}
+        onChipClick={handleFilterChipClick}
         permanentFilters={permanentFilters}
         permanentFiltersMetadata={permanentFiltersMetadata}
       />
@@ -782,6 +877,8 @@ const SearchControls = ({
         onClear={clearFilters}
         onSubmit={handleFilterSubmit}
         hasActiveFilters={hasActiveFilters}
+        highlightedFilterKey={highlightedFilterKey}
+        filterRefs={filterRefs}
       >
         {filterOptions.map((opt, index) => {
           const { defaultValue, key, type, ...rest } = opt;
@@ -871,6 +968,10 @@ const SearchControls = ({
           return (
             <FilterControl
               key={`FilterControl-${key}`}
+              ref={(el) => {
+                if (el) filterRefs.current[key] = el;
+              }}
+              isHighlighted={highlightedFilterKey === key}
               onChange={(value) => handleFilterChange(key, value)}
               value={filters[key] || defaultValue}
               type={type}

@@ -1,9 +1,9 @@
 import type { Response } from "express";
 import { AuthenticatedRequest } from "../../middleware/auth.js";
 import prisma from "../../prisma/singleton.js";
+import { stashEntityService } from "../../services/StashEntityService.js";
 import { emptyEntityFilterService } from "../../services/EmptyEntityFilterService.js";
 import { filteredEntityCacheService } from "../../services/FilteredEntityCacheService.js";
-import { stashCacheManager } from "../../services/StashCacheManager.js";
 import { stashInstanceManager } from "../../services/StashInstanceManager.js";
 import { userRestrictionService } from "../../services/UserRestrictionService.js";
 import { userStatsService } from "../../services/UserStatsService.js";
@@ -13,7 +13,74 @@ import type {
 } from "../../types/index.js";
 import { logger } from "../../utils/logger.js";
 import { buildStashEntityUrl } from "../../utils/stashUrl.js";
-import { calculateEntityImageCount } from "./images.js";
+import { hydrateEntityTags } from "../../utils/hierarchyUtils.js";
+
+/**
+ * Parse a career_length string into years of career duration.
+ *
+ * Stash stores career_length as a free-text string with various formats:
+ * - "2015-present" or "2015-" → calculate years from start to current year
+ * - "2010-2018" → calculate years between start and end
+ * - "5" or "5 years" → extract numeric duration directly
+ *
+ * @param careerLengthStr The career_length string from Stash
+ * @returns Number of years, or null if unparseable/empty
+ */
+export function parseCareerLength(careerLengthStr: string | null | undefined): number | null {
+  if (!careerLengthStr || careerLengthStr.trim() === "") {
+    return null;
+  }
+
+  const str = careerLengthStr.trim().toLowerCase();
+  const currentYear = new Date().getFullYear();
+
+  // Pattern: "2015-present", "2015-", "2015 - present", "2015 -"
+  // Matches: start year with optional end that's "present", empty, or missing
+  const activePattern = /^(\d{4})\s*[-–—]\s*(present|current|now|\s*)$/i;
+  const activeMatch = str.match(activePattern);
+  if (activeMatch) {
+    const startYear = parseInt(activeMatch[1], 10);
+    if (startYear > 1900 && startYear <= currentYear) {
+      return currentYear - startYear;
+    }
+  }
+
+  // Pattern: "2010-2018", "2010 - 2018"
+  // Matches: start year to end year
+  const rangePattern = /^(\d{4})\s*[-–—]\s*(\d{4})$/;
+  const rangeMatch = str.match(rangePattern);
+  if (rangeMatch) {
+    const startYear = parseInt(rangeMatch[1], 10);
+    const endYear = parseInt(rangeMatch[2], 10);
+    if (startYear > 1900 && endYear >= startYear && endYear <= currentYear + 1) {
+      return endYear - startYear;
+    }
+  }
+
+  // Pattern: "5", "5 years", "10 yrs"
+  // Matches: just a number optionally followed by "years" or "yrs"
+  const numericPattern = /^(\d+)\s*(years?|yrs?)?$/i;
+  const numericMatch = str.match(numericPattern);
+  if (numericMatch) {
+    const years = parseInt(numericMatch[1], 10);
+    if (years >= 0 && years <= 100) {
+      return years;
+    }
+  }
+
+  // Pattern: standalone 4-digit year like "2015" (assume active from that year)
+  const yearOnlyPattern = /^(\d{4})$/;
+  const yearOnlyMatch = str.match(yearOnlyPattern);
+  if (yearOnlyMatch) {
+    const startYear = parseInt(yearOnlyMatch[1], 10);
+    if (startYear > 1900 && startYear <= currentYear) {
+      return currentYear - startYear;
+    }
+  }
+
+  // Unable to parse
+  return null;
+}
 
 /**
  * Merge user-specific data into performers
@@ -77,7 +144,7 @@ export const findPerformers = async (
     const searchQuery = filter?.q || "";
 
     // Step 1: Get all performers from cache
-    let performers = stashCacheManager.getAllPerformers();
+    let performers = await stashEntityService.getAllPerformers();
 
     if (performers.length === 0) {
       logger.warn("Cache not initialized, returning empty result");
@@ -92,7 +159,7 @@ export const findPerformers = async (
     // Step 2: Apply content restrictions & empty entity filtering with caching
     // NOTE: We apply user stats AFTER this to ensure fresh data
     const requestingUser = req.user;
-    const cacheVersion = stashCacheManager.getCacheVersion();
+    const cacheVersion = await stashEntityService.getCacheVersion();
 
     // Try to get filtered performers from cache
     let filteredPerformers = filteredEntityCacheService.get(
@@ -119,15 +186,15 @@ export const findPerformers = async (
       // Filter empty performers (non-admins only)
       if (requestingUser && requestingUser.role !== "ADMIN") {
         // CRITICAL FIX: Filter scenes first to get visibility baseline
-        let visibleScenes = stashCacheManager.getAllScenes();
+        let visibleScenes = await stashEntityService.getAllScenesWithPerformers();
         visibleScenes = await userRestrictionService.filterScenesForUser(
           visibleScenes,
           userId
         );
 
         // Get all entities from cache
-        let allGalleries = stashCacheManager.getAllGalleries();
-        let allGroups = stashCacheManager.getAllGroups();
+        let allGalleries = await stashEntityService.getAllGalleries();
+        let allGroups = await stashEntityService.getAllGroups();
 
         // Apply user restrictions to groups/galleries FIRST
         allGalleries = await userRestrictionService.filterGalleriesForUser(
@@ -194,7 +261,7 @@ export const findPerformers = async (
       ...performer_filter,
       ids: ids || performer_filter?.ids,
     };
-    performers = applyPerformerFilters(performers, mergedFilter);
+    performers = await applyPerformerFilters(performers, mergedFilter);
 
     // Step 6: Sort
     performers = sortPerformers(performers, sortField, sortDirection);
@@ -205,26 +272,35 @@ export const findPerformers = async (
     const endIndex = startIndex + perPage;
     let paginatedPerformers = performers.slice(startIndex, endIndex);
 
-    // Step 8: Calculate accurate image_count for single-entity requests (detail pages)
-    // This accounts for Gallery→Image relationships, not just direct image tagging
+    // Step 8: For single-entity requests (detail pages), get performer with computed counts
     if (ids && ids.length === 1 && paginatedPerformers.length === 1) {
-      const performer = paginatedPerformers[0];
-      const actualImageCount = await calculateEntityImageCount(
-        "performer",
-        performer.id
-      );
-      paginatedPerformers = [
-        {
-          ...performer,
-          image_count: actualImageCount,
-        },
-      ];
-      logger.info("Calculated accurate image_count for performer detail", {
-        performerId: performer.id,
-        performerName: performer.name,
-        stashImageCount: performer.image_count,
-        actualImageCount,
-      });
+      // Get performer with computed counts from junction tables
+      const performerWithCounts = await stashEntityService.getPerformer(ids[0]);
+      if (performerWithCounts) {
+        // Merge with the paginated performer data (which has user ratings/stats)
+        const existingPerformer = paginatedPerformers[0];
+        paginatedPerformers = [
+          {
+            ...existingPerformer,
+            scene_count: performerWithCounts.scene_count,
+            image_count: performerWithCounts.image_count,
+            gallery_count: performerWithCounts.gallery_count,
+            group_count: performerWithCounts.group_count,
+          },
+        ];
+
+        // Hydrate tags with names
+        paginatedPerformers = await hydrateEntityTags(paginatedPerformers);
+
+        logger.info("Computed counts for performer detail", {
+          performerId: existingPerformer.id,
+          performerName: existingPerformer.name,
+          sceneCount: performerWithCounts.scene_count,
+          imageCount: performerWithCounts.image_count,
+          galleryCount: performerWithCounts.gallery_count,
+          groupCount: performerWithCounts.group_count,
+        });
+      }
     }
 
     // Add stashUrl to each performer
@@ -253,10 +329,10 @@ export const findPerformers = async (
 /**
  * Apply performer filters
  */
-export function applyPerformerFilters(
+export async function applyPerformerFilters(
   performers: NormalizedPerformer[],
-  filters: PeekPerformerFilter | null | undefined
-): NormalizedPerformer[] {
+  filters: (PeekPerformerFilter & Record<string, any>) | null | undefined
+): Promise<NormalizedPerformer[]> {
   if (!filters) return performers;
 
   let filtered = performers;
@@ -313,23 +389,21 @@ export function applyPerformerFilters(
   // Filter by studios
   // Note: Performers don't have a direct studio relationship in Stash
   // We need to filter by performers who appear in scenes from specific studios
-  // This requires checking the scenes cache
+  // Uses efficient SQL join query instead of loading all scenes
   if (filters.studios && filters.studios.value) {
-    const studioIds = new Set(filters.studios.value.map(String));
-    const allScenes = stashCacheManager.getAllScenes();
-
-    // Build a set of performer IDs that appear in scenes from the specified studios
-    const performerIdsInStudios = new Set<string>();
-    allScenes.forEach((scene) => {
-      if (scene.studio && studioIds.has(String(scene.studio.id))) {
-        scene.performers?.forEach((performer) => {
-          performerIdsInStudios.add(String(performer.id));
-        });
-      }
-    });
-
-    // Filter performers to only those who appear in scenes from the specified studios
+    const studioIds = filters.studios.value.map(String);
+    const performerIdsInStudios = await stashEntityService.getPerformerIdsByStudios(studioIds);
     filtered = filtered.filter((p) => performerIdsInStudios.has(p.id));
+  }
+
+  // Filter by groups
+  // Note: Performers don't have a direct group relationship in Stash
+  // We need to filter by performers who appear in scenes from specific groups
+  // Uses efficient SQL join query instead of loading all scenes
+  if (filters.groups && filters.groups.value) {
+    const groupIds = filters.groups.value.map(String);
+    const performerIdsInGroups = await stashEntityService.getPerformerIdsByGroups(groupIds);
+    filtered = filtered.filter((p) => performerIdsInGroups.has(p.id));
   }
 
   // Filter by rating100
@@ -463,6 +537,324 @@ export function applyPerformerFilters(
     });
   }
 
+  // Filter by name (text search)
+  if (filters.name) {
+    const { modifier, value } = filters.name;
+    if (value) {
+      const searchValue = value.toLowerCase();
+      filtered = filtered.filter((p) => {
+        const name = (p.name || "").toLowerCase();
+        const aliases = (p.alias_list || []).join(" ").toLowerCase();
+        const combinedText = name + " " + aliases;
+        if (modifier === "INCLUDES" || !modifier) return combinedText.includes(searchValue);
+        if (modifier === "EXCLUDES") return !combinedText.includes(searchValue);
+        if (modifier === "EQUALS") return name === searchValue;
+        if (modifier === "NOT_EQUALS") return name !== searchValue;
+        return true;
+      });
+    }
+  }
+
+  // Filter by details (text search)
+  if (filters.details) {
+    const { modifier, value } = filters.details;
+    if (value) {
+      const searchValue = value.toLowerCase();
+      filtered = filtered.filter((p) => {
+        const details = (p.details || "").toLowerCase();
+        if (modifier === "INCLUDES" || !modifier) return details.includes(searchValue);
+        if (modifier === "EXCLUDES") return !details.includes(searchValue);
+        return true;
+      });
+    }
+  }
+
+  // Filter by tattoos (text search)
+  if (filters.tattoos) {
+    const { modifier, value } = filters.tattoos;
+    if (value) {
+      const searchValue = value.toLowerCase();
+      filtered = filtered.filter((p) => {
+        const tattoos = (p.tattoos || "").toLowerCase();
+        if (modifier === "INCLUDES" || !modifier) return tattoos.includes(searchValue);
+        if (modifier === "EXCLUDES") return !tattoos.includes(searchValue);
+        return true;
+      });
+    }
+  }
+
+  // Filter by piercings (text search)
+  if (filters.piercings) {
+    const { modifier, value } = filters.piercings;
+    if (value) {
+      const searchValue = value.toLowerCase();
+      filtered = filtered.filter((p) => {
+        const piercings = (p.piercings || "").toLowerCase();
+        if (modifier === "INCLUDES" || !modifier) return piercings.includes(searchValue);
+        if (modifier === "EXCLUDES") return !piercings.includes(searchValue);
+        return true;
+      });
+    }
+  }
+
+  // Filter by measurements (text search)
+  if (filters.measurements) {
+    const { modifier, value } = filters.measurements;
+    if (value) {
+      const searchValue = value.toLowerCase();
+      filtered = filtered.filter((p) => {
+        const measurements = (p.measurements || "").toLowerCase();
+        if (modifier === "INCLUDES" || !modifier) return measurements.includes(searchValue);
+        if (modifier === "EXCLUDES") return !measurements.includes(searchValue);
+        return true;
+      });
+    }
+  }
+
+  // Filter by height (numeric range in cm)
+  if (filters.height) {
+    const { modifier, value, value2 } = filters.height;
+    if (value !== undefined && value !== null) {
+      filtered = filtered.filter((p) => {
+        const height = p.height_cm || 0;
+        if (modifier === "GREATER_THAN") return height > value;
+        if (modifier === "LESS_THAN") return height < value;
+        if (modifier === "EQUALS") return height === value;
+        if (modifier === "NOT_EQUALS") return height !== value;
+        if (modifier === "BETWEEN" && value2 !== undefined && value2 !== null) {
+          return height >= value && height <= value2;
+        }
+        return true;
+      });
+    }
+  }
+
+  // Filter by weight (numeric range in kg)
+  if (filters.weight) {
+    const { modifier, value, value2 } = filters.weight;
+    if (value !== undefined && value !== null) {
+      filtered = filtered.filter((p) => {
+        const weight = p.weight || 0;
+        if (modifier === "GREATER_THAN") return weight > value;
+        if (modifier === "LESS_THAN") return weight < value;
+        if (modifier === "EQUALS") return weight === value;
+        if (modifier === "NOT_EQUALS") return weight !== value;
+        if (modifier === "BETWEEN" && value2 !== undefined && value2 !== null) {
+          return weight >= value && weight <= value2;
+        }
+        return true;
+      });
+    }
+  }
+
+  // Filter by penis_length (numeric range in cm)
+  if (filters.penis_length) {
+    const { modifier, value, value2 } = filters.penis_length;
+    if (value !== undefined && value !== null) {
+      filtered = filtered.filter((p) => {
+        const penisLength = p.penis_length || 0;
+        if (modifier === "GREATER_THAN") return penisLength > value;
+        if (modifier === "LESS_THAN") return penisLength < value;
+        if (modifier === "EQUALS") return penisLength === value;
+        if (modifier === "NOT_EQUALS") return penisLength !== value;
+        if (modifier === "BETWEEN" && value2 !== undefined && value2 !== null) {
+          return penisLength >= value && penisLength <= value2;
+        }
+        return true;
+      });
+    }
+  }
+
+  // Filter by eye_color (enum/string) - case-insensitive comparison
+  if (filters.eye_color) {
+    const { modifier, value } = filters.eye_color;
+    if (value) {
+      const searchValue = value.toUpperCase();
+      filtered = filtered.filter((p) => {
+        const eyeColor = (p.eye_color || "").toUpperCase();
+        if (modifier === "EQUALS" || !modifier) return eyeColor === searchValue;
+        if (modifier === "NOT_EQUALS") return eyeColor !== searchValue;
+        return true;
+      });
+    }
+  }
+
+  // Filter by ethnicity (enum/string) - case-insensitive comparison
+  if (filters.ethnicity) {
+    const { modifier, value } = filters.ethnicity;
+    if (value) {
+      const searchValue = value.toUpperCase();
+      filtered = filtered.filter((p) => {
+        const ethnicity = (p.ethnicity || "").toUpperCase();
+        if (modifier === "EQUALS" || !modifier) return ethnicity === searchValue;
+        if (modifier === "NOT_EQUALS") return ethnicity !== searchValue;
+        return true;
+      });
+    }
+  }
+
+  // Filter by hair_color (enum/string) - case-insensitive comparison
+  if (filters.hair_color) {
+    const { modifier, value } = filters.hair_color;
+    if (value) {
+      const searchValue = value.toUpperCase();
+      filtered = filtered.filter((p) => {
+        const hairColor = (p.hair_color || "").toUpperCase();
+        if (modifier === "EQUALS" || !modifier) return hairColor === searchValue;
+        if (modifier === "NOT_EQUALS") return hairColor !== searchValue;
+        return true;
+      });
+    }
+  }
+
+  // Filter by fake_tits/breast_type (enum/string) - case-insensitive comparison
+  if (filters.fake_tits) {
+    const { modifier, value } = filters.fake_tits;
+    if (value) {
+      const searchValue = value.toUpperCase();
+      filtered = filtered.filter((p) => {
+        const fakeTits = (p.fake_tits || "").toUpperCase();
+        if (modifier === "EQUALS" || !modifier) return fakeTits === searchValue;
+        if (modifier === "NOT_EQUALS") return fakeTits !== searchValue;
+        return true;
+      });
+    }
+  }
+
+  // Filter by birth_year (numeric range)
+  if (filters.birth_year) {
+    const { modifier, value, value2 } = filters.birth_year;
+    if (value !== undefined && value !== null) {
+      filtered = filtered.filter((p) => {
+        if (!p.birthdate) return false;
+        const birthYear = new Date(p.birthdate).getFullYear();
+        if (modifier === "GREATER_THAN") return birthYear > value;
+        if (modifier === "LESS_THAN") return birthYear < value;
+        if (modifier === "EQUALS") return birthYear === value;
+        if (modifier === "NOT_EQUALS") return birthYear !== value;
+        if (modifier === "BETWEEN" && value2 !== undefined && value2 !== null) {
+          return birthYear >= value && birthYear <= value2;
+        }
+        return true;
+      });
+    }
+  }
+
+  // Filter by death_year (numeric range)
+  if (filters.death_year) {
+    const { modifier, value, value2 } = filters.death_year;
+    if (value !== undefined && value !== null) {
+      filtered = filtered.filter((p) => {
+        if (!p.death_date) return false;
+        const deathYear = new Date(p.death_date).getFullYear();
+        if (modifier === "GREATER_THAN") return deathYear > value;
+        if (modifier === "LESS_THAN") return deathYear < value;
+        if (modifier === "EQUALS") return deathYear === value;
+        if (modifier === "NOT_EQUALS") return deathYear !== value;
+        if (modifier === "BETWEEN" && value2 !== undefined && value2 !== null) {
+          return deathYear >= value && deathYear <= value2;
+        }
+        return true;
+      });
+    }
+  }
+
+  // Filter by age (numeric range - calculated from birthdate)
+  if (filters.age) {
+    const { modifier, value, value2 } = filters.age;
+    if (value !== undefined && value !== null) {
+      const today = new Date();
+      filtered = filtered.filter((p) => {
+        if (!p.birthdate) return false;
+        const birthDate = new Date(p.birthdate);
+        let age = today.getFullYear() - birthDate.getFullYear();
+        const monthDiff = today.getMonth() - birthDate.getMonth();
+        if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < birthDate.getDate())) {
+          age--;
+        }
+        if (modifier === "GREATER_THAN") return age > value;
+        if (modifier === "LESS_THAN") return age < value;
+        if (modifier === "EQUALS") return age === value;
+        if (modifier === "NOT_EQUALS") return age !== value;
+        if (modifier === "BETWEEN" && value2 !== undefined && value2 !== null) {
+          return age >= value && age <= value2;
+        }
+        return true;
+      });
+    }
+  }
+
+  // Filter by career_length (numeric range in years)
+  if (filters.career_length) {
+    const careerFilter = filters.career_length as { value?: number; value2?: number; modifier?: string };
+    const { modifier, value, value2 } = careerFilter;
+    // For BETWEEN, we need at least one bound; for other modifiers we need value
+    const hasValidFilter = (modifier === "BETWEEN" && (value !== undefined || value2 !== undefined)) ||
+                           (modifier !== "BETWEEN" && value !== undefined && value !== null);
+    if (hasValidFilter) {
+      filtered = filtered.filter((p) => {
+        const careerLength = parseCareerLength(p.career_length);
+        // Exclude performers with unparseable career_length
+        if (careerLength === null) return false;
+        if (modifier === "GREATER_THAN" && value !== undefined) return careerLength > value;
+        if (modifier === "LESS_THAN" && value !== undefined) return careerLength < value;
+        if (modifier === "EQUALS") return careerLength === value;
+        if (modifier === "NOT_EQUALS") return careerLength !== value;
+        if (modifier === "BETWEEN") {
+          // Support partial ranges (min only, max only, or both)
+          const minOk = value === undefined || value === null || careerLength >= value;
+          const maxOk = value2 === undefined || value2 === null || careerLength <= value2;
+          return minOk && maxOk;
+        }
+        return true;
+      });
+    }
+  }
+
+  // Filter by birthdate (date range)
+  if (filters.birthdate) {
+    const { modifier, value, value2 } = filters.birthdate;
+    filtered = filtered.filter((p) => {
+      if (!p.birthdate) return false;
+      const performerDate = new Date(p.birthdate);
+      if (!value) return false;
+      const filterDate = new Date(value);
+      if (modifier === "GREATER_THAN") return performerDate > filterDate;
+      if (modifier === "LESS_THAN") return performerDate < filterDate;
+      if (modifier === "EQUALS") {
+        return performerDate.toDateString() === filterDate.toDateString();
+      }
+      if (modifier === "BETWEEN") {
+        if (!value2) return false;
+        const filterDate2 = new Date(value2);
+        return performerDate >= filterDate && performerDate <= filterDate2;
+      }
+      return true;
+    });
+  }
+
+  // Filter by death_date (date range)
+  if (filters.death_date) {
+    const { modifier, value, value2 } = filters.death_date;
+    filtered = filtered.filter((p) => {
+      if (!p.death_date) return false;
+      const performerDate = new Date(p.death_date);
+      if (!value) return false;
+      const filterDate = new Date(value);
+      if (modifier === "GREATER_THAN") return performerDate > filterDate;
+      if (modifier === "LESS_THAN") return performerDate < filterDate;
+      if (modifier === "EQUALS") {
+        return performerDate.toDateString() === filterDate.toDateString();
+      }
+      if (modifier === "BETWEEN") {
+        if (!value2) return false;
+        const filterDate2 = new Date(value2);
+        return performerDate >= filterDate && performerDate <= filterDate2;
+      }
+      return true;
+    });
+  }
+
   return filtered;
 }
 
@@ -545,6 +937,7 @@ function getPerformerFieldValue(
   if (field === "last_played_at") return performer.last_played_at; // Return null as-is for timestamps
   if (field === "last_o_at") return performer.last_o_at; // Return null as-is for timestamps
   if (field === "random") return Math.random();
+  if (field === "height") return performer.height_cm || 0;
   // Fallback for dynamic field access (safe as function is only called with known fields)
   const value = (performer as Record<string, unknown>)[field];
   return typeof value === "string" || typeof value === "number" ? value : 0;
@@ -563,12 +956,12 @@ export const findPerformersMinimal = async (
     const sortDirection = filter?.direction || "ASC";
     const perPage = filter?.per_page || -1; // -1 means all results
 
-    let performers = stashCacheManager.getAllPerformers();
+    let performers = await stashEntityService.getAllPerformers();
 
     // Apply content restrictions & empty entity filtering with caching
     const requestingUser = req.user;
     const userId = req.user?.id;
-    const cacheVersion = stashCacheManager.getCacheVersion();
+    const cacheVersion = await stashEntityService.getCacheVersion();
 
     // Try to get filtered performers from cache
     let filteredPerformers = filteredEntityCacheService.get(
@@ -595,15 +988,15 @@ export const findPerformersMinimal = async (
       // Filter empty performers (non-admins only)
       if (requestingUser && requestingUser.role !== "ADMIN") {
         // CRITICAL FIX: Filter scenes first to get visibility baseline
-        let visibleScenes = stashCacheManager.getAllScenes();
+        let visibleScenes = await stashEntityService.getAllScenesWithPerformers();
         visibleScenes = await userRestrictionService.filterScenesForUser(
           visibleScenes,
           userId
         );
 
         // Get all entities from cache
-        let allGalleries = stashCacheManager.getAllGalleries();
-        let allGroups = stashCacheManager.getAllGroups();
+        let allGalleries = await stashEntityService.getAllGalleries();
+        let allGroups = await stashEntityService.getAllGroups();
 
         // Apply user restrictions to groups/galleries FIRST
         allGalleries = await userRestrictionService.filterGalleriesForUser(

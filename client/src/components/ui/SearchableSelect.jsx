@@ -26,7 +26,16 @@ const SearchableSelect = ({
   const [searchTerm, setSearchTerm] = useState("");
   const [options, setOptions] = useState([]);
   const [loading, setLoading] = useState(false);
-  const [selectedItems, setSelectedItems] = useState([]);
+  // Initialize selectedItems as empty - will be populated by useEffect when value has items
+  const [selectedItems, setSelectedItems] = useState(() => {
+    // Ensure we start with empty array if value is empty/undefined
+    if (!value || (Array.isArray(value) && value.length === 0)) {
+      return [];
+    }
+    // If value exists but we don't have names yet, return empty
+    // The useEffect will fetch the names
+    return [];
+  });
 
   const dropdownRef = useRef(null);
   const searchInputRef = useRef(null);
@@ -35,6 +44,11 @@ const SearchableSelect = ({
   // Fetch items by specific IDs (use full endpoints which support ID filtering)
   const fetchItemsByIds = useCallback(
     async (ids) => {
+      // Guard: don't fetch if no IDs provided
+      if (!ids || ids.length === 0) {
+        return [];
+      }
+
       try {
         let results;
 
@@ -83,7 +97,8 @@ const SearchableSelect = ({
 
   // Load selected items' names immediately when value exists (lazy load on page load)
   useEffect(() => {
-    if (!value) {
+    // Handle empty/null/undefined values - clear selected items
+    if (!value || (Array.isArray(value) && value.length === 0)) {
       setSelectedItems([]);
       return;
     }
@@ -256,6 +271,11 @@ const SearchableSelect = ({
     }
   };
 
+  const handleClearAll = (e) => {
+    e.stopPropagation(); // Don't toggle dropdown
+    onChange(multi ? [] : "");
+  };
+
   const isSelected = (optionId) => {
     if (multi) {
       return (value || []).includes(optionId);
@@ -311,13 +331,26 @@ const SearchableSelect = ({
             </div>
           )}
         </div>
-        <LucideChevronDown
-          size={14}
-          style={{
-            transform: isOpen ? "rotate(180deg)" : "rotate(0deg)",
-            transition: "transform 0.2s",
-          }}
-        />
+        <div className="flex items-center gap-1 flex-shrink-0">
+          {selectedItems.length > 0 && (
+            <Button
+              onClick={handleClearAll}
+              variant="tertiary"
+              className="hover:opacity-70 !p-1 !border-0"
+              aria-label="Clear all selections"
+              title="Clear all"
+              icon={<LucideX size={16} style={{ color: "var(--text-muted)" }} />}
+            />
+          )}
+          <LucideChevronDown
+            size={14}
+            style={{
+              transform: isOpen ? "rotate(180deg)" : "rotate(0deg)",
+              transition: "transform 0.2s",
+              color: "var(--text-muted)",
+            }}
+          />
+        </div>
       </div>
 
       {/* Dropdown */}

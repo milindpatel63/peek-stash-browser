@@ -1,5 +1,6 @@
 import React, { useState } from "react";
 import { setupApi } from "../../services/api.js";
+import { useAuth } from "../../hooks/useAuth.js";
 import { useTheme } from "../../themes/useTheme.js";
 import { Button } from "../ui/index.js";
 
@@ -377,14 +378,25 @@ const CompleteStep = ({ theme, onComplete }) => (
     </p>
 
     <Button onClick={onComplete} variant="primary" fullWidth size="lg">
-      Go to Login
+      Start Browsing
     </Button>
   </div>
 );
 
-const SetupWizard = ({ onSetupComplete }) => {
+const SetupWizard = ({ onSetupComplete, setupStatus }) => {
   const { theme } = useTheme();
-  const [currentStep, setCurrentStep] = useState(0);
+  const { login } = useAuth();
+  const [currentStep, setCurrentStep] = useState(() => {
+    // If both users and stash instance exist, go straight to complete
+    if (setupStatus?.hasUsers && setupStatus?.hasStashInstance) {
+      return 3; // Skip to Complete
+    }
+    // If users exist but no stash instance, skip to Stash config
+    if (setupStatus?.hasUsers && !setupStatus?.hasStashInstance) {
+      return 2; // Skip to Stash config
+    }
+    return 0; // Start from beginning
+  });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
@@ -418,7 +430,28 @@ const SetupWizard = ({ onSetupComplete }) => {
       const response = await setupApi.createFirstAdmin("admin", adminPassword);
 
       if (response.success) {
-        setCurrentStep(2);
+        // Auto-login with the just-created credentials using AuthContext
+        // This properly updates the authentication state to prevent redirect loops
+        try {
+          const loginResult = await login({
+            username: "admin",
+            password: adminPassword,
+          });
+          if (!loginResult.success) {
+            console.warn("Auto-login failed, user will need to log in manually");
+          }
+        } catch (loginErr) {
+          console.warn("Auto-login failed:", loginErr);
+        }
+        // Clear password from memory immediately for security
+        setAdminPassword("");
+        setConfirmPassword("");
+        // Skip Stash config step if instance already exists (e.g., from env vars)
+        if (setupStatus?.hasStashInstance) {
+          setCurrentStep(3); // Go to Complete
+        } else {
+          setCurrentStep(2); // Go to Stash config
+        }
       } else {
         setError(response.error || "Failed to create admin user");
       }
@@ -537,6 +570,18 @@ const SetupWizard = ({ onSetupComplete }) => {
       }}
     >
       <div className="max-w-2xl w-full">
+        {/* Resume setup message */}
+        {setupStatus?.hasUsers && currentStep === 2 && (
+          <div className="mb-4 p-4 rounded border-l-4" style={{
+            backgroundColor: theme?.properties?.["--bg-card"] || "#1f1f1f",
+            borderColor: theme?.properties?.["--accent-color"] || "#3b82f6",
+          }}>
+            <p style={{ color: theme?.properties?.["--text-primary"] || "#ffffff" }}>
+              Resuming setup - admin account already exists
+            </p>
+          </div>
+        )}
+
         {/* Progress indicator */}
         {currentStep < 3 && (
           <div className="mb-8">

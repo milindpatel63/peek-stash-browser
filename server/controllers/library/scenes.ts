@@ -1,14 +1,26 @@
 import type { Response } from "express";
 import { AuthenticatedRequest } from "../../middleware/auth.js";
 import prisma from "../../prisma/singleton.js";
-import { stashCacheManager } from "../../services/StashCacheManager.js";
+import { stashEntityService } from "../../services/StashEntityService.js";
 import { stashInstanceManager } from "../../services/StashInstanceManager.js";
 import { userRestrictionService } from "../../services/UserRestrictionService.js";
-import type { NormalizedScene, PeekSceneFilter } from "../../types/index.js";
+import { sceneQueryBuilder } from "../../services/SceneQueryBuilder.js";
+import {
+  buildDerivedWeightsFromScoringData,
+  scoreScoringDataByPreferences,
+  countUserCriteria,
+  hasAnyCriteria,
+  type LightweightEntityPreferences,
+  type SceneRatingInput,
+} from "../../services/RecommendationScoringService.js";
+import type { NormalizedScene, PeekSceneFilter, SceneScoringData } from "../../types/index.js";
 import { isSceneStreamable } from "../../utils/codecDetection.js";
 import { expandStudioIds, expandTagIds } from "../../utils/hierarchyUtils.js";
 import { logger } from "../../utils/logger.js";
 import { buildStashEntityUrl } from "../../utils/stashUrl.js";
+
+// Feature flag for SQL query builder
+const USE_SQL_QUERY_BUILDER = process.env.USE_SQL_QUERY_BUILDER !== "false";
 
 /**
  * Seeded random number generator for consistent shuffling per user
@@ -170,10 +182,10 @@ export function addStreamabilityInfo(
  * Apply quick scene filters (don't require merged user data)
  * These filters only access data already present in the scene object from cache
  */
-export function applyQuickSceneFilters(
+export async function applyQuickSceneFilters(
   scenes: NormalizedScene[],
   filters: PeekSceneFilter | null | undefined
-): NormalizedScene[] {
+): Promise<NormalizedScene[]> {
   if (!filters) return scenes;
 
   let filtered = scenes;
@@ -182,6 +194,11 @@ export function applyQuickSceneFilters(
   if (filters.ids && Array.isArray(filters.ids) && filters.ids.length > 0) {
     const idSet = new Set(filters.ids);
     filtered = filtered.filter((s) => idSet.has(s.id));
+    // Populate sceneStreams for detail views (browse queries return empty streams for performance)
+    filtered = filtered.map((s) => ({
+      ...s,
+      sceneStreams: s.sceneStreams?.length ? s.sceneStreams : stashEntityService.generateSceneStreams(s.id),
+    }));
   }
 
   // Filter by performers
@@ -218,10 +235,19 @@ export function applyQuickSceneFilters(
 
     // Expand tag IDs to include descendants if depth is specified
     // depth: 0 or undefined = exact match, -1 = all descendants, N = N levels deep
-    const expandedTagIds = expandTagIds(
+    const expandedTagIds = await expandTagIds(
       tagIds.map((id) => String(id)),
       depth ?? 0
     );
+
+    // Pre-compute expanded sets for each individual tag (needed for INCLUDES_ALL)
+    const expandedTagSets = new Map<string, string[]>();
+    if (modifier === "INCLUDES_ALL") {
+      for (const originalTagId of tagIds) {
+        const expanded = await expandTagIds([String(originalTagId)], depth ?? 0);
+        expandedTagSets.set(String(originalTagId), expanded);
+      }
+    }
 
     filtered = filtered.filter((s) => {
       // Collect all tag IDs from scene, performers, and studio
@@ -247,10 +273,7 @@ export function applyQuickSceneFilters(
         // For INCLUDES_ALL with hierarchy, we check that the scene has at least
         // one tag from each original filter tag's expanded set
         return tagIds.every((originalTagId) => {
-          const expandedForThisTag = expandTagIds(
-            [String(originalTagId)],
-            depth ?? 0
-          );
+          const expandedForThisTag = expandedTagSets.get(String(originalTagId)) || [];
           return expandedForThisTag.some((id) => allTagIds.has(id));
         });
       }
@@ -270,7 +293,7 @@ export function applyQuickSceneFilters(
     // Expand studio IDs to include descendants if depth is specified
     // depth: 0 or undefined = exact match, -1 = all descendants, N = N levels deep
     const expandedStudioIds = new Set(
-      expandStudioIds(
+      await expandStudioIds(
         studioIds.map((id) => String(id)),
         depth ?? 0
       )
@@ -826,6 +849,7 @@ function getFieldValue(
   if (field === "duration") return scene.files?.[0]?.duration || 0;
   if (field === "filesize") return scene.files?.[0]?.size || 0;
   if (field === "framerate") return scene.files?.[0]?.frame_rate || 0;
+  if (field === "path") return scene.files?.[0]?.path || "";
 
   // Fallback for dynamic field access (safe as function is only called with known fields)
   const value = (scene as Record<string, unknown>)[field];
@@ -836,8 +860,13 @@ function getFieldValue(
  * Simplified findScenes using cache with pagination-aware filtering
  */
 export const findScenes = async (req: AuthenticatedRequest, res: Response) => {
+  const requestStart = Date.now();
   try {
     const userId = req.user?.id;
+    if (!userId) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
     const { filter, scene_filter, ids } = req.body;
 
     const sortField = filter?.sort || "created_at";
@@ -846,8 +875,124 @@ export const findScenes = async (req: AuthenticatedRequest, res: Response) => {
     const perPage = filter?.per_page || 40;
     const searchQuery = filter?.q || "";
 
+    const mergedFilter = { ...scene_filter, ids: ids || scene_filter?.ids };
+    const requestingUser = req.user;
+
+    // NEW: Use SQL query builder if enabled
+    if (USE_SQL_QUERY_BUILDER && !searchQuery) {
+      logger.info("findScenes: using SQL query builder path");
+
+      // Get excluded scene IDs
+      const excludedIds = await userRestrictionService.getExcludedSceneIds(
+        userId,
+        requestingUser?.role === 'ADMIN'
+      );
+
+      // Build filters object
+      const filters: PeekSceneFilter = { ...scene_filter };
+      if (ids && ids.length > 0) {
+        filters.ids = { value: ids, modifier: "INCLUDES" };
+      }
+
+      // Execute query
+      const result = await sceneQueryBuilder.execute({
+        userId,
+        filters,
+        excludedSceneIds: excludedIds,
+        sort: sortField,
+        sortDirection: sortDirection.toUpperCase() as "ASC" | "DESC",
+        page,
+        perPage,
+        randomSeed: userId, // Stable random per user
+      });
+
+      // Add streamability info
+      const scenes = addStreamabilityInfo(result.scenes);
+
+      logger.info("findScenes complete (SQL path)", {
+        totalTimeMs: Date.now() - requestStart,
+        resultCount: scenes.length,
+        total: result.total,
+      });
+
+      return res.json({
+        findScenes: {
+          count: result.total,
+          scenes,
+        },
+      });
+    }
+
+    // Check if we can use the FAST PATH (pure DB pagination)
+    // Fast path requires: no search, no filters, simple sort field
+    // Now works for ALL users (admins and regular users) with pre-computed exclusions
+    const dbSortFields = new Set(['created_at', 'updated_at', 'date', 'title', 'duration', 'filesize', 'bitrate', 'framerate']);
+
+    // Check if scene_filter has any actual filter properties (not just an empty object)
+    const hasSceneFilters = scene_filter && Object.keys(scene_filter).length > 0;
+
+    const canUseDbPagination =
+      !searchQuery &&
+      !ids &&
+      !hasSceneFilters &&
+      dbSortFields.has(sortField);
+
+    // Debug logging to understand why fast path is/isn't used
+    logger.info(`findScenes: fast path check - searchQuery=${!!searchQuery}, ids=${!!ids}, hasSceneFilters=${hasSceneFilters}, sortField=${sortField}, inDbSortFields=${dbSortFields.has(sortField)}, canUse=${canUseDbPagination}`);
+
+    if (canUseDbPagination) {
+      // FAST PATH: Database pagination with pre-computed exclusions (sub-second response)
+      logger.info('findScenes: using FAST PATH (DB pagination with exclusions)');
+
+      // Pre-compute excluded scene IDs at DB level (much faster than loading all scenes)
+      const exclusionStart = Date.now();
+      const excludeIds = await userRestrictionService.getExcludedSceneIds(
+        userId,
+        requestingUser?.role === 'ADMIN' // Skip content restrictions for admins (but still apply hidden entities)
+      );
+      logger.info(`findScenes: getExcludedSceneIds took ${Date.now() - exclusionStart}ms (${excludeIds.size} exclusions)`);
+
+      const dbStart = Date.now();
+      const { scenes: paginatedScenes, total } = await stashEntityService.getScenesPaginated({
+        page,
+        perPage,
+        sortField,
+        sortDirection: sortDirection.toUpperCase() as 'ASC' | 'DESC',
+        excludeIds,
+      });
+      logger.info(`findScenes: DB pagination took ${Date.now() - dbStart}ms`);
+
+      // Merge user data for paginated scenes only
+      const mergeStart = Date.now();
+      const scenesWithUserData = await mergeScenesWithUserData(paginatedScenes, userId);
+      logger.info(`findScenes: merge user data took ${Date.now() - mergeStart}ms (${paginatedScenes.length} scenes)`);
+
+      // Add streamability info
+      const scenesWithStreamability = addStreamabilityInfo(scenesWithUserData);
+
+      logger.info(`findScenes: TOTAL request took ${Date.now() - requestStart}ms (FAST PATH)`);
+
+      return res.json({
+        findScenes: {
+          count: total,
+          scenes: scenesWithStreamability,
+        },
+      });
+    }
+
+    // STANDARD PATH: Load all scenes and filter in memory
+    // Pre-compute excluded scene IDs at DB level (fast Set lookup instead of nested entity checks)
+    const exclusionStart = Date.now();
+    const excludeIds = await userRestrictionService.getExcludedSceneIds(
+      userId,
+      requestingUser?.role === 'ADMIN' // Skip content restrictions for admins
+    );
+    logger.info(`findScenes: getExcludedSceneIds took ${Date.now() - exclusionStart}ms (${excludeIds.size} exclusions)`);
+
     // Step 1: Get all scenes from cache
-    let scenes = stashCacheManager.getAllScenes();
+    const cacheStart = Date.now();
+    let scenes = await stashEntityService.getAllScenes();
+    logger.info(`findScenes: cache fetch took ${Date.now() - cacheStart}ms for ${scenes.length} scenes`);
 
     if (scenes.length === 0) {
       logger.warn("Cache not initialized, returning empty result");
@@ -858,6 +1003,11 @@ export const findScenes = async (req: AuthenticatedRequest, res: Response) => {
         },
       });
     }
+
+    // Apply pre-computed exclusions immediately (fast Set lookup)
+    const preFilterStart = Date.now();
+    scenes = scenes.filter(s => !excludeIds.has(s.id));
+    logger.info(`findScenes: applied ${excludeIds.size} exclusions in ${Date.now() - preFilterStart}ms, ${scenes.length} scenes remaining`);
 
     // Determine if we can use optimized pipeline
     // Expensive sort fields require user data, so we must merge all scenes first
@@ -884,15 +1034,14 @@ export const findScenes = async (req: AuthenticatedRequest, res: Response) => {
       scene_filter?.studio_favorite !== undefined ||
       scene_filter?.tag_favorite !== undefined;
 
-    const mergedFilter = { ...scene_filter, ids: ids || scene_filter?.ids };
-    const requestingUser = req.user;
-
     if (requiresUserDataForSort || hasExpensiveFilters) {
       // OLD PIPELINE: Merge all → filter → sort → paginate
       // (Required when sorting/filtering by user-specific data)
 
       // Step 2: Merge with user data (all scenes)
+      const mergeStart = Date.now();
       scenes = await mergeScenesWithUserData(scenes, userId);
+      logger.info(`findScenes: merge user data took ${Date.now() - mergeStart}ms`);
 
       // Step 3: Apply search query
       if (searchQuery) {
@@ -917,21 +1066,18 @@ export const findScenes = async (req: AuthenticatedRequest, res: Response) => {
       }
 
       // Step 4: Apply all filters (quick + expensive)
-      scenes = applyQuickSceneFilters(scenes, mergedFilter);
+      const filterStart = Date.now();
+      scenes = await applyQuickSceneFilters(scenes, mergedFilter);
       scenes = applyExpensiveSceneFilters(scenes, mergedFilter);
+      logger.info(`findScenes: filters took ${Date.now() - filterStart}ms`);
 
-      // Step 5: Apply content restrictions and hidden entity filtering
-      // Hidden entities are ALWAYS filtered (for all users including admins)
-      // Content restrictions (INCLUDE/EXCLUDE) are only applied to non-admins
-      scenes = await userRestrictionService.filterScenesForUser(
-        scenes,
-        userId,
-        requestingUser?.role === "ADMIN" // Skip content restrictions for admins
-      );
+      // Note: Exclusions already applied via pre-computed excludeIds above
 
       // Step 6: Sort
+      const sortStart = Date.now();
       const groupIdForSort = scene_filter?.groups?.value?.[0];
       scenes = sortScenes(scenes, sortField, sortDirection, groupIdForSort);
+      logger.info(`findScenes: sort took ${Date.now() - sortStart}ms`);
 
       // Step 7: Paginate
       const total = scenes.length;
@@ -941,6 +1087,8 @@ export const findScenes = async (req: AuthenticatedRequest, res: Response) => {
 
       // Step 8: Add streamability information
       const scenesWithStreamability = addStreamabilityInfo(paginatedScenes);
+
+      logger.info(`findScenes: TOTAL request took ${Date.now() - requestStart}ms (expensive pipeline)`);
 
       return res.json({
         findScenes: {
@@ -975,20 +1123,17 @@ export const findScenes = async (req: AuthenticatedRequest, res: Response) => {
       }
 
       // Step 3: Apply quick filters (don't need user data)
-      scenes = applyQuickSceneFilters(scenes, mergedFilter);
+      const filterStart = Date.now();
+      scenes = await applyQuickSceneFilters(scenes, mergedFilter);
+      logger.info(`findScenes: quick filters took ${Date.now() - filterStart}ms`);
 
-      // Step 4: Apply content restrictions and hidden entity filtering
-      // Hidden entities are ALWAYS filtered (for all users including admins)
-      // Content restrictions (INCLUDE/EXCLUDE) are only applied to non-admins
-      scenes = await userRestrictionService.filterScenesForUser(
-        scenes,
-        userId,
-        requestingUser?.role === "ADMIN" // Skip content restrictions for admins
-      );
+      // Note: Exclusions already applied via pre-computed excludeIds above
 
-      // Step 5: Sort (using quick sort fields only)
+      // Step 4: Sort (using quick sort fields only)
+      const sortStart = Date.now();
       const groupIdForSort = scene_filter?.groups?.value?.[0];
       scenes = sortScenes(scenes, sortField, sortDirection, groupIdForSort);
+      logger.info(`findScenes: sort took ${Date.now() - sortStart}ms`);
 
       // Step 6: Paginate BEFORE merging user data
       const total = scenes.length;
@@ -997,10 +1142,12 @@ export const findScenes = async (req: AuthenticatedRequest, res: Response) => {
       const paginatedScenes = scenes.slice(startIndex, endIndex);
 
       // Step 7: Merge user data (ONLY for paginated scenes - huge win!)
+      const mergeStart = Date.now();
       const scenesWithUserData = await mergeScenesWithUserData(
         paginatedScenes,
         userId
       );
+      logger.info(`findScenes: merge user data took ${Date.now() - mergeStart}ms (${paginatedScenes.length} scenes)`);
 
       // Step 8: Apply expensive filters (shouldn't match anything since no expensive filters)
       // Included for completeness, will be no-op
@@ -1011,6 +1158,8 @@ export const findScenes = async (req: AuthenticatedRequest, res: Response) => {
 
       // Step 9: Add streamability information
       const scenesWithStreamability = addStreamabilityInfo(finalScenes);
+
+      logger.info(`findScenes: TOTAL request took ${Date.now() - requestStart}ms (optimized pipeline)`);
 
       return res.json({
         findScenes: {
@@ -1064,8 +1213,12 @@ export const updateScene = async (req: AuthenticatedRequest, res: Response) => {
 /**
  * Find similar scenes based on weighted scoring
  * Performers: 3 points each
- * Tags: 1 point each (squashed from scene, performers, studio)
+ * Tags: 1 point each
  * Studio: 1 point
+ *
+ * Uses two-phase query:
+ * 1. Lightweight scoring query to score all scenes
+ * 2. SceneQueryBuilder to fetch final results with relations
  */
 export const findSimilarScenes = async (
   req: AuthenticatedRequest,
@@ -1074,58 +1227,37 @@ export const findSimilarScenes = async (
   try {
     const { id } = req.params;
     const page = parseInt(req.query.page as string) || 1;
-    const perPage = 12; // Fixed at 12 scenes per page
+    const perPage = 12;
     const userId = req.user?.id;
 
     if (!userId) {
       return res.status(401).json({ error: "User not authenticated" });
     }
 
-    // Get all scenes from cache and filter hidden entities
-    // All users (including admins) should have their hidden entities filtered
-    let allScenes = stashCacheManager.getAllScenes();
-    allScenes = await userRestrictionService.filterScenesForUser(
-      allScenes,
-      userId,
-      true // Skip content restrictions - just filter hidden entities
+    // Get excluded scene IDs for this user
+    const excludedIds = await userRestrictionService.getExcludedSceneIds(userId, true);
+
+    // Phase 1: Get lightweight scoring data
+    const allScoringData = await stashEntityService.getScenesForScoring();
+
+    // Filter out excluded scenes and current scene
+    const scoringData = allScoringData.filter(
+      s => s.id !== id && !excludedIds.has(s.id)
     );
 
-    // Find the current scene
-    const currentScene = allScenes.find((s: NormalizedScene) => s.id === id);
+    // Find the current scene's data
+    const currentScene = allScoringData.find(s => s.id === id);
     if (!currentScene) {
       return res.status(404).json({ error: "Scene not found" });
     }
 
-    // Helper to get squashed tags (scene + performers + studio)
-    const getSquashedTagIds = (scene: NormalizedScene): Set<string> => {
-      const tagIds = new Set<string>();
+    // Check if current scene has any metadata
+    const hasMetadata =
+      currentScene.performerIds.length > 0 ||
+      currentScene.studioId ||
+      currentScene.tagIds.length > 0;
 
-      // Scene tags
-      (scene.tags || []).forEach((t) => tagIds.add(String(t.id)));
-
-      // Performer tags
-      (scene.performers || []).forEach((p) => {
-        (p.tags || []).forEach((t) => tagIds.add(String(t.id)));
-      });
-
-      // Studio tags
-      if (scene.studio?.tags) {
-        scene.studio.tags.forEach((t) => tagIds.add(String(t.id)));
-      }
-
-      return tagIds;
-    };
-
-    // Check if scene has any metadata
-    const hasMetadata = (scene: NormalizedScene): boolean => {
-      const hasPerformers = scene.performers && scene.performers.length > 0;
-      const hasStudio = !!scene.studio;
-      const hasTags = getSquashedTagIds(scene).size > 0;
-      return hasPerformers || hasStudio || hasTags;
-    };
-
-    // If current scene has no metadata, return empty results
-    if (!hasMetadata(currentScene)) {
+    if (!hasMetadata) {
       return res.json({
         scenes: [],
         count: 0,
@@ -1134,86 +1266,86 @@ export const findSimilarScenes = async (
       });
     }
 
-    // Get current scene's metadata
-    const currentPerformerIds = new Set(
-      (currentScene.performers || []).map((p) => String(p.id))
-    );
-    const currentStudioId = currentScene.studio?.id
-      ? String(currentScene.studio.id)
-      : null;
-    const currentTagIds = getSquashedTagIds(currentScene);
+    // Build sets for fast lookup
+    const currentPerformerIds = new Set(currentScene.performerIds);
+    const currentTagIds = new Set(currentScene.tagIds);
+    const currentStudioId = currentScene.studioId;
 
-    // Calculate similarity scores for all other scenes
+    // Score all scenes
     interface ScoredScene {
-      scene: NormalizedScene;
+      id: string;
       score: number;
+      date: string | null;
     }
 
     const scoredScenes: ScoredScene[] = [];
 
-    for (const scene of allScenes) {
-      // Skip current scene
-      if (scene.id === id) continue;
-
-      // Skip scenes with no metadata
-      if (!hasMetadata(scene)) continue;
-
+    for (const scene of scoringData) {
       let score = 0;
 
       // Score for matching performers (3 points each)
-      if (scene.performers) {
-        for (const performer of scene.performers) {
-          if (currentPerformerIds.has(String(performer.id))) {
-            score += 3;
-          }
+      for (const performerId of scene.performerIds) {
+        if (currentPerformerIds.has(performerId)) {
+          score += 3;
         }
       }
 
       // Score for matching studio (1 point)
-      if (currentStudioId && scene.studio?.id === currentStudioId) {
+      if (currentStudioId && scene.studioId === currentStudioId) {
         score += 1;
       }
 
       // Score for matching tags (1 point each)
-      const sceneTagIds = getSquashedTagIds(scene);
-      for (const tagId of currentTagIds) {
-        if (sceneTagIds.has(tagId)) {
+      for (const tagId of scene.tagIds) {
+        if (currentTagIds.has(tagId)) {
           score += 1;
         }
       }
 
-      // Only include scenes with at least some similarity
       if (score > 0) {
-        scoredScenes.push({ scene, score });
+        scoredScenes.push({ id: scene.id, score, date: scene.date });
       }
     }
 
-    // Sort by score descending, then by date descending as tiebreaker
+    // Sort by score descending, then by date descending
     scoredScenes.sort((a, b) => {
       if (b.score !== a.score) {
         return b.score - a.score;
       }
-      // Tiebreaker: newer scenes first
-      const dateA = a.scene.date ? new Date(a.scene.date).getTime() : 0;
-      const dateB = b.scene.date ? new Date(b.scene.date).getTime() : 0;
+      const dateA = a.date ? new Date(a.date).getTime() : 0;
+      const dateB = b.date ? new Date(b.date).getTime() : 0;
       return dateB - dateA;
     });
 
-    // Paginate results
+    // Paginate
     const startIndex = (page - 1) * perPage;
-    const endIndex = startIndex + perPage;
-    const paginatedScenes = scoredScenes
-      .slice(startIndex, endIndex)
-      .map((s) => s.scene);
+    const paginatedIds = scoredScenes
+      .slice(startIndex, startIndex + perPage)
+      .map(s => s.id);
 
-    // Merge with user data
-    const scenesWithUserData = await mergeScenesWithUserData(
-      paginatedScenes,
-      userId
-    );
+    if (paginatedIds.length === 0) {
+      return res.json({
+        scenes: [],
+        count: scoredScenes.length,
+        page,
+        perPage,
+      });
+    }
+
+    // Phase 2: Fetch full scene data via SceneQueryBuilder
+    const { scenes } = await sceneQueryBuilder.getByIds({
+      userId,
+      ids: paginatedIds,
+    });
+
+    // Preserve score order (getByIds may return in different order)
+    const sceneMap = new Map(scenes.map(s => [s.id, s]));
+    const orderedScenes = paginatedIds
+      .map(id => sceneMap.get(id))
+      .filter((s): s is NormalizedScene => s !== undefined);
 
     res.json({
-      scenes: scenesWithUserData,
+      scenes: orderedScenes,
       count: scoredScenes.length,
       page,
       perPage,
@@ -1227,6 +1359,10 @@ export const findSimilarScenes = async (
 /**
  * Get recommended scenes based on user preferences and watch history
  * Uses favorites, ratings (80+), watch status, and engagement quality
+ *
+ * Two-phase query architecture:
+ * 1. Lightweight scoring: Score all scenes using IDs only (SceneScoringData)
+ * 2. Full fetch: Get complete scene data for paginated results via SceneQueryBuilder
  */
 export const getRecommendedScenes = async (
   req: AuthenticatedRequest,
@@ -1241,14 +1377,24 @@ export const getRecommendedScenes = async (
       return res.status(401).json({ error: "User not authenticated" });
     }
 
-    // Fetch user ratings and watch history
-    const [performerRatings, studioRatings, tagRatings, watchHistory] =
-      await Promise.all([
-        prisma.performerRating.findMany({ where: { userId } }),
-        prisma.studioRating.findMany({ where: { userId } }),
-        prisma.tagRating.findMany({ where: { userId } }),
-        prisma.watchHistory.findMany({ where: { userId } }),
-      ]);
+    // Fetch user ratings, watch history, and lightweight scoring data in parallel
+    const [
+      performerRatings,
+      studioRatings,
+      tagRatings,
+      sceneRatings,
+      watchHistory,
+      allScoringData,
+      excludedIds,
+    ] = await Promise.all([
+      prisma.performerRating.findMany({ where: { userId } }),
+      prisma.studioRating.findMany({ where: { userId } }),
+      prisma.tagRating.findMany({ where: { userId } }),
+      prisma.sceneRating.findMany({ where: { userId } }),
+      prisma.watchHistory.findMany({ where: { userId } }),
+      stashEntityService.getScenesForScoring(),
+      userRestrictionService.getExcludedSceneIds(userId, true),
+    ]);
 
     // Build sets of favorite and highly-rated entities
     const favoritePerformers = new Set(
@@ -1276,23 +1422,23 @@ export const getRecommendedScenes = async (
         .map((r) => r.tagId)
     );
 
-    // Check if user has any favorites or highly-rated entities
-    const hasCriteria =
-      favoritePerformers.size > 0 ||
-      highlyRatedPerformers.size > 0 ||
-      favoriteStudios.size > 0 ||
-      highlyRatedStudios.size > 0 ||
-      favoriteTags.size > 0 ||
-      highlyRatedTags.size > 0;
+    // Count user criteria for feedback
+    const criteriaCounts = countUserCriteria(
+      performerRatings,
+      studioRatings,
+      tagRatings,
+      sceneRatings
+    );
 
-    if (!hasCriteria) {
+    // Check if user has any criteria (now includes scenes)
+    if (!hasAnyCriteria(criteriaCounts)) {
       return res.json({
         scenes: [],
         count: 0,
         page,
         perPage,
-        message:
-          "Rate or favorite some performers, studios, or tags to get recommendations",
+        message: "No recommendations yet",
+        criteria: criteriaCounts,
       });
     }
 
@@ -1317,138 +1463,60 @@ export const getRecommendedScenes = async (
       })
     );
 
-    // Get all scenes and filter hidden entities
-    // All users (including admins) should have their hidden entities filtered
-    let allScenes = stashCacheManager.getAllScenes();
-    allScenes = await userRestrictionService.filterScenesForUser(
-      allScenes,
-      userId,
-      true // Skip content restrictions - just filter hidden entities
-    );
+    // Filter excluded scenes from scoring data
+    const scoringData = allScoringData.filter((s) => !excludedIds.has(s.id));
 
-    // Helper to get tags by source (weighted to reduce squashing inflation)
-    const getTagsBySource = (scene: NormalizedScene) => {
-      const sceneTags = new Set<string>();
-      const performerTags = new Set<string>();
-      const studioTags = new Set<string>();
+    // Build derived weights from rated/favorited scenes using lightweight data
+    const sceneRatingsForDerived: SceneRatingInput[] = sceneRatings.map((r) => ({
+      sceneId: r.sceneId,
+      rating: r.rating,
+      favorite: r.favorite,
+    }));
 
-      (scene.tags || []).forEach((t) => sceneTags.add(String(t.id)));
-      (scene.performers || []).forEach((p) => {
-        (p.tags || []).forEach((t) => performerTags.add(String(t.id)));
-      });
-      if (scene.studio?.tags) {
-        scene.studio.tags.forEach((t) => studioTags.add(String(t.id)));
-      }
+    const scoringDataMap = new Map(scoringData.map((s) => [s.id, s]));
+    const getScoringDataById = (id: string) => scoringDataMap.get(id);
 
-      return { sceneTags, performerTags, studioTags };
+    const {
+      derivedPerformerWeights,
+      derivedStudioWeights,
+      derivedTagWeights,
+    } = buildDerivedWeightsFromScoringData(sceneRatingsForDerived, getScoringDataById);
+
+    // Build entity preferences object
+    const prefs: LightweightEntityPreferences = {
+      favoritePerformers,
+      highlyRatedPerformers,
+      favoriteStudios,
+      highlyRatedStudios,
+      favoriteTags,
+      highlyRatedTags,
+      derivedPerformerWeights,
+      derivedStudioWeights,
+      derivedTagWeights,
     };
 
-    // Score all scenes
-    interface ScoredScene {
-      scene: NormalizedScene;
+    // Phase 1: Score all scenes using lightweight data
+    interface ScoredSceneId {
+      id: string;
       score: number;
+      oCounter: number;
     }
 
-    const scoredScenes: ScoredScene[] = [];
+    const scoredScenes: ScoredSceneId[] = [];
     const now = new Date();
 
-    for (const scene of allScenes) {
-      let baseScore = 0;
-
-      // Score performers with diminishing returns (sqrt scaling)
-      if (scene.performers) {
-        let favoritePerformerCount = 0;
-        let highlyRatedPerformerCount = 0;
-
-        for (const performer of scene.performers) {
-          const performerId = String(performer.id);
-          if (favoritePerformers.has(performerId)) {
-            favoritePerformerCount++;
-          } else if (highlyRatedPerformers.has(performerId)) {
-            highlyRatedPerformerCount++;
-          }
-        }
-
-        // Diminishing returns: sqrt scaling
-        // 1 performer = 5 pts, 4 = 10 pts, 9 = 15 pts (not linear)
-        if (favoritePerformerCount > 0) {
-          baseScore += 5 * Math.sqrt(favoritePerformerCount);
-        }
-        if (highlyRatedPerformerCount > 0) {
-          baseScore += 3 * Math.sqrt(highlyRatedPerformerCount);
-        }
-      }
-
-      // Score studio (already capped at 1 per scene)
-      if (scene.studio) {
-        const studioId = String(scene.studio.id);
-        if (favoriteStudios.has(studioId)) {
-          baseScore += 3;
-        } else if (highlyRatedStudios.has(studioId)) {
-          baseScore += 2;
-        }
-      }
-
-      // Score tags with source weighting and diminishing returns
-      const { sceneTags, performerTags, studioTags } = getTagsBySource(scene);
-
-      let favoriteSceneTagCount = 0;
-      let favoritePerformerTagCount = 0;
-      let favoriteStudioTagCount = 0;
-      let ratedSceneTagCount = 0;
-      let ratedPerformerTagCount = 0;
-      let ratedStudioTagCount = 0;
-
-      for (const tagId of sceneTags) {
-        if (favoriteTags.has(tagId)) favoriteSceneTagCount++;
-        else if (highlyRatedTags.has(tagId)) ratedSceneTagCount++;
-      }
-      for (const tagId of performerTags) {
-        if (!sceneTags.has(tagId)) {
-          // Don't double-count
-          if (favoriteTags.has(tagId)) favoritePerformerTagCount++;
-          else if (highlyRatedTags.has(tagId)) ratedPerformerTagCount++;
-        }
-      }
-      for (const tagId of studioTags) {
-        if (!sceneTags.has(tagId) && !performerTags.has(tagId)) {
-          // Don't double-count
-          if (favoriteTags.has(tagId)) favoriteStudioTagCount++;
-          else if (highlyRatedTags.has(tagId)) ratedStudioTagCount++;
-        }
-      }
-
-      // Weighted tag scores with diminishing returns
-      // Scene tags: Full value (1.0x weight)
-      // Performer tags: Reduced value (0.3x weight)
-      // Studio tags: Medium value (0.5x weight)
-      if (favoriteSceneTagCount > 0) {
-        baseScore += 1.0 * Math.sqrt(favoriteSceneTagCount);
-      }
-      if (favoritePerformerTagCount > 0) {
-        baseScore += 0.3 * Math.sqrt(favoritePerformerTagCount);
-      }
-      if (favoriteStudioTagCount > 0) {
-        baseScore += 0.5 * Math.sqrt(favoriteStudioTagCount);
-      }
-      if (ratedSceneTagCount > 0) {
-        baseScore += 0.5 * Math.sqrt(ratedSceneTagCount);
-      }
-      if (ratedPerformerTagCount > 0) {
-        baseScore += 0.15 * Math.sqrt(ratedPerformerTagCount);
-      }
-      if (ratedStudioTagCount > 0) {
-        baseScore += 0.25 * Math.sqrt(ratedStudioTagCount);
-      }
+    for (const data of scoringData) {
+      const baseScore = scoreScoringDataByPreferences(data, prefs);
 
       // Skip if no base score (doesn't match any criteria)
       if (baseScore === 0) continue;
 
       // Watch status modifier (reduced dominance: was +100/-100, now +30/-30)
-      const watchData = watchMap.get(scene.id);
+      let adjustedScore = baseScore;
+      const watchData = watchMap.get(data.id);
       if (!watchData || watchData.playCount === 0) {
         // Never watched
-        baseScore += 30;
+        adjustedScore += 30;
       } else if (watchData.lastPlayedAt) {
         const daysSinceWatched =
           (now.getTime() - watchData.lastPlayedAt.getTime()) /
@@ -1456,24 +1524,23 @@ export const getRecommendedScenes = async (
 
         if (daysSinceWatched > 14) {
           // Not recently watched
-          baseScore += 20;
+          adjustedScore += 20;
         } else if (daysSinceWatched >= 1) {
           // Recently watched (1-14 days)
-          baseScore -= 10;
+          adjustedScore -= 10;
         } else {
           // Very recently watched (<24 hours)
-          baseScore -= 30;
+          adjustedScore -= 30;
         }
       }
 
       // Engagement quality multiplier
-      const oCounter = scene.o_counter || 0;
-      const engagementMultiplier = 1.0 + Math.min(oCounter, 10) * 0.03;
-      const finalScore = baseScore * engagementMultiplier;
+      const engagementMultiplier = 1.0 + Math.min(data.oCounter, 10) * 0.03;
+      const finalScore = adjustedScore * engagementMultiplier;
 
       // Only include scenes with positive final scores
       if (finalScore > 0) {
-        scoredScenes.push({ scene, score: finalScore });
+        scoredScenes.push({ id: data.id, score: finalScore, oCounter: data.oCounter });
       }
     }
 
@@ -1483,7 +1550,7 @@ export const getRecommendedScenes = async (
     // Add diversity through score tier randomization
     // Group scenes into score tiers (10% bands) and randomize within each tier
     // This creates variety while maintaining general quality order
-    const diversifiedScenes: ScoredScene[] = [];
+    const diversifiedScenes: ScoredSceneId[] = [];
     if (scoredScenes.length > 0) {
       const maxScore = scoredScenes[0].score;
       const minScore = scoredScenes[scoredScenes.length - 1].score;
@@ -1491,7 +1558,7 @@ export const getRecommendedScenes = async (
       const tierSize = scoreRange / 10; // 10 tiers
 
       // Group scenes by tier
-      const tiers: ScoredScene[][] = Array.from({ length: 10 }, () => []);
+      const tiers: ScoredSceneId[][] = Array.from({ length: 10 }, () => []);
       for (const scoredScene of scoredScenes) {
         const tierIndex = Math.min(
           9,
@@ -1518,29 +1585,54 @@ export const getRecommendedScenes = async (
     // Cap at top 500 recommendations
     const cappedScenes = diversifiedScenes.slice(0, 500);
 
-    // Paginate
+    // If no recommendations after scoring, include criteria for feedback
+    if (cappedScenes.length === 0) {
+      return res.json({
+        scenes: [],
+        count: 0,
+        page,
+        perPage,
+        message: "No matching recommendations found",
+        criteria: criteriaCounts,
+      });
+    }
+
+    // Paginate scene IDs
     const startIndex = (page - 1) * perPage;
     const endIndex = startIndex + perPage;
-    const paginatedScenes = cappedScenes
-      .slice(startIndex, endIndex)
-      .map((s) => s.scene);
+    const paginatedIds = cappedScenes.slice(startIndex, endIndex).map((s) => s.id);
 
-    // Merge with user data
-    const scenesWithUserData = await mergeScenesWithUserData(
-      paginatedScenes,
-      userId
-    );
+    // Phase 2: Fetch full scene data via SceneQueryBuilder
+    const { scenes } = await sceneQueryBuilder.getByIds({
+      userId,
+      ids: paginatedIds,
+    });
+
+    // Preserve score order (getByIds returns in arbitrary order)
+    const sceneMap = new Map(scenes.map((s) => [s.id, s]));
+    const orderedScenes = paginatedIds
+      .map((id) => sceneMap.get(id))
+      .filter((s): s is NormalizedScene => s !== undefined);
 
     res.json({
-      scenes: scenesWithUserData,
+      scenes: orderedScenes,
       count: cappedScenes.length,
       page,
       perPage,
     });
   } catch (error) {
+    const err = error as Error;
     logger.error("Error getting recommended scenes:", {
-      error: error as Error,
+      message: err.message,
+      name: err.name,
+      stack: err.stack,
+      userId: req.user?.id,
     });
-    res.status(500).json({ error: "Failed to get recommended scenes" });
+
+    const errorType = err.name || "Unknown error";
+    res.status(500).json({
+      error: "Failed to get recommended scenes",
+      errorType,
+    });
   }
 };

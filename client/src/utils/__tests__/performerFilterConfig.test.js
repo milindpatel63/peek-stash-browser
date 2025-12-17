@@ -184,39 +184,39 @@ describe("buildPerformerFilter", () => {
   });
 
   describe("Select Filters (Ethnicity, Hair Color, Eye Color, Fake Tits)", () => {
-    it("should build ethnicity filter with INCLUDES modifier", () => {
+    it("should build ethnicity filter with EQUALS modifier", () => {
       const uiFilters = { ethnicity: "asian" };
       const result = buildPerformerFilter(uiFilters);
       expect(result.ethnicity).toEqual({
         value: "asian",
-        modifier: "INCLUDES",
+        modifier: "EQUALS",
       });
     });
 
-    it("should build hair_color filter with INCLUDES modifier", () => {
+    it("should build hair_color filter with EQUALS modifier", () => {
       const uiFilters = { hairColor: "blonde" };
       const result = buildPerformerFilter(uiFilters);
       expect(result.hair_color).toEqual({
         value: "blonde",
-        modifier: "INCLUDES",
+        modifier: "EQUALS",
       });
     });
 
-    it("should build eye_color filter with INCLUDES modifier", () => {
+    it("should build eye_color filter with EQUALS modifier", () => {
       const uiFilters = { eyeColor: "blue" };
       const result = buildPerformerFilter(uiFilters);
       expect(result.eye_color).toEqual({
         value: "blue",
-        modifier: "INCLUDES",
+        modifier: "EQUALS",
       });
     });
 
-    it("should build fake_tits filter with INCLUDES modifier", () => {
-      const uiFilters = { fakeTits: "Yes" };
+    it("should build fake_tits filter with EQUALS modifier", () => {
+      const uiFilters = { fakeTits: "Natural" };
       const result = buildPerformerFilter(uiFilters);
       expect(result.fake_tits).toEqual({
-        value: "Yes",
-        modifier: "INCLUDES",
+        value: "Natural",
+        modifier: "EQUALS",
       });
     });
   });
@@ -328,23 +328,23 @@ describe("buildPerformerFilter", () => {
   });
 
   describe("Physical Attribute Range Filters (Height, Weight, Penis Length)", () => {
-    it("should build height_cm filter with GREATER_THAN modifier (min only)", () => {
+    it("should build height filter with GREATER_THAN modifier (min only)", () => {
       const uiFilters = {
         height: { min: 160 },
       };
       const result = buildPerformerFilter(uiFilters);
-      expect(result.height_cm).toEqual({
+      expect(result.height).toEqual({
         value: 160,
         modifier: "GREATER_THAN",
       });
     });
 
-    it("should build height_cm filter with BETWEEN modifier (both min and max)", () => {
+    it("should build height filter with BETWEEN modifier (both min and max)", () => {
       const uiFilters = {
         height: { min: 160, max: 180 },
       };
       const result = buildPerformerFilter(uiFilters);
-      expect(result.height_cm).toEqual({
+      expect(result.height).toEqual({
         value: 160,
         modifier: "BETWEEN",
         value2: 180,
@@ -700,7 +700,7 @@ describe("buildPerformerFilter", () => {
         value: 79,
       });
       expect(result.age).toEqual({ value: 25, modifier: "BETWEEN", value2: 40 });
-      expect(result.height_cm).toEqual({ value: 165, modifier: "GREATER_THAN" });
+      expect(result.height).toEqual({ value: 165, modifier: "GREATER_THAN" });
       expect(result.o_counter).toEqual({
         modifier: "BETWEEN",
         value: 5,
@@ -714,8 +714,8 @@ describe("buildPerformerFilter", () => {
         modifier: "LESS_THAN",
         value: 101,
       });
-      expect(result.ethnicity).toEqual({ value: "caucasian", modifier: "INCLUDES" });
-      expect(result.hair_color).toEqual({ value: "brown", modifier: "INCLUDES" });
+      expect(result.ethnicity).toEqual({ value: "caucasian", modifier: "EQUALS" });
+      expect(result.hair_color).toEqual({ value: "brown", modifier: "EQUALS" });
       expect(result.name).toEqual({ value: "Jane", modifier: "INCLUDES" });
       expect(result.created_at).toEqual({
         value: "2023-01-01",
@@ -769,6 +769,89 @@ describe("buildPerformerFilter", () => {
       expect(result.o_counter).toEqual({
         modifier: "GREATER_THAN",
         value: -1, // 0 - 1
+      });
+    });
+  });
+
+  describe("Imperial Unit Conversion", () => {
+    it("should convert imperial height (feet/inches) to cm", () => {
+      const uiFilters = {
+        height: { feetMin: "5", inchesMin: "10", feetMax: "6", inchesMax: "2" },
+      };
+      const result = buildPerformerFilter(uiFilters, "imperial");
+      // 5'10" = 178cm, 6'2" = 188cm
+      expect(result.height).toEqual({
+        modifier: "BETWEEN",
+        value: 178,
+        value2: 188,
+      });
+    });
+
+    it("should convert imperial height min only", () => {
+      const uiFilters = {
+        height: { feetMin: "5", inchesMin: "6" },
+      };
+      const result = buildPerformerFilter(uiFilters, "imperial");
+      // 5'6" = 168cm
+      expect(result.height).toEqual({
+        modifier: "GREATER_THAN",
+        value: 168,
+      });
+    });
+
+    it("should convert imperial weight (lbs) to kg", () => {
+      const uiFilters = {
+        weight: { min: "110", max: "180" },
+      };
+      const result = buildPerformerFilter(uiFilters, "imperial");
+      // 110 lbs = 50 kg, 180 lbs = 82 kg
+      expect(result.weight).toEqual({
+        modifier: "BETWEEN",
+        value: 50,
+        value2: 82,
+      });
+    });
+
+    it("should convert imperial penis length (inches) to cm", () => {
+      const uiFilters = {
+        penisLength: { min: "5", max: "8" },
+      };
+      const result = buildPerformerFilter(uiFilters, "imperial");
+      // 5 in = 12.7cm -> 12 (parseInt), 8 in = 20.3cm -> 20 (parseInt)
+      expect(result.penis_length).toEqual({
+        modifier: "BETWEEN",
+        value: 12,
+        value2: 20,
+      });
+    });
+
+    it("should not convert when unit preference is metric", () => {
+      const uiFilters = {
+        height: { min: "170", max: "180" },
+        weight: { min: "60", max: "80" },
+      };
+      const result = buildPerformerFilter(uiFilters, "metric");
+      expect(result.height).toEqual({
+        modifier: "BETWEEN",
+        value: 170,
+        value2: 180,
+      });
+      expect(result.weight).toEqual({
+        modifier: "BETWEEN",
+        value: 60,
+        value2: 80,
+      });
+    });
+
+    it("should default to metric when no unit preference provided", () => {
+      const uiFilters = {
+        height: { min: "170", max: "180" },
+      };
+      const result = buildPerformerFilter(uiFilters);
+      expect(result.height).toEqual({
+        modifier: "BETWEEN",
+        value: 170,
+        value2: 180,
       });
     });
   });

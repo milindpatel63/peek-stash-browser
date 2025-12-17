@@ -7,6 +7,7 @@ import "videojs-seek-buttons";
 import "videojs-seek-buttons/dist/videojs-seek-buttons.css";
 import axios from "axios";
 import videojs from "video.js";
+import { apiPost } from "../../services/api.js";
 import { setupSubtitles, togglePlaybackRateControl } from "./videoPlayerUtils.js";
 import "./vtt-thumbnails.js";
 import "./plugins/big-buttons.js";
@@ -16,14 +17,38 @@ import "./plugins/persist-volume.js";
 import "./plugins/skip-buttons.js";
 import "./plugins/source-selector.js";
 import "./plugins/track-activity.js";
-import "./plugins/volume-progress-fix.js";
 import "./plugins/vrmode.js";
+import "./plugins/media-session.js";
 
 // Register Video.js plugins
 airplay(videojs);
 chromecast(videojs);
 
-const api = axios.create({
+/**
+ * Retry a function with exponential backoff
+ * @param {Function} fn - Async function to retry
+ * @param {number} maxAttempts - Maximum number of attempts (default: 3)
+ * @param {number} baseDelay - Base delay in ms (default: 1000)
+ * @returns {Promise} Result of the function or throws after all retries
+ */
+async function retryWithBackoff(fn, maxAttempts = 3, baseDelay = 1000) {
+  let lastError;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      lastError = error;
+      if (attempt < maxAttempts) {
+        const delay = baseDelay * Math.pow(2, attempt - 1);
+        console.warn(`[RETRY] Attempt ${attempt} failed, retrying in ${delay}ms...`, error.message);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+  }
+  throw lastError;
+}
+
+const _api = axios.create({
   baseURL: "/api",
   withCredentials: true,
 });
@@ -66,6 +91,7 @@ function getBestTranscodeQuality(sourceHeight) {
  * @param {number} sourceHeight - Height of the source video
  * @returns {Array<{quality: string, height: number}>} Available quality options
  */
+// eslint-disable-next-line no-unused-vars
 function getAvailableQualities(sourceHeight) {
   return QUALITY_PRESETS.filter(preset => preset.height <= sourceHeight);
 }
@@ -84,7 +110,7 @@ export function useVideoPlayer({
   playerRef,
   scene,
   quality,
-  isAutoFallback,
+  isAutoFallback, // eslint-disable-line no-unused-vars
   ready,
   shouldAutoplay,
   playlist,
@@ -93,7 +119,6 @@ export function useVideoPlayer({
   nextScene,
   prevScene,
   updateQuality,
-  stopTracking,
   location,
   hasResumedRef,
   initialResumeTimeRef,
@@ -172,7 +197,7 @@ export function useVideoPlayer({
         },
         skipButtons: {},
         trackActivity: {},
-        volumeProgressFix: {},
+        mediaSession: {},
         vrMenu: {},
       },
     });
@@ -181,10 +206,10 @@ export function useVideoPlayer({
     player.focus();
 
     // Volume persistence is now handled by persistVolume plugin
+    // Watch history tracking is now handled by the trackActivity plugin
 
     // Cleanup
     return () => {
-      stopTracking();
       playerRef.current = null;
 
       try {
@@ -216,6 +241,28 @@ export function useVideoPlayer({
   }, [scene?.paths?.vtt, scene?.paths?.sprite, playerRef]);
 
   // ============================================================================
+  // MEDIA SESSION METADATA (OS media controls - title, artist, poster)
+  // ============================================================================
+
+  useEffect(() => {
+    const player = playerRef.current;
+    if (!player || !scene) return;
+
+    const mediaSessionPlugin = player.mediaSession?.();
+    if (!mediaSessionPlugin) return;
+
+    // Build performer string from scene performers
+    const performers = scene.performers?.map((p) => p.name).join(", ") || "";
+
+    // Set metadata for OS media controls
+    mediaSessionPlugin.setMetadata(
+      scene.title || "Untitled Scene",
+      performers,
+      scene.paths?.screenshot || ""
+    );
+  }, [scene?.id, scene?.title, scene?.performers, scene?.paths?.screenshot, playerRef]);
+
+  // ============================================================================
   // TRACK ACTIVITY PLUGIN (Stash pattern - integrates with watch history)
   // ============================================================================
 
@@ -226,14 +273,38 @@ export function useVideoPlayer({
     const trackActivityPlugin = player.trackActivity();
     if (!trackActivityPlugin) return;
 
+    const sceneId = scene.id;
+
     // Enable tracking
     trackActivityPlugin.setEnabled(true);
     trackActivityPlugin.minimumPlayPercent = 10; // Match Stash's 10% threshold
 
-    // The plugin tracks playback internally and calls these callbacks
-    // It coordinates with the existing useWatchHistory hook's ping system
-    // incrementPlayCount is called once per session when threshold is reached
+    // Connect plugin callbacks to API endpoints
     // saveActivity is called periodically (every 10s) during playback
+    trackActivityPlugin.saveActivity = async (resumeTime, playDuration) => {
+      try {
+        await retryWithBackoff(() =>
+          apiPost("/watch-history/save-activity", {
+            sceneId,
+            resumeTime,
+            playDuration,
+          })
+        );
+      } catch (error) {
+        console.error("Failed to save activity after 3 attempts:", error);
+      }
+    };
+
+    // incrementPlayCount is called once per session when threshold is reached
+    trackActivityPlugin.incrementPlayCount = async () => {
+      try {
+        await retryWithBackoff(() =>
+          apiPost("/watch-history/increment-play-count", { sceneId })
+        );
+      } catch (error) {
+        console.error("Failed to increment play count after 3 attempts:", error);
+      }
+    };
 
     return () => {
       trackActivityPlugin.setEnabled(false);
@@ -330,7 +401,17 @@ export function useVideoPlayer({
 
       // Preserve current playback position (exactly like Stash does)
       const currentTime = player.currentTime();
-      const hlsUrl = `/api/scene/${scene.id}/stream.m3u8?quality=${bestQuality}`;
+
+      // Map quality preset to Stash resolution parameter
+      const qualityToResolution = {
+        '2160p': 'FOUR_K',
+        '1080p': 'FULL_HD',
+        '720p': 'STANDARD_HD',
+        '480p': 'STANDARD',
+        '360p': 'LOW',
+      };
+      const resolution = qualityToResolution[bestQuality] || 'STANDARD_HD';
+      const hlsUrl = `/api/scene/${scene.id}/proxy-stream/stream.m3u8?resolution=${resolution}`;
 
       console.log(`[AUTO-FALLBACK] Trying next source: '${bestQuality} Transcode'`);
 
@@ -390,7 +471,7 @@ export function useVideoPlayer({
     dispatch({ type: "SET_READY", payload: false });
 
     const isDirectPlay = quality === "direct";
-    const firstFile = scene?.files?.[0];
+    // const firstFile = scene?.files?.[0]; // Unused - keeping for future use
 
     // Set poster
     const posterUrl = scene?.paths?.screenshot;
@@ -430,7 +511,12 @@ export function useVideoPlayer({
           // e.g., "stream.m3u8" from "http://stash:9999/scene/123/stream.m3u8?resolution=STANDARD_HD"
           const pathParts = url.pathname.split(`/scene/${scene.id}/`);
           const streamPath = pathParts[1] || 'stream'; // "stream.m3u8" or "stream"
-          const queryString = url.search; // "?resolution=STANDARD_HD" or ""
+
+          // Strip apikey from query params (security: don't expose Stash API key to client)
+          url.searchParams.delete('apikey');
+          url.searchParams.delete('ApiKey');
+          url.searchParams.delete('APIKEY');
+          const queryString = url.search; // "?resolution=STANDARD_HD" or "" (without apikey)
 
           // Rewrite to Peek's proxy endpoint
           const proxiedUrl = `/api/scene/${scene.id}/proxy-stream/${streamPath}${queryString}`;

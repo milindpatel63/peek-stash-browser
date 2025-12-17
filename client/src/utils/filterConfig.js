@@ -2,8 +2,16 @@
  * Sorting and filtering configuration for all entity types
  */
 
+import {
+  UNITS,
+  feetInchesToCm,
+  lbsToKg,
+  inchesToCm,
+} from "./unitConversions.js";
+
 // Scene sorting options (alphabetically organized by label)
-export const SCENE_SORT_OPTIONS = [
+// Note: scene_index is added dynamically when group filter is active
+export const SCENE_SORT_OPTIONS_BASE = [
   { value: "bitrate", label: "Bitrate" },
   { value: "created_at", label: "Created At" },
   { value: "date", label: "Date" },
@@ -19,10 +27,19 @@ export const SCENE_SORT_OPTIONS = [
   { value: "play_duration", label: "Play Duration" },
   { value: "random", label: "Random" },
   { value: "rating", label: "Rating" },
-  { value: "scene_index", label: "Scene Number" },
   { value: "tag_count", label: "Tag Count" },
   { value: "title", label: "Title" },
   { value: "updated_at", label: "Updated At" },
+];
+
+// Scene Number option - only shown when group filter is active
+export const SCENE_INDEX_SORT_OPTION = { value: "scene_index", label: "Scene Number" };
+
+// Full list for backwards compatibility
+export const SCENE_SORT_OPTIONS = [
+  ...SCENE_SORT_OPTIONS_BASE.slice(0, 15), // up to "rating"
+  SCENE_INDEX_SORT_OPTION,
+  ...SCENE_SORT_OPTIONS_BASE.slice(15), // "tag_count" onwards
 ];
 
 // Performer sorting options (alphabetically organized by label)
@@ -62,6 +79,7 @@ export const TAG_SORT_OPTIONS = [
   { value: "created_at", label: "Created At" },
   { value: "name", label: "Name" },
   { value: "o_counter", label: "O Count" },
+  { value: "performer_count", label: "Performer Count" },
   { value: "play_count", label: "Play Count" },
   { value: "random", label: "Random" },
   { value: "rating", label: "Rating" },
@@ -144,13 +162,8 @@ const EYE_COLOR_OPTIONS = [
 ];
 
 const FAKE_TITS_OPTIONS = [
-  { value: "TRUE", label: "Fake" },
-  { value: "FALSE", label: "Natural" },
-];
-
-const ORGANIZED_OPTIONS = [
-  { value: "TRUE", label: "Organized" },
-  { value: "FALSE", label: "Not Organized" },
+  { value: "Fake", label: "Fake/Augmented" },
+  { value: "Natural", label: "Natural" },
 ];
 
 // Resolution options (matching Stash's ResolutionEnum)
@@ -469,14 +482,7 @@ export const SCENE_FILTER_OPTIONS = [
     min: 0,
     max: 50,
   },
-  {
-    key: "organized",
-    label: "Organized",
-    type: "select",
-    defaultValue: "",
-    options: ORGANIZED_OPTIONS,
-    placeholder: "Any",
-  },
+
 ];
 
 export const PERFORMER_FILTER_OPTIONS = [
@@ -723,33 +729,6 @@ export const PERFORMER_FILTER_OPTIONS = [
     type: "text",
     defaultValue: "",
     placeholder: "Search details...",
-  },
-
-  // Entity Filters
-  {
-    type: "section-header",
-    label: "Entity Filters",
-    key: "section-entities",
-    collapsible: true,
-    defaultOpen: false,
-  },
-  {
-    key: "sceneId",
-    label: "Scene",
-    type: "searchable-select",
-    entityType: "scenes",
-    multi: false,
-    defaultValue: "",
-    placeholder: "Select scene...",
-  },
-  {
-    key: "groupIds",
-    label: "Collections",
-    type: "searchable-select",
-    entityType: "groups",
-    multi: true,
-    defaultValue: [],
-    placeholder: "Select collections...",
   },
 ];
 
@@ -1309,9 +1288,7 @@ export const buildSceneFilter = (filters) => {
   if (filters.tagFavorite === true || filters.tagFavorite === "TRUE") {
     sceneFilter.tag_favorite = true;
   }
-  if (filters.organized) {
-    sceneFilter.organized = filters.organized === "TRUE";
-  }
+
 
   // Rating filter (0-100 scale)
   if (filters.rating?.min !== undefined || filters.rating?.max !== undefined) {
@@ -1641,7 +1618,72 @@ export const buildSceneFilter = (filters) => {
   return sceneFilter;
 };
 
-export const buildPerformerFilter = (filters) => {
+/**
+ * Converts filter values from imperial to metric if needed.
+ * Height uses feet/inches fields, weight uses lbs, penisLength uses inches.
+ */
+const convertFilterUnits = (filters, unitPreference) => {
+  if (unitPreference !== UNITS.IMPERIAL) return filters;
+
+  const converted = { ...filters };
+
+  // Height: convert feet/inches to cm (from imperial-height-range filter type)
+  // The filter stores: { feetMin, inchesMin, feetMax, inchesMax }
+  if (filters.height?.feetMin !== undefined || filters.height?.inchesMin !== undefined) {
+    const feet = parseInt(filters.height.feetMin || 0);
+    const inches = parseInt(filters.height.inchesMin || 0);
+    if (feet || inches) {
+      converted.height = {
+        ...converted.height,
+        min: feetInchesToCm(feet, inches),
+      };
+    }
+  }
+  if (filters.height?.feetMax !== undefined || filters.height?.inchesMax !== undefined) {
+    const feet = parseInt(filters.height.feetMax || 0);
+    const inches = parseInt(filters.height.inchesMax || 0);
+    if (feet || inches) {
+      converted.height = {
+        ...converted.height,
+        max: feetInchesToCm(feet, inches),
+      };
+    }
+  }
+
+  // Weight: convert lbs to kg
+  if (filters.weight?.min) {
+    converted.weight = {
+      ...converted.weight,
+      min: lbsToKg(parseInt(filters.weight.min)),
+    };
+  }
+  if (filters.weight?.max) {
+    converted.weight = {
+      ...converted.weight,
+      max: lbsToKg(parseInt(filters.weight.max)),
+    };
+  }
+
+  // Penis length: convert inches to cm
+  if (filters.penisLength?.min) {
+    converted.penisLength = {
+      ...converted.penisLength,
+      min: inchesToCm(parseFloat(filters.penisLength.min)),
+    };
+  }
+  if (filters.penisLength?.max) {
+    converted.penisLength = {
+      ...converted.penisLength,
+      max: inchesToCm(parseFloat(filters.penisLength.max)),
+    };
+  }
+
+  return converted;
+};
+
+export const buildPerformerFilter = (filters, unitPreference = UNITS.METRIC) => {
+  // Convert imperial values to metric before building filter
+  const convertedFilters = convertFilterUnits(filters, unitPreference);
   const performerFilter = {};
 
   // Boolean filter
@@ -1696,28 +1738,28 @@ export const buildPerformerFilter = (filters) => {
   if (filters.ethnicity) {
     performerFilter.ethnicity = {
       value: filters.ethnicity,
-      modifier: "INCLUDES",
+      modifier: "EQUALS",
     };
   }
 
   if (filters.hairColor) {
     performerFilter.hair_color = {
       value: filters.hairColor,
-      modifier: "INCLUDES",
+      modifier: "EQUALS",
     };
   }
 
   if (filters.eyeColor) {
     performerFilter.eye_color = {
       value: filters.eyeColor,
-      modifier: "INCLUDES",
+      modifier: "EQUALS",
     };
   }
 
   if (filters.fakeTits) {
     performerFilter.fake_tits = {
       value: filters.fakeTits,
-      modifier: "INCLUDES",
+      modifier: "EQUALS",
     };
   }
 
@@ -1762,37 +1804,38 @@ export const buildPerformerFilter = (filters) => {
       performerFilter.career_length.value2 = parseInt(filters.careerLength.max);
   }
 
-  if (filters.height?.min || filters.height?.max) {
-    performerFilter.height_cm = {};
-    if (filters.height.min)
-      performerFilter.height_cm.value = parseInt(filters.height.min);
-    performerFilter.height_cm.modifier = filters.height.max
+  // Height, weight, and penisLength use convertedFilters for unit conversion
+  if (convertedFilters.height?.min || convertedFilters.height?.max) {
+    performerFilter.height = {};
+    if (convertedFilters.height.min)
+      performerFilter.height.value = parseInt(convertedFilters.height.min);
+    performerFilter.height.modifier = convertedFilters.height.max
       ? "BETWEEN"
       : "GREATER_THAN";
-    if (filters.height.max)
-      performerFilter.height_cm.value2 = parseInt(filters.height.max);
+    if (convertedFilters.height.max)
+      performerFilter.height.value2 = parseInt(convertedFilters.height.max);
   }
 
-  if (filters.weight?.min || filters.weight?.max) {
+  if (convertedFilters.weight?.min || convertedFilters.weight?.max) {
     performerFilter.weight = {};
-    if (filters.weight.min)
-      performerFilter.weight.value = parseInt(filters.weight.min);
-    performerFilter.weight.modifier = filters.weight.max
+    if (convertedFilters.weight.min)
+      performerFilter.weight.value = parseInt(convertedFilters.weight.min);
+    performerFilter.weight.modifier = convertedFilters.weight.max
       ? "BETWEEN"
       : "GREATER_THAN";
-    if (filters.weight.max)
-      performerFilter.weight.value2 = parseInt(filters.weight.max);
+    if (convertedFilters.weight.max)
+      performerFilter.weight.value2 = parseInt(convertedFilters.weight.max);
   }
 
-  if (filters.penisLength?.min || filters.penisLength?.max) {
+  if (convertedFilters.penisLength?.min || convertedFilters.penisLength?.max) {
     performerFilter.penis_length = {};
-    if (filters.penisLength.min)
-      performerFilter.penis_length.value = parseInt(filters.penisLength.min);
-    performerFilter.penis_length.modifier = filters.penisLength.max
+    if (convertedFilters.penisLength.min)
+      performerFilter.penis_length.value = parseInt(convertedFilters.penisLength.min);
+    performerFilter.penis_length.modifier = convertedFilters.penisLength.max
       ? "BETWEEN"
       : "GREATER_THAN";
-    if (filters.penisLength.max)
-      performerFilter.penis_length.value2 = parseInt(filters.penisLength.max);
+    if (convertedFilters.penisLength.max)
+      performerFilter.penis_length.value2 = parseInt(convertedFilters.penisLength.max);
   }
 
   // Check for non-empty values before creating filter object

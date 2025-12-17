@@ -13,8 +13,8 @@ import { libraryApi } from "../../services/api.js";
 import SceneSearch from "../scene-search/SceneSearch.jsx";
 import {
   Button,
-  EntityGrid,
   FavoriteButton,
+  LazyImage,
   Lightbox,
   LoadingSpinner,
   PageHeader,
@@ -22,6 +22,7 @@ import {
   RatingSlider,
   TabNavigation,
 } from "../ui/index.js";
+import { GalleryGrid, GroupGrid, PerformerGrid } from "../grids/index.js";
 import ViewInStashButton from "../ui/ViewInStashButton.jsx";
 
 const StudioDetail = () => {
@@ -262,10 +263,9 @@ const StudioDetail = () => {
           )}
 
           {activeTab === "galleries" && (
-            <EntityGrid
+            <GalleryGrid
               key={`galleries-${includeSubStudios}`}
-              entityType="gallery"
-              filters={{
+              lockedFilters={{
                 gallery_filter: {
                   studios: {
                     value: [parseInt(studioId, 10)],
@@ -274,6 +274,8 @@ const StudioDetail = () => {
                   },
                 },
               }}
+              hideLockedFilters
+              syncToUrl={false}
               emptyMessage={`No galleries found for ${studio?.name}`}
             />
           )}
@@ -287,9 +289,8 @@ const StudioDetail = () => {
           )}
 
           {activeTab === "performers" && (
-            <EntityGrid
-              entityType="performer"
-              filters={{
+            <PerformerGrid
+              lockedFilters={{
                 performer_filter: {
                   studios: {
                     value: [parseInt(studioId, 10)],
@@ -297,14 +298,15 @@ const StudioDetail = () => {
                   },
                 },
               }}
+              hideLockedFilters
+              syncToUrl={false}
               emptyMessage={`No performers found for ${studio?.name}`}
             />
           )}
 
           {activeTab === "groups" && (
-            <EntityGrid
-              entityType="group"
-              filters={{
+            <GroupGrid
+              lockedFilters={{
                 group_filter: {
                   studios: {
                     value: [parseInt(studioId, 10)],
@@ -312,6 +314,8 @@ const StudioDetail = () => {
                   },
                 },
               }}
+              hideLockedFilters
+              syncToUrl={false}
               emptyMessage={`No collections found for ${studio?.name}`}
             />
           )}
@@ -381,7 +385,7 @@ const StudioImage = ({ studio }) => {
 };
 
 // Studio Stats Component
-const StudioStats = ({ studio, studioId }) => {
+const StudioStats = ({ studio, studioId: _studioId }) => { // eslint-disable-line no-unused-vars
   const [searchParams, setSearchParams] = useSearchParams();
   const activeTab = searchParams.get("tab") || "scenes";
 
@@ -764,8 +768,10 @@ const ImagesTab = ({ studioId, studioName, includeSubStudios = false }) => {
 
       <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-7 gap-3 mt-6">
         {images.map((image, index) => (
-          <div
+          <LazyImage
             key={image.id}
+            src={image.paths?.thumbnail}
+            alt={image.title || `Image ${index + 1}`}
             className="aspect-square rounded-lg overflow-hidden cursor-pointer hover:opacity-80 hover:scale-105 transition-all border"
             style={{
               backgroundColor: "var(--bg-secondary)",
@@ -775,23 +781,7 @@ const ImagesTab = ({ studioId, studioName, includeSubStudios = false }) => {
               setLightboxIndex(index);
               setLightboxOpen(true);
             }}
-          >
-            {image.paths?.thumbnail ? (
-              <img
-                src={image.paths.thumbnail}
-                alt={image.title || `Image ${index + 1}`}
-                className="w-full h-full object-cover"
-                loading="lazy"
-              />
-            ) : (
-              <div
-                className="w-full h-full flex items-center justify-center text-sm"
-                style={{ color: "var(--text-muted)" }}
-              >
-                No Preview
-              </div>
-            )}
-          </div>
+          />
         ))}
       </div>
 
