@@ -1,4 +1,4 @@
-name: Sync fork with upstream (master)
+name: Sync fork with upstream (main)
 
 # Run on schedule and allow manual runs
 on:
@@ -26,17 +26,17 @@ jobs:
           git remote add upstream https://github.com/carrotwaxr/peek-stash-browser.git
           git fetch upstream
 
-      - name: Ensure we're on master
+      - name: Ensure we're on main
         run: |
-          git checkout master
+          git checkout main
 
-      - name: Merge upstream/master (will fail on conflicts)
+      - name: Merge upstream/main (will fail on conflicts)
         run: |
-          git merge upstream/master --no-edit
+          git merge upstream/main --no-edit
 
-      - name: Push merged master to fork
+      - name: Push merged main to fork
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # push using token so the action can write to the fork
-          git push https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }} HEAD:master
+          git push https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }} HEAD:main
