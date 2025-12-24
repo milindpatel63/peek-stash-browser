@@ -315,6 +315,7 @@ export const CardTitle = ({
         WebkitBoxOrient: "vertical",
         overflow: "hidden",
         textOverflow: "ellipsis",
+        overflowWrap: "break-word",
       }}
     >
       {title}
