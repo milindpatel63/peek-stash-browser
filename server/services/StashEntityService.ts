@@ -1201,11 +1201,11 @@ class StashEntityService {
       where: { entityType: "scene" },
     });
 
-    return !!(syncState?.lastFullSync || syncState?.lastIncrementalSync);
+    return !!(syncState?.lastFullSyncTimestamp || syncState?.lastIncrementalSyncTimestamp);
   }
 
   /**
-   * Get last refresh time (returns most recent of full or incremental sync)
+   * Get last refresh time for display (returns most recent actual sync time)
    */
   async getLastRefreshed(): Promise<Date | null> {
     const syncState = await prisma.syncState.findFirst({
@@ -1214,13 +1214,13 @@ class StashEntityService {
 
     if (!syncState) return null;
 
-    const { lastFullSync, lastIncrementalSync } = syncState;
+    const { lastFullSyncActual, lastIncrementalSyncActual } = syncState;
 
     // Return whichever sync happened more recently
-    if (!lastFullSync) return lastIncrementalSync;
-    if (!lastIncrementalSync) return lastFullSync;
+    if (!lastFullSyncActual) return lastIncrementalSyncActual;
+    if (!lastIncrementalSyncActual) return lastFullSyncActual;
 
-    return lastFullSync > lastIncrementalSync ? lastFullSync : lastIncrementalSync;
+    return lastFullSyncActual > lastIncrementalSyncActual ? lastFullSyncActual : lastIncrementalSyncActual;
   }
 
   /**

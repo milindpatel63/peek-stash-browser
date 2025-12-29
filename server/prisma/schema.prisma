@@ -869,8 +869,16 @@ model SyncState {
   stashInstanceId String?
   entityType      String // 'scene', 'performer', etc.
 
-  lastFullSync        DateTime?
-  lastIncrementalSync DateTime?
+  // Raw timestamp strings from Stash's maxUpdatedAt - stored exactly as received
+  // These are the source of truth for "since" queries to Stash
+  // Format: RFC3339 with timezone offset, e.g., "2025-12-28T10:47:03-08:00"
+  lastFullSyncTimestamp        String?
+  lastIncrementalSyncTimestamp String?
+
+  // Timestamps for UI display (actual UTC time when sync occurred)
+  lastFullSyncActual        DateTime?
+  lastIncrementalSyncActual DateTime?
+
   lastSyncCount       Int       @default(0)
   lastSyncDurationMs  Int?
   lastError           String?

@@ -1,0 +1,3 @@
+-- This migration is superseded by 20251228220000_fix_sync_timestamps
+-- Kept for migration history compatibility with beta versions
+-- No SQL needed - the final migration handles everything via table recreation
