@@ -1,9 +1,24 @@
 import { PrismaClient } from "@prisma/client";
 import bcrypt from "bcryptjs";
-import { Request, Response } from "express";
+import { Request } from "express";
 import { StashApp } from "stashapp-api";
 import { stashSyncService } from "../services/StashSyncService.js";
 import { stashInstanceManager } from "../services/StashInstanceManager.js";
+import type {
+  TypedRequest,
+  TypedResponse,
+  ApiErrorResponse,
+  GetSetupStatusResponse,
+  CreateFirstAdminRequest,
+  CreateFirstAdminResponse,
+  TestStashConnectionRequest,
+  TestStashConnectionResponse,
+  CreateFirstStashInstanceRequest,
+  CreateFirstStashInstanceResponse,
+  GetStashInstanceResponse,
+  ResetSetupRequest,
+  ResetSetupResponse,
+} from "../types/api/index.js";
 import { logger } from "../utils/logger.js";
 
 const prisma = new PrismaClient();
@@ -33,7 +48,10 @@ const getDefaultCarouselPreferences = (): CarouselPreference[] => [
  * Check setup status (for determining if wizard is needed)
  * Checks for both user existence and Stash instance configuration
  */
-export const getSetupStatus = async (req: Request, res: Response) => {
+export const getSetupStatus = async (
+  req: Request,
+  res: TypedResponse<GetSetupStatusResponse | ApiErrorResponse>
+) => {
   try {
     // Check if at least one user exists
     const userCount = await prisma.user.count();
@@ -68,7 +86,10 @@ export const getSetupStatus = async (req: Request, res: Response) => {
  * Create first admin user (public endpoint for setup wizard)
  * Only works if NO users exist yet
  */
-export const createFirstAdmin = async (req: Request, res: Response) => {
+export const createFirstAdmin = async (
+  req: TypedRequest<CreateFirstAdminRequest>,
+  res: TypedResponse<CreateFirstAdminResponse | ApiErrorResponse>
+) => {
   try {
     // Check if any users already exist
     const userCount = await prisma.user.count();
@@ -134,7 +155,10 @@ export const createFirstAdmin = async (req: Request, res: Response) => {
  * Test connection to a Stash server
  * POST /api/setup/test-stash-connection
  */
-export const testStashConnection = async (req: Request, res: Response) => {
+export const testStashConnection = async (
+  req: TypedRequest<TestStashConnectionRequest>,
+  res: TypedResponse<TestStashConnectionResponse | ApiErrorResponse>
+) => {
   try {
     const { url, apiKey } = req.body;
 
@@ -235,7 +259,10 @@ export const testStashConnection = async (req: Request, res: Response) => {
  * Only works if NO Stash instances exist yet
  * POST /api/setup/create-stash-instance
  */
-export const createFirstStashInstance = async (req: Request, res: Response) => {
+export const createFirstStashInstance = async (
+  req: TypedRequest<CreateFirstStashInstanceRequest>,
+  res: TypedResponse<CreateFirstStashInstanceResponse | ApiErrorResponse>
+) => {
   try {
     // Check if any Stash instances already exist
     const instanceCount = await prisma.stashInstance.count();
@@ -330,7 +357,10 @@ export const createFirstStashInstance = async (req: Request, res: Response) => {
  * GET /api/setup/stash-instance
  * Requires authentication
  */
-export const getStashInstance = async (req: Request, res: Response) => {
+export const getStashInstance = async (
+  req: Request,
+  res: TypedResponse<GetStashInstanceResponse | ApiErrorResponse>
+) => {
   try {
     const instances = await prisma.stashInstance.findMany({
       select: {
@@ -369,8 +399,21 @@ export const getStashInstance = async (req: Request, res: Response) => {
  * SECURITY: Only works if setup is incomplete AND there's at most 1 user.
  * This prevents accidental data loss on systems with multiple users.
  */
-export const resetSetup = async (req: Request, res: Response) => {
+export const resetSetup = async (
+  req: TypedRequest<ResetSetupRequest>,
+  res: TypedResponse<ResetSetupResponse | ApiErrorResponse>
+) => {
   try {
+    // Require explicit confirmation to prevent accidental resets
+    const { confirm } = req.body;
+    if (confirm !== "RESET_SETUP") {
+      return res.status(400).json({
+        error: "Confirmation required",
+        message:
+          "Send { confirm: 'RESET_SETUP' } to confirm this destructive action",
+      });
+    }
+
     // Check current setup state
     const userCount = await prisma.user.count();
     const stashInstanceCount = await prisma.stashInstance.count();

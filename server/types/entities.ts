@@ -119,6 +119,7 @@ export type NormalizedStudio = Studio & {
  * - o_counter: Aggregated orgasm count from scenes with this tag
  * - play_count: Aggregated play count from scenes with this tag
  * - performer_count: Count of performers with this tag
+ * - scene_count_via_performers: Pre-computed count of scenes where a performer has this tag
  */
 export type NormalizedTag = Tag & {
   rating: number | null;
@@ -127,18 +128,22 @@ export type NormalizedTag = Tag & {
   o_counter: number;
   play_count: number;
   performer_count: number;
+  scene_count_via_performers: number;
 };
 
 /**
  * Normalized Gallery
  *
  * Extends the base Gallery type from Stash with Peek-specific user data.
+ * Overrides cover to be a simple string URL (Peek proxies the cover image).
  *
- * Additional fields:
+ * Additional/modified fields:
+ * - cover: Proxied URL string (overrides base Image type)
  * - rating: User's 1-5 star rating (null if unrated)
  * - favorite: Whether user favorited this gallery
  */
-export type NormalizedGallery = Gallery & {
+export type NormalizedGallery = Omit<Gallery, "cover"> & {
+  cover: string | null;
   rating: number | null;
   favorite: boolean;
 };

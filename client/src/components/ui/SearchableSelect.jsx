@@ -14,6 +14,7 @@ import Button from "./Button.jsx";
  * @param {Function} props.onChange - Callback when selection changes
  * @param {boolean} props.multi - Enable multi-select mode
  * @param {string} props.placeholder - Placeholder text
+ * @param {"scenes"|"galleries"|"images"|"performers"|"groups"|null} props.countFilterContext - Filter entities to only those with content in this context
  */
 const SearchableSelect = ({
   entityType,
@@ -21,6 +22,7 @@ const SearchableSelect = ({
   onChange,
   multi = false,
   placeholder = "Select...",
+  countFilterContext = null,
 }) => {
   const [isOpen, setIsOpen] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
@@ -144,15 +146,34 @@ const SearchableSelect = ({
     loadSelectedNames();
   }, [value, options, entityType, multi, fetchItemsByIds]);
 
+  // Build count_filter based on context
+  const getCountFilter = useCallback(() => {
+    if (!countFilterContext) return undefined;
+
+    const filterMap = {
+      scenes: { min_scene_count: 1 },
+      galleries: { min_gallery_count: 1 },
+      images: { min_image_count: 1 },
+      performers: { min_performer_count: 1 },
+      groups: { min_group_count: 1 },
+    };
+    return filterMap[countFilterContext];
+  }, [countFilterContext]);
+
   // Load options from cache or API
   const loadOptions = useCallback(
     async (search = "") => {
       try {
         setLoading(true);
 
+        // Build cache key including count filter context
+        const cacheKey = countFilterContext
+          ? `${entityType}_${countFilterContext}`
+          : entityType;
+
         // If no search term, try cache first
         if (!search) {
-          const cached = getCache(entityType);
+          const cached = getCache(cacheKey);
           if (cached?.data) {
             setOptions(cached.data);
             setLoading(false);
@@ -171,15 +192,19 @@ const SearchableSelect = ({
 
         // Fetch from API
         const apiMethod = apiMethods[entityType];
-        const filter = search
-          ? { q: search, per_page: 50 } // Limited results for search
-          : { per_page: -1, sort: "name", direction: "ASC" }; // All results, sorted
+        const filter = {
+          per_page: 50,
+          sort: "name",
+          direction: "ASC",
+          ...(search ? { q: search } : {}),
+        };
 
-        const results = await apiMethod({ filter });
+        const count_filter = getCountFilter();
+        const results = await apiMethod({ filter, count_filter });
 
-        // Cache if we fetched all (no search)
+        // Cache first page of results (no search = initial batch)
         if (!search && results.length > 0) {
-          setCache(entityType, results);
+          setCache(cacheKey, results);
         }
 
         setOptions(results);
@@ -190,7 +215,7 @@ const SearchableSelect = ({
         setLoading(false);
       }
     },
-    [entityType]
+    [entityType, countFilterContext, getCountFilter]
   );
 
   // Debounced search
@@ -379,7 +404,7 @@ const SearchableSelect = ({
                 type="text"
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
-                placeholder={`Search ${entityType}...`}
+                placeholder="Type to search..."
                 className="w-full pl-9 pr-3 py-2 rounded-md border text-sm"
                 style={{
                   backgroundColor: "var(--bg-secondary)",

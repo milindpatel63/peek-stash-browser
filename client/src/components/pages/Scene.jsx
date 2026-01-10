@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import { useLocation, useNavigate, useParams } from "react-router-dom";
+import { useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
   ScenePlayerProvider,
   useScenePlayer,
 } from "../../contexts/ScenePlayerContext.jsx";
 import { useInitialFocus } from "../../hooks/useFocusTrap.js";
+import { useNavigationState } from "../../hooks/useNavigationState.js";
 import { usePageTitle } from "../../hooks/usePageTitle.js";
 import { canDirectPlayVideo } from "../../utils/videoFormat.js";
 import PlaylistSidebar from "../playlist/PlaylistSidebar.jsx";
@@ -16,19 +17,24 @@ import {
   RecommendedSidebar,
   ScenesLikeThis,
 } from "../ui/index.js";
+import { GalleryGrid, GroupGrid } from "../grids/index.js";
 import PlaybackControls from "../video-player/PlaybackControls.jsx";
 import VideoPlayer from "../video-player/VideoPlayer.jsx";
 import ViewInStashButton from "../ui/ViewInStashButton.jsx";
 import SceneDetails from "./SceneDetails.jsx";
+import TabNavigation, { TAB_COUNT_LOADING } from "../ui/TabNavigation.jsx";
 
 // Inner component that reads from context
-const SceneContent = ({ location }) => {
+const SceneContent = () => {
   const navigate = useNavigate();
   const pageRef = useRef(null);
   const leftColumnRef = useRef(null);
 
   // Read state from context
   const { scene, sceneLoading, sceneError, playlist } = useScenePlayer();
+
+  // Navigation state for back button
+  const { goBack, backButtonText } = useNavigationState();
 
   // Set page title to scene title (with fallback to filename)
   const displayTitle = scene?.title || scene?.files?.[0]?.basename || "Scene";
@@ -41,6 +47,10 @@ const SceneContent = ({ location }) => {
   const [showDetails, setShowDetails] = useState(true);
   const [showTechnicalDetails, setShowTechnicalDetails] = useState(false);
   const [sidebarHeight, setSidebarHeight] = useState(null);
+  const [searchParams] = useSearchParams();
+  const activeTab = searchParams.get('tab') || 'similar';
+  // TAB_COUNT_LOADING means loading (show tab without count badge), updated by ScenesLikeThis onCountChange
+  const [similarScenesCount, setSimilarScenesCount] = useState(TAB_COUNT_LOADING);
 
   // Dispatch zone change event to disable TV navigation on this page
   useEffect(() => {
@@ -51,6 +61,11 @@ const SceneContent = ({ location }) => {
       })
     );
   }, []); // Run once on mount
+
+  // Reset similar scenes count when scene changes (back to loading state)
+  useEffect(() => {
+    setSimilarScenesCount(TAB_COUNT_LOADING);
+  }, [scene?.id]);
 
   // Measure left column height and sync to sidebar
   useEffect(() => {
@@ -117,20 +132,12 @@ const SceneContent = ({ location }) => {
         <div className="flex flex-col md:flex-row md:items-center gap-4">
           <div className="flex items-center gap-2 flex-shrink-0 self-start">
             <Button
-              onClick={() => {
-                // If we have a referrer URL with filters, navigate to it
-                // Otherwise use browser back
-                if (location.state?.referrerUrl) {
-                  navigate(location.state.referrerUrl);
-                } else {
-                  navigate(-1);
-                }
-              }}
+              onClick={goBack}
               variant="secondary"
               className="inline-flex items-center gap-2"
             >
               <span>←</span>
-              <span className="whitespace-nowrap">Back to Scenes</span>
+              <span className="whitespace-nowrap">{backButtonText}</span>
             </Button>
             <ExternalPlayerButton
               sceneId={scene?.id}
@@ -190,8 +197,65 @@ const SceneContent = ({ location }) => {
           setShowTechnicalDetails={setShowTechnicalDetails}
         />
 
-        {/* Scenes Like This - lazy loaded */}
-        {scene && <ScenesLikeThis sceneId={scene.id} />}
+        {/* Tabbed Relationship Content */}
+        {scene && (
+          <div className="mt-6">
+            <TabNavigation
+              tabs={[
+                { id: 'similar', label: 'Similar Scenes', count: similarScenesCount },
+                ...(scene.groups && scene.groups.length > 0
+                  ? [{ id: 'collections', label: 'Collections', count: scene.groups.length }]
+                  : []),
+                ...(scene.galleries && scene.galleries.length > 0
+                  ? [{ id: 'galleries', label: 'Galleries', count: scene.galleries.length }]
+                  : []),
+              ]}
+              defaultTab="similar"
+              showSingleTab
+            />
+
+            {/* Tab Content */}
+            {activeTab === 'similar' && (
+              <div className="mt-6">
+                <ScenesLikeThis sceneId={scene.id} onCountChange={setSimilarScenesCount} />
+              </div>
+            )}
+
+            {activeTab === 'collections' && (
+              <div className="mt-6">
+                <GroupGrid
+                  lockedFilters={{
+                    group_filter: {
+                      scenes: {
+                        value: [parseInt(scene.id, 10)],
+                        modifier: "INCLUDES"
+                      }
+                    }
+                  }}
+                  hideLockedFilters
+                  emptyMessage="No collections found for this scene"
+                />
+              </div>
+            )}
+
+            {activeTab === 'galleries' && (
+              <div className="mt-6">
+                <GalleryGrid
+                  lockedFilters={{
+                    gallery_filter: {
+                      scenes: {
+                        value: [parseInt(scene.id, 10)],
+                        modifier: "INCLUDES"
+                      }
+                    }
+                  }}
+                  hideLockedFilters
+                  emptyMessage="No galleries found for this scene"
+                />
+              </div>
+            )}
+          </div>
+        )}
       </main>
     </div>
   );
@@ -286,7 +350,7 @@ const Scene = () => {
       initialQuality={initialQuality}
       initialShouldAutoplay={shouldAutoplayFromState}
     >
-      <SceneContent location={{ ...location, state: stateToUse }} />
+      <SceneContent />
     </ScenePlayerProvider>
   );
 };

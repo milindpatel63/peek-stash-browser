@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react";
-import { usePaginatedLightbox } from "../../hooks/usePaginatedLightbox.js";
-import { Link, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { useCallback, useEffect, useState } from "react";
+import { Link, useParams, useSearchParams } from "react-router-dom";
 import { ArrowLeft, LucideStar } from "lucide-react";
+import { useImagesPagination } from "../../hooks/useImagesPagination.js";
+import { useNavigationState } from "../../hooks/useNavigationState.js";
 import { usePageTitle } from "../../hooks/usePageTitle.js";
 import { useRatingHotkeys } from "../../hooks/useRatingHotkeys.js";
 import { useUnitPreference } from "../../contexts/UnitPreferenceContext.js";
@@ -13,10 +14,9 @@ import {
   FavoriteButton,
   GenderIcon,
   LazyImage,
-  Lightbox,
   LoadingSpinner,
   PageHeader,
-  Pagination,
+  PaginatedImageGrid,
   RatingSlider,
   SectionLink,
   TabNavigation,
@@ -27,13 +27,14 @@ import ViewInStashButton from "../ui/ViewInStashButton.jsx";
 
 const PerformerDetail = () => {
   const { performerId } = useParams();
-  const location = useLocation();
-  const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const [isLoading, setIsLoading] = useState(true);
   const [performer, setPerformer] = useState(null);
   const [rating, setRating] = useState(null);
   const [isFavorite, setIsFavorite] = useState(false);
+
+  // Navigation state for back button
+  const { goBack, backButtonText } = useNavigationState();
 
   // Get active tab from URL or default to 'scenes'
   const activeTab = searchParams.get('tab') || 'scenes';
@@ -103,14 +104,12 @@ const PerformerDetail = () => {
         {/* Back Button */}
         <div className="mt-6 mb-6">
           <Button
-            onClick={() =>
-              navigate(location.state?.referrerUrl || "/performers")
-            }
+            onClick={goBack}
             variant="secondary"
             icon={<ArrowLeft size={16} className="sm:w-4 sm:h-4" />}
-            title="Back to Performers"
+            title={backButtonText}
           >
-            <span className="hidden sm:inline">Back to Performers</span>
+            <span className="hidden sm:inline">{backButtonText}</span>
           </Button>
         </div>
 
@@ -188,7 +187,7 @@ const PerformerDetail = () => {
               permanentFiltersMetadata={{
                 performers: [{ id: performerId, name: performer.name }] }}
               title={`Scenes featuring ${performer.name}`}
-              captureReferrer={false}
+              fromPageTitle={performer?.name || "Performer"}
             />
           )}
 
@@ -200,7 +199,6 @@ const PerformerDetail = () => {
                     value: [parseInt(performerId, 10)],
                     modifier: "INCLUDES" } } }}
               hideLockedFilters
-              syncToUrl={false}
               emptyMessage={`No galleries found for ${performer.name}`}
             />
           )}
@@ -217,7 +215,6 @@ const PerformerDetail = () => {
                     value: [parseInt(performerId, 10)],
                     modifier: "INCLUDES" } } }}
               hideLockedFilters
-              syncToUrl={false}
               emptyMessage={`No collections found for ${performer.name}`}
             />
           )}
@@ -676,131 +673,58 @@ const PerformerLinks = ({ performer }) => {
 
 // Images Tab Component with Lightbox
 const ImagesTab = ({ performerId, performerName }) => {
-  const [images, setImages] = useState([]);
-  const [totalCount, setTotalCount] = useState(0);
-  const [isLoading, setIsLoading] = useState(true);
+  const [searchParams, setSearchParams] = useSearchParams();
 
-  const perPage = 100;
+  // URL-based page state for image pagination
+  const urlPage = parseInt(searchParams.get('page')) || 1;
 
-  // Paginated lightbox state and handlers
-  const lightbox = usePaginatedLightbox({
-    perPage,
-    totalCount,
+  const handleImagePageChange = useCallback((newPage) => {
+    const params = new URLSearchParams(searchParams);
+    if (newPage === 1) {
+      params.delete('page');
+    } else {
+      params.set('page', String(newPage));
+    }
+    // Preserve tab param
+    setSearchParams(params);
+  }, [searchParams, setSearchParams]);
+
+  const fetchImages = useCallback(
+    async (page, perPage) => {
+      const data = await libraryApi.findImages({
+        filter: { page, per_page: perPage },
+        image_filter: {
+          performers: {
+            value: [parseInt(performerId, 10)],
+            modifier: "INCLUDES",
+          },
+        },
+      });
+      return {
+        images: data.findImages?.images || [],
+        count: data.findImages?.count || 0,
+      };
+    },
+    [performerId]
+  );
+
+  const { images, totalCount, isLoading, lightbox, setImages } = useImagesPagination({
+    fetchImages,
+    dependencies: [performerId],
+    externalPage: urlPage,
+    onExternalPageChange: handleImagePageChange,
   });
 
-  useEffect(() => {
-    const fetchImages = async () => {
-      try {
-        setIsLoading(true);
-        const data = await libraryApi.findImages({
-          filter: {
-            page: lightbox.currentPage,
-            per_page: perPage,
-          },
-          image_filter: {
-            performers: {
-              value: [parseInt(performerId, 10)],
-              modifier: "INCLUDES",
-            },
-          },
-        });
-        setImages(data.findImages?.images || []);
-        setTotalCount(data.findImages?.count || 0);
-
-        // Handle pending lightbox navigation after page loads
-        lightbox.consumePendingLightboxIndex();
-      } catch (error) {
-        console.error("Error loading images:", error);
-      } finally {
-        setIsLoading(false);
-      }
-    };
-
-    fetchImages();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [performerId, lightbox.currentPage]);
-
-  if (isLoading) {
-    return (
-      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-7 gap-3 mt-6">
-        {[...Array(12)].map((_, index) => (
-          <div
-            key={index}
-            className="aspect-square rounded-lg animate-pulse"
-            style={{
-              backgroundColor: "var(--bg-tertiary)",
-            }}
-          />
-        ))}
-      </div>
-    );
-  }
-
-  if (images.length === 0) {
-    return (
-      <div
-        className="text-center py-12 mt-6"
-        style={{ color: "var(--text-muted)" }}
-      >
-        No images found for {performerName}
-      </div>
-    );
-  }
-
   return (
-    <>
-      {/* Pagination - Top */}
-      {lightbox.totalPages > 1 && (
-        <div className="mt-6">
-          <Pagination
-            currentPage={lightbox.currentPage}
-            totalPages={lightbox.totalPages}
-            onPageChange={lightbox.setCurrentPage}
-          />
-        </div>
-      )}
-
-      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-7 gap-3 mt-6">
-        {images.map((image, index) => (
-          <LazyImage
-            key={image.id}
-            src={image.paths?.thumbnail}
-            alt={image.title || `Image ${index + 1}`}
-            className="aspect-square rounded-lg overflow-hidden cursor-pointer hover:opacity-80 hover:scale-105 transition-all border"
-            style={{
-              backgroundColor: "var(--bg-secondary)",
-              borderColor: "var(--border-color)",
-            }}
-            onClick={() => lightbox.openLightbox(index)}
-          />
-        ))}
-      </div>
-
-      {/* Pagination - Bottom */}
-      {lightbox.totalPages > 1 && (
-        <div className="mt-6">
-          <Pagination
-            currentPage={lightbox.currentPage}
-            totalPages={lightbox.totalPages}
-            onPageChange={lightbox.setCurrentPage}
-          />
-        </div>
-      )}
-
-      {/* Lightbox */}
-      <Lightbox
-        images={images}
-        initialIndex={lightbox.lightboxIndex}
-        isOpen={lightbox.lightboxOpen}
-        autoPlay={false}
-        onClose={lightbox.closeLightbox}
-        onImagesUpdate={setImages}
-        onPageBoundary={lightbox.onPageBoundary}
-        totalCount={totalCount}
-        pageOffset={lightbox.pageOffset}
-        onIndexChange={lightbox.onIndexChange}
-      />
-    </>
+    <PaginatedImageGrid
+      images={images}
+      totalCount={totalCount}
+      isLoading={isLoading}
+      lightbox={lightbox}
+      setImages={setImages}
+      emptyMessage={`No images found for ${performerName}`}
+      className="mt-6"
+    />
   );
 };
 

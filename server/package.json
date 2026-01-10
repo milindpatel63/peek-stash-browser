@@ -1,6 +1,6 @@
 {
   "name": "peek-server",
-  "version": "3.1.0-beta.9",
+  "version": "3.1.2-beta.2",
   "description": "Backend for Peek Stash Browser. Handles serving the client, API endpoints, communication with media library manager (Stash), and transcoding",
   "type": "module",
   "main": "dist/index.js",
@@ -18,7 +18,11 @@
     "test:coverage": "vitest run --coverage",
     "depcheck": "depcheck",
     "knip": "knip",
-    "analyze": "npm run depcheck && npm run knip"
+    "analyze": "npm run depcheck && npm run knip",
+    "generate-api-docs": "npx tsx scripts/generate-api-docs.ts",
+    "test:integration": "vitest run --config integration/vitest.integration.config.ts",
+    "test:integration:watch": "vitest --config integration/vitest.integration.config.ts",
+    "test:integration:fresh": "FRESH_DB=true npm run test:integration"
   },
   "prisma": {
     "seed": "node --loader ts-node/esm prisma/seed.ts"
@@ -44,6 +48,7 @@
     "prettier": "^3.6.2",
     "prisma": "^6.17.0",
     "ts-node": "^10.9.2",
+    "tsx": "^4.21.0",
     "vitest": "^3.2.4"
   },
   "dependencies": {

@@ -4,6 +4,7 @@ import {
   AuthenticatedRequest,
   authenticate,
   generateToken,
+  setTokenCookie,
 } from "../middleware/auth.js";
 import prisma from "../prisma/singleton.js";
 import { authenticated } from "../utils/routeHelpers.js";
@@ -41,11 +42,7 @@ router.post("/login", async (req, res) => {
     });
 
     // Set HTTP-only cookie
-    res.cookie("token", token, {
-      httpOnly: true,
-      secure: process.env.SECURE_COOKIES === "true",
-      maxAge: 24 * 60 * 60 * 1000, // 24 hours
-    });
+    setTokenCookie(res, token);
 
     res.json({
       success: true,
@@ -88,8 +85,21 @@ router.get(
 );
 
 // First-time password setup (for setup wizard)
+// SECURITY: Only works during initial setup (before setup is complete)
 router.post("/first-time-password", async (req, res) => {
   try {
+    // SECURITY CHECK: Only allow during initial setup
+    const userCount = await prisma.user.count();
+    const stashCount = await prisma.stashInstance.count();
+    const setupComplete = userCount > 0 && stashCount > 0;
+
+    if (setupComplete) {
+      return res.status(403).json({
+        error:
+          "Setup is complete. Use account settings to change your password.",
+      });
+    }
+
     const { username, newPassword } = req.body;
 
     if (!username || !newPassword) {

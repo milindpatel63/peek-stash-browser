@@ -1,7 +1,8 @@
 import { forwardRef } from "react";
-import { getEffectiveImageMetadata } from "../../utils/imageGalleryInheritance.js";
+import { getEffectiveImageMetadata, getImageTitle } from "../../utils/imageGalleryInheritance.js";
 import { BaseCard } from "../ui/BaseCard.jsx";
 import { TooltipEntityGrid } from "../ui/TooltipEntityGrid.jsx";
+import { getIndicatorBehavior } from "../../config/indicatorBehaviors.js";
 
 /**
  * Format resolution string from width/height
@@ -17,24 +18,11 @@ const formatResolution = (width, height) => {
 };
 
 /**
- * Get image title with fallback to filename
- */
-const getImageTitle = (image) => {
-  if (image.title) return image.title;
-  if (image.filePath) {
-    // Extract filename from path
-    const parts = image.filePath.split(/[\\/]/);
-    return parts[parts.length - 1];
-  }
-  return `Image ${image.id}`;
-};
-
-/**
  * ImageCard - Card for displaying image entities
  * Supports onClick for lightbox integration
  */
 const ImageCard = forwardRef(
-  ({ image, onClick, referrerUrl, tabIndex, onHideSuccess, onOCounterChange, onRatingChange, onFavoriteChange, ...rest }, ref) => {
+  ({ image, onClick, fromPageTitle, tabIndex, onHideSuccess, onOCounterChange, onRatingChange, onFavoriteChange, displayPreferences, ...rest }, ref) => {
     // Get effective metadata (inherits from galleries if image doesn't have its own)
     const { effectivePerformers, effectiveTags, effectiveStudio, effectiveDate } = getEffectiveImageMetadata(image);
 
@@ -50,8 +38,8 @@ const ImageCard = forwardRef(
 
     const galleries = image.galleries || [];
 
-    // Build rich tooltip content for performers, tags, and galleries
-    const performersTooltip =
+    // Build rich tooltip content using centralized config
+    const performersTooltip = getIndicatorBehavior('image', 'performers') === 'rich' &&
       effectivePerformers.length > 0 && (
         <TooltipEntityGrid
           entityType="performer"
@@ -60,7 +48,7 @@ const ImageCard = forwardRef(
         />
       );
 
-    const tagsTooltip =
+    const tagsTooltip = getIndicatorBehavior('image', 'tags') === 'rich' &&
       effectiveTags.length > 0 && (
         <TooltipEntityGrid
           entityType="tag"
@@ -70,7 +58,7 @@ const ImageCard = forwardRef(
       );
 
     const galleriesCount = galleries.length;
-    const galleriesContent =
+    const galleriesContent = getIndicatorBehavior('image', 'galleries') === 'rich' &&
       galleriesCount > 0 && (
         <TooltipEntityGrid
           entityType="gallery"
@@ -135,10 +123,11 @@ const ImageCard = forwardRef(
         subtitle={subtitle}
         onClick={handleClick}
         linkTo={onClick ? undefined : `/image/${image.id}`}
-        referrerUrl={referrerUrl}
+        fromPageTitle={fromPageTitle}
         tabIndex={tabIndex}
         indicators={indicators}
         maxTitleLines={2}
+        displayPreferences={displayPreferences}
         ratingControlsProps={
           image.rating100 !== undefined || image.favorite !== undefined || image.oCounter !== undefined
             ? {

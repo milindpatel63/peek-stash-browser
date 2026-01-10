@@ -8,6 +8,7 @@ import type { PeekSceneFilter, NormalizedScene } from "../types/index.js";
 import prisma from "../prisma/singleton.js";
 import { logger } from "../utils/logger.js";
 import { expandStudioIds, expandTagIds } from "../utils/hierarchyUtils.js";
+import { getSceneFallbackTitle } from "../utils/titleUtils.js";
 
 // Filter clause builder result
 interface FilterClause {
@@ -250,6 +251,48 @@ class SceneQueryBuilder {
       case "EXCLUDES":
         return {
           sql: `s.id NOT IN (SELECT sceneId FROM SceneGroup WHERE groupId IN (${placeholders}))`,
+          params: ids,
+        };
+
+      default:
+        return { sql: "", params: [] };
+    }
+  }
+
+  /**
+   * Build galleries filter clause
+   */
+  private buildGalleriesFilter(
+    filter: { value?: string[] | null; modifier?: string | null } | undefined | null
+  ): FilterClause {
+    if (!filter || !filter.value || filter.value.length === 0) {
+      return { sql: "", params: [] };
+    }
+
+    const { value: ids, modifier = "INCLUDES" } = filter;
+    const placeholders = ids.map(() => "?").join(", ");
+
+    switch (modifier) {
+      case "INCLUDES":
+        return {
+          sql: `s.id IN (SELECT sceneId FROM SceneGallery WHERE galleryId IN (${placeholders}))`,
+          params: ids,
+        };
+
+      case "INCLUDES_ALL":
+        return {
+          sql: `s.id IN (
+            SELECT sceneId FROM SceneGallery
+            WHERE galleryId IN (${placeholders})
+            GROUP BY sceneId
+            HAVING COUNT(DISTINCT galleryId) = ?
+          )`,
+          params: [...ids, ids.length],
+        };
+
+      case "EXCLUDES":
+        return {
+          sql: `s.id NOT IN (SELECT sceneId FROM SceneGallery WHERE galleryId IN (${placeholders}))`,
           params: ids,
         };
 
@@ -1060,13 +1103,18 @@ class SceneQueryBuilder {
   ): string {
     const dir = direction === "ASC" ? "ASC" : "DESC";
 
+    // Extract filename from path: '/videos/My Scene.mp4' -> 'My Scene.mp4'
+    // This matches the display logic in getSceneFallbackTitle which uses basename
+    // Note: handles forward slashes; backslashes are uncommon in Stash paths
+    const filenameExpr = `REPLACE(s.filePath, RTRIM(s.filePath, REPLACE(s.filePath, '/', '')), '')`;
+
     // Map sort field names to SQL expressions
     const sortMap: Record<string, string> = {
       // Scene metadata
       created_at: `s.stashCreatedAt ${dir}`,
       updated_at: `s.stashUpdatedAt ${dir}`,
       date: `s.date ${dir}`,
-      title: `s.title ${dir}`,
+      title: `COALESCE(NULLIF(s.title, ''), ${filenameExpr}) COLLATE NOCASE ${dir}`,
       duration: `s.duration ${dir}`,
       filesize: `s.fileSize ${dir}`,
       bitrate: `s.fileBitRate ${dir}`,
@@ -1158,9 +1206,16 @@ class SceneQueryBuilder {
     }
 
     if (filters?.groups) {
-      const groupFilter = this.buildGroupFilter(filters.groups);
+      const groupFilter = this.buildGroupFilter(filters.groups as any);
       if (groupFilter.sql) {
         whereClauses.push(groupFilter);
+      }
+    }
+
+    if (filters?.galleries) {
+      const galleriesFilter = this.buildGalleriesFilter(filters.galleries as any);
+      if (galleriesFilter.sql) {
+        whereClauses.push(galleriesFilter);
       }
     }
 
@@ -1443,7 +1498,7 @@ class SceneQueryBuilder {
     // Create scene object with studioId preserved for population
     const scene: any = {
       id: row.id,
-      title: row.title || null,
+      title: row.title || getSceneFallbackTitle(row.filePath),
       code: row.code || null,
       date: row.date || null,
       details: row.details || null,
@@ -1458,13 +1513,15 @@ class SceneQueryBuilder {
       // Store studioId for later population
       studioId: row.studioId,
 
-      // User data - prefer Peek user data over Stash data
+      // User data - Peek user data ONLY, never fall back to Stash user data
+      // Stash data (stashOCounter, stashPlayCount, etc.) belongs to the Stash user,
+      // not the Peek user. Each Peek user starts at 0 for these fields.
       rating: row.userRating ?? null,
       rating100: row.userRating ?? null,
       favorite: Boolean(row.userFavorite),
-      o_counter: row.userOCount ?? row.stashOCounter ?? 0,
-      play_count: row.userPlayCount ?? row.stashPlayCount ?? 0,
-      play_duration: row.userPlayDuration ?? row.stashPlayDuration ?? 0,
+      o_counter: row.userOCount ?? 0,
+      play_count: row.userPlayCount ?? 0,
+      play_duration: row.userPlayDuration ?? 0,
       resume_time: row.userResumeTime ?? 0,
       play_history: playHistory,
       o_history: oHistory.map((ts: string) => new Date(ts)),
@@ -1721,10 +1778,12 @@ class SceneQueryBuilder {
   }
 
   private transformStashGallery(g: any): any {
+    const coverUrl = g.coverPath ? this.transformUrl(g.coverPath) : null;
     return {
       id: g.id,
       title: g.title,
-      cover: g.coverPath ? { paths: { thumbnail: this.transformUrl(g.coverPath) } } : null,
+      // Cover as simple string URL for consistency
+      cover: coverUrl,
     };
   }
 

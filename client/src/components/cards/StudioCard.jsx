@@ -1,57 +1,77 @@
-import { forwardRef } from "react";
+import { forwardRef, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { BaseCard } from "../ui/BaseCard.jsx";
+import { TooltipEntityGrid } from "../ui/TooltipEntityGrid.jsx";
+import { getIndicatorBehavior } from "../../config/indicatorBehaviors.js";
 
 /**
  * StudioCard - Card for displaying studio entities
  */
 const StudioCard = forwardRef(
-  ({ studio, referrerUrl, tabIndex, onHideSuccess, ...rest }, ref) => {
+  ({ studio, fromPageTitle, tabIndex, onHideSuccess, displayPreferences, ...rest }, ref) => {
     const navigate = useNavigate();
 
-    const indicators = [
-      { type: "PLAY_COUNT", count: studio.play_count },
-      {
-        type: "SCENES",
-        count: studio.scene_count,
-        onClick:
-          studio.scene_count > 0
-            ? () => navigate(`/scenes?studioId=${studio.id}`)
-            : undefined,
-      },
-      {
-        type: "IMAGES",
-        count: studio.image_count,
-        onClick:
-          studio.image_count > 0
-            ? () => navigate(`/images?studioId=${studio.id}`)
-            : undefined,
-      },
-      {
-        type: "GALLERIES",
-        count: studio.gallery_count,
-        onClick:
-          studio.gallery_count > 0
-            ? () => navigate(`/galleries?studioIds=${studio.id}`)
-            : undefined,
-      },
-      {
-        type: "PERFORMERS",
-        count: studio.performer_count,
-        onClick:
-          studio.performer_count > 0
-            ? () => navigate(`/performers?studioId=${studio.id}`)
-            : undefined,
-      },
-      {
-        type: "TAGS",
-        count: studio.tags?.length || 0,
-        onClick:
-          studio.tags?.length > 0
-            ? () => navigate(`/tags?studioId=${studio.id}`)
-            : undefined,
-      },
-    ];
+    const indicators = useMemo(() => {
+      const tagsTooltip = getIndicatorBehavior('studio', 'tags') === 'rich' &&
+        studio.tags?.length > 0 && (
+          <TooltipEntityGrid entityType="tag" entities={studio.tags} title="Tags" />
+        );
+
+      const performersTooltip = getIndicatorBehavior('studio', 'performers') === 'rich' &&
+        studio.performers?.length > 0 && (
+          <TooltipEntityGrid entityType="performer" entities={studio.performers} title="Performers" />
+        );
+
+      const groupsTooltip = getIndicatorBehavior('studio', 'groups') === 'rich' &&
+        studio.groups?.length > 0 && (
+          <TooltipEntityGrid entityType="group" entities={studio.groups} title="Collections" />
+        );
+
+      const galleriesTooltip = getIndicatorBehavior('studio', 'galleries') === 'rich' &&
+        studio.galleries?.length > 0 && (
+          <TooltipEntityGrid entityType="gallery" entities={studio.galleries} title="Galleries" />
+        );
+
+      return [
+        { type: "PLAY_COUNT", count: studio.play_count },
+        {
+          type: "SCENES",
+          count: studio.scene_count,
+          onClick:
+            studio.scene_count > 0
+              ? () => navigate(`/scenes?studioId=${studio.id}`)
+              : undefined,
+        },
+        {
+          type: "IMAGES",
+          count: studio.image_count,
+          onClick:
+            studio.image_count > 0
+              ? () => navigate(`/images?studioId=${studio.id}`)
+              : undefined,
+        },
+        {
+          type: "GALLERIES",
+          count: studio.galleries?.length || studio.gallery_count || 0,
+          tooltipContent: galleriesTooltip,
+        },
+        {
+          type: "GROUPS",
+          count: studio.groups?.length || studio.group_count || 0,
+          tooltipContent: groupsTooltip,
+        },
+        {
+          type: "PERFORMERS",
+          count: studio.performers?.length || studio.performer_count || 0,
+          tooltipContent: performersTooltip,
+        },
+        {
+          type: "TAGS",
+          count: studio.tags?.length || 0,
+          tooltipContent: tagsTooltip,
+        },
+      ];
+    }, [studio, navigate]);
 
     return (
       <BaseCard
@@ -61,10 +81,11 @@ const StudioCard = forwardRef(
         title={studio.name}
         description={studio.details}
         linkTo={`/studio/${studio.id}`}
-        referrerUrl={referrerUrl}
+        fromPageTitle={fromPageTitle}
         tabIndex={tabIndex}
         indicators={indicators}
         maxTitleLines={2}
+        displayPreferences={displayPreferences}
         ratingControlsProps={{
           entityId: studio.id,
           initialRating: studio.rating100,

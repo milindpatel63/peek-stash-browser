@@ -1,5 +1,5 @@
-import { useCallback, useRef } from "react";
-import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
+import { useCallback, useRef, useState } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { STANDARD_GRID_CONTAINER_CLASSNAMES } from "../../constants/grids.js";
 import { useInitialFocus } from "../../hooks/useFocusTrap.js";
 import { useGridColumns } from "../../hooks/useGridColumns.js";
@@ -19,7 +19,6 @@ import {
 const Tags = () => {
   usePageTitle("Tags");
   const navigate = useNavigate();
-  const location = useLocation();
   const [searchParams] = useSearchParams();
   const pageRef = useRef(null);
   const gridRef = useRef(null);
@@ -37,9 +36,11 @@ const Tags = () => {
   const currentTags = data?.tags || [];
   const totalCount = data?.count || 0;
 
-  // Calculate totalPages based on URL params
-  const urlPerPage = parseInt(searchParams.get("per_page")) || 24;
-  const totalPages = Math.ceil(totalCount / urlPerPage);
+  // Track effective perPage from SearchControls state (fixes stale URL param bug)
+  const [effectivePerPage, setEffectivePerPage] = useState(
+    parseInt(searchParams.get("per_page")) || 24
+  );
+  const totalPages = totalCount ? Math.ceil(totalCount / effectivePerPage) : 0;
 
   // TV Navigation - use shared hook for all grid pages
   const {
@@ -51,7 +52,10 @@ const Tags = () => {
     items: currentTags,
     columns,
     totalPages,
-    onItemSelect: (tag) => navigate(`/tag/${tag.id}`),
+    onItemSelect: (tag) =>
+      navigate(`/tag/${tag.id}`, {
+        state: { fromPageTitle: "Tags" },
+      }),
   });
 
   // Initial focus
@@ -83,6 +87,7 @@ const Tags = () => {
           artifactType="tag"
           initialSort="scenes_count"
           onQueryChange={handleQueryChange}
+          onPerPageStateChange={setEffectivePerPage}
           totalPages={totalPages}
           totalCount={totalCount}
           {...searchControlsProps}
@@ -109,7 +114,7 @@ const Tags = () => {
                     <TagCard
                       key={tag.id}
                       tag={tag}
-                      referrerUrl={`${location.pathname}${location.search}`}
+                      fromPageTitle="Tags"
                       tabIndex={isTVMode ? itemProps.tabIndex : -1}
                       {...itemProps}
                     />

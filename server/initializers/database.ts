@@ -1,11 +1,12 @@
 import { exec } from "child_process";
-import { existsSync, writeFileSync, unlinkSync } from "fs";
+import { existsSync, writeFileSync, unlinkSync, mkdirSync } from "fs";
 import path from "path";
 import { promisify } from "util";
 import { logger } from "../utils/logger.js";
 import { runSchemaCatchup } from "./schemaCatchup.js";
 
 const execAsync = promisify(exec);
+const TMP_DIR = "/app/data/tmp";
 
 // Track whether migrations were applied during startup
 let migrationsApplied = false;
@@ -20,10 +21,8 @@ export const wereMigrationsApplied = (): boolean => migrationsApplied;
  * Execute a SQLite query and return the result
  */
 async function sqliteQuery(dbPath: string, sql: string): Promise<string> {
-  const tmpFile = path.join(
-    process.env.TMP_DIR || "/tmp",
-    `sql_${Date.now()}.sql`
-  );
+  mkdirSync(TMP_DIR, { recursive: true });
+  const tmpFile = path.join(TMP_DIR, `sql_${Date.now()}.sql`);
   try {
     writeFileSync(tmpFile, sql);
     const { stdout } = await execAsync(
@@ -82,9 +81,8 @@ export const initializeDatabase = async (): Promise<void> => {
     "/app/data/peek-stash-browser.db";
 
   try {
-    // Generate Prisma client
-    logger.info("Generating Prisma client");
-    await execAsync("npx prisma generate");
+    // Prisma client is pre-generated in Docker build or by start.sh
+    // No need to regenerate here
 
     // Handle legacy databases that need schema catchup
     // See schemaCatchup.ts for details on why this is needed

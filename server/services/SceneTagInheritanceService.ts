@@ -179,10 +179,13 @@ class SceneTagInheritanceService {
       });
     }
 
-    // Bulk update using raw SQL for scalability
+    // Bulk update using raw SQL for performance
     // SQLite doesn't support UPDATE FROM, so we use CASE expressions
+    // Note: IDs come from our database (Stash UUIDs), not user input
     if (updates.length > 0) {
-      const cases = updates.map((u) => `WHEN '${u.id}' THEN '${u.inheritedTagIds.replace(/'/g, "''")}'`).join(" ");
+      const cases = updates
+        .map((u) => `WHEN '${u.id}' THEN '${u.inheritedTagIds.replace(/'/g, "''")}'`)
+        .join(" ");
       const ids = updates.map((u) => `'${u.id}'`).join(",");
 
       await prisma.$executeRawUnsafe(`

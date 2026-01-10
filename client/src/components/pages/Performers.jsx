@@ -1,5 +1,5 @@
-import { useCallback, useRef } from "react";
-import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
+import { useCallback, useRef, useState } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { STANDARD_GRID_CONTAINER_CLASSNAMES } from "../../constants/grids.js";
 import { useInitialFocus } from "../../hooks/useFocusTrap.js";
 import { useGridColumns } from "../../hooks/useGridColumns.js";
@@ -19,7 +19,6 @@ import {
 const Performers = () => {
   usePageTitle("Performers");
   const navigate = useNavigate();
-  const location = useLocation();
   const [searchParams] = useSearchParams();
   const pageRef = useRef(null);
   const gridRef = useRef(null);
@@ -37,9 +36,11 @@ const Performers = () => {
   const currentPerformers = data?.performers || [];
   const totalCount = data?.count || 0;
 
-  // Calculate totalPages based on URL params
-  const urlPerPage = parseInt(searchParams.get("per_page")) || 24;
-  const totalPages = Math.ceil(totalCount / urlPerPage);
+  // Track effective perPage from SearchControls state (fixes stale URL param bug)
+  const [effectivePerPage, setEffectivePerPage] = useState(
+    parseInt(searchParams.get("per_page")) || 24
+  );
+  const totalPages = totalCount ? Math.ceil(totalCount / effectivePerPage) : 0;
 
   // TV Navigation - use shared hook for all grid pages
   const {
@@ -54,7 +55,7 @@ const Performers = () => {
     totalPages,
     onItemSelect: (performer) =>
       navigate(`/performer/${performer.id}`, {
-        state: { referrerUrl: `${location.pathname}${location.search}` },
+        state: { fromPageTitle: "Performers" },
       }),
   });
 
@@ -110,6 +111,7 @@ const Performers = () => {
           artifactType="performer"
           initialSort="o_counter"
           onQueryChange={handleQueryChange}
+          onPerPageStateChange={setEffectivePerPage}
           totalPages={totalPages}
           totalCount={totalCount}
           {...searchControlsProps}
@@ -137,7 +139,7 @@ const Performers = () => {
                       key={performer.id}
                       performer={performer}
                       isTVMode={isTVMode}
-                      referrerUrl={`${location.pathname}${location.search}`}
+                      fromPageTitle="Performers"
                       {...itemProps}
                     />
                   );

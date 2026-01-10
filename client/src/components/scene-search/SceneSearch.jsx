@@ -1,5 +1,5 @@
-import { useCallback } from "react";
-import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
+import { useCallback, useState } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { useGridColumns } from "../../hooks/useGridColumns.js";
 import { useGridPageTVNavigation } from "../../hooks/useGridPageTVNavigation.js";
 import { useCancellableQuery } from "../../hooks/useCancellableQuery.js";
@@ -28,10 +28,10 @@ const SceneSearch = ({
   permanentFiltersMetadata = {},
   subtitle,
   title,
-  captureReferrer = true,
+  fromPageTitle,
+  syncToUrl = true, // Whether to sync pagination/filters to URL
 }) => {
   const navigate = useNavigate();
-  const location = useLocation();
   const [searchParams] = useSearchParams();
 
   const columns = useGridColumns("scenes");
@@ -72,9 +72,9 @@ const SceneSearch = ({
       },
     };
 
-    // Only capture referrerUrl if captureReferrer is true
-    if (captureReferrer) {
-      navigationState.referrerUrl = `${location.pathname}${location.search}`;
+    // Only capture fromPageTitle if provided
+    if (fromPageTitle) {
+      navigationState.fromPageTitle = fromPageTitle;
     }
 
     navigate(`/scene/${scene.id}`, { state: navigationState });
@@ -92,11 +92,11 @@ const SceneSearch = ({
 
   const totalCount = data?.count || 0;
 
-  // Read pagination state from URL params
-  const currentPerPage = parseInt(searchParams.get("per_page")) || 24;
-
-  // Calculate totalPages based on currentPerPage from query
-  const totalPages = Math.ceil(totalCount / currentPerPage);
+  // Track effective perPage from SearchControls state (fixes stale URL param bug)
+  const [effectivePerPage, setEffectivePerPage] = useState(
+    parseInt(searchParams.get("per_page")) || 24
+  );
+  const totalPages = totalCount ? Math.ceil(totalCount / effectivePerPage) : 0;
 
   // TV Navigation - use shared hook for all grid pages
   const {
@@ -132,11 +132,12 @@ const SceneSearch = ({
         context={context}
         initialSort={initialSort}
         onQueryChange={handleQueryChange}
+        onPerPageStateChange={setEffectivePerPage}
         permanentFilters={permanentFilters}
         permanentFiltersMetadata={permanentFiltersMetadata}
         totalPages={totalPages}
         totalCount={totalCount}
-        syncToUrl={captureReferrer}
+        syncToUrl={syncToUrl}
         {...searchControlsProps}
       >
         <SceneGrid
@@ -145,6 +146,7 @@ const SceneSearch = ({
           error={error}
           onSceneClick={handleSceneClick}
           onHideSuccess={handleHideSuccess}
+          fromPageTitle={fromPageTitle}
           emptyMessage="No scenes found"
           emptyDescription="Try adjusting your search filters"
           enableKeyboard={true}

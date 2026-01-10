@@ -21,6 +21,7 @@ import type {
   SceneScoringData,
 } from "../types/index.js";
 import { logger } from "../utils/logger.js";
+import { getSceneFallbackTitle, getGalleryFallbackTitle, getImageFallbackTitle } from "../utils/titleUtils.js";
 
 /**
  * Default user fields for scenes (when no user data is merged)
@@ -219,6 +220,103 @@ class StashEntityService {
     }));
 
     logger.info(`getScenesForScoring: ${Date.now() - startTime}ms, count=${result.length}`);
+
+    return result;
+  }
+
+  /**
+   * Get candidate scene IDs for similarity matching using SQL
+   * Returns up to maxCandidates scenes that share performers, tags, or studio
+   * with the given scene, weighted by relationship type.
+   *
+   * Weights:
+   * - Shared performer: 3 points
+   * - Same studio: 2 points
+   * - Shared tag: 1 point
+   *
+   * @param sceneId - The scene to find similar scenes for
+   * @param excludedIds - Set of scene IDs to exclude (e.g., user exclusions)
+   * @param maxCandidates - Maximum number of candidates to return (default 500)
+   * @returns Array of candidate scene IDs with weights and dates, sorted by weight desc then date desc
+   */
+  async getSimilarSceneCandidates(
+    sceneId: string,
+    excludedIds: Set<string>,
+    maxCandidates: number = 500
+  ): Promise<Array<{ sceneId: string; weight: number; date: string | null }>> {
+    const startTime = Date.now();
+
+    // Convert excludedIds to array for SQL IN clause
+    // If empty, use a dummy value that won't match any ID
+    const excludedArray = excludedIds.size > 0
+      ? Array.from(excludedIds)
+      : ['__NONE__'];
+
+    // SQL query to find candidate scenes sharing performers, tags, or studio
+    // Uses UNION ALL to combine weighted matches, then groups and sums weights
+    // Includes date for secondary sorting
+    const sql = `
+      WITH candidates AS (
+        -- Scenes sharing performers (weight: 3 per match)
+        SELECT sp2.sceneId, 3 as weight
+        FROM ScenePerformer sp1
+        JOIN ScenePerformer sp2 ON sp2.performerId = sp1.performerId
+        JOIN StashScene s ON s.id = sp2.sceneId AND s.deletedAt IS NULL
+        WHERE sp1.sceneId = ?
+          AND sp2.sceneId != ?
+
+        UNION ALL
+
+        -- Scenes from same studio (weight: 2)
+        SELECT s2.id as sceneId, 2 as weight
+        FROM StashScene s1
+        JOIN StashScene s2 ON s2.studioId = s1.studioId AND s2.deletedAt IS NULL
+        WHERE s1.id = ?
+          AND s2.id != ?
+          AND s1.studioId IS NOT NULL
+
+        UNION ALL
+
+        -- Scenes sharing tags (weight: 1 per match)
+        SELECT st2.sceneId, 1 as weight
+        FROM SceneTag st1
+        JOIN SceneTag st2 ON st2.tagId = st1.tagId
+        JOIN StashScene s ON s.id = st2.sceneId AND s.deletedAt IS NULL
+        WHERE st1.sceneId = ?
+          AND st2.sceneId != ?
+      )
+      SELECT c.sceneId, SUM(c.weight) as totalWeight, s.date
+      FROM candidates c
+      JOIN StashScene s ON s.id = c.sceneId
+      WHERE c.sceneId NOT IN (${excludedArray.map(() => '?').join(',')})
+      GROUP BY c.sceneId
+      ORDER BY totalWeight DESC, s.date DESC
+      LIMIT ?
+    `;
+
+    // Build params array: sceneId appears 6 times (for each WHERE clause),
+    // then excludedIds, then maxCandidates
+    const params = [
+      sceneId, sceneId,  // performers
+      sceneId, sceneId,  // studio
+      sceneId, sceneId,  // tags
+      ...excludedArray,
+      maxCandidates,
+    ];
+
+    const rows = await prisma.$queryRawUnsafe<Array<{
+      sceneId: string;
+      totalWeight: number;
+      date: string | null;
+    }>>(sql, ...params);
+
+    const result = rows.map(row => ({
+      sceneId: row.sceneId,
+      weight: Number(row.totalWeight),
+      date: row.date,
+    }));
+
+    logger.info(`getSimilarSceneCandidates: ${Date.now() - startTime}ms, candidates=${result.length}`);
 
     return result;
   }
@@ -1043,6 +1141,7 @@ class StashEntityService {
       include: {
         performers: { include: { performer: true } },
         tags: { include: { tag: true } }, // Include full tag data
+        scenes: { include: { scene: true } },
       },
     });
 
@@ -1058,6 +1157,7 @@ class StashEntityService {
       include: {
         performers: { include: { performer: true } },
         tags: { include: { tag: true } },
+        scenes: { include: { scene: true } },
       },
     });
 
@@ -1089,6 +1189,7 @@ class StashEntityService {
       include: {
         performers: { include: { performer: true } },
         tags: { include: { tag: true } },
+        scenes: { include: { scene: true } },
       },
     });
 
@@ -1495,7 +1596,7 @@ class StashEntityService {
       ...DEFAULT_SCENE_USER_FIELDS,
 
       id: scene.id,
-      title: scene.title,
+      title: scene.title || getSceneFallbackTitle(scene.filePath),
       code: scene.code,
       date: scene.date,
       details: scene.details,
@@ -1562,7 +1663,7 @@ class StashEntityService {
       ...DEFAULT_SCENE_USER_FIELDS,
 
       id: scene.id,
-      title: scene.title,
+      title: scene.title || getSceneFallbackTitle(scene.filePath),
       code: scene.code,
       date: scene.date,
       details: scene.details,
@@ -1771,6 +1872,7 @@ class StashEntityService {
       studio_count: tag.studioCount ?? 0,
       group_count: tag.groupCount ?? 0,
       scene_marker_count: tag.sceneMarkerCount ?? 0,
+      scene_count_via_performers: tag.sceneCountViaPerformers ?? 0,
       description: tag.description,
       aliases: tag.aliases ? JSON.parse(tag.aliases) : [],
       parents: tag.parentIds ? JSON.parse(tag.parentIds).map((id: string) => ({ id })) : [],
@@ -1824,13 +1926,23 @@ class StashEntityService {
       image_path: this.transformUrl(gp.performer.imagePath),
     })) || [];
 
+    // Transform scenes from junction table
+    // Include minimal data for display (id, title, screenshot)
+    const scenes = gallery.scenes?.map((gs: any) => ({
+      id: gs.scene.id,
+      title: gs.scene.title,
+      paths: {
+        screenshot: this.transformUrl(gs.scene.pathScreenshot),
+      },
+    })) || [];
+
     // Build files array for frontend title fallback (zip galleries)
     const files = gallery.fileBasename ? [{ basename: gallery.fileBasename }] : [];
 
     return {
       ...DEFAULT_GALLERY_USER_FIELDS,
       id: gallery.id,
-      title: gallery.title,
+      title: gallery.title || getGalleryFallbackTitle(gallery.folderPath, gallery.fileBasename),
       date: gallery.date,
       studio: gallery.studioId ? { id: gallery.studioId } : null,
       rating100: gallery.rating100,
@@ -1841,13 +1953,14 @@ class StashEntityService {
       folder: gallery.folderPath ? { path: gallery.folderPath } : null,
       // Files array for frontend galleryTitle() fallback
       files,
-      cover: coverUrl ? { paths: { thumbnail: coverUrl } } : null,
-      // Frontend expects gallery.paths.cover for the cover image
-      paths: coverUrl ? { cover: coverUrl } : null,
+      // Cover as simple string URL for consistency
+      cover: coverUrl,
       // Tags from junction table relation - will be hydrated with names in controller
       tags,
       // Performers from junction table
       performers,
+      // Scenes from junction table
+      scenes,
       created_at: gallery.stashCreatedAt?.toISOString() ?? null,
       updated_at: gallery.stashUpdatedAt?.toISOString() ?? null,
     } as unknown as NormalizedGallery;
@@ -1876,7 +1989,7 @@ class StashEntityService {
       details: ig.gallery.details,
       photographer: ig.gallery.photographer,
       urls: ig.gallery.urls ? JSON.parse(ig.gallery.urls) : [],
-      cover_path: this.transformUrl(ig.gallery.coverPath),
+      cover: this.transformUrl(ig.gallery.coverPath),
       studioId: ig.gallery.studioId,
       // Include studio object for inheritance
       studio: ig.gallery.studio ? {
@@ -1903,7 +2016,7 @@ class StashEntityService {
 
     return {
       id: image.id,
-      title: image.title,
+      title: image.title || getImageFallbackTitle(image.filePath),
       code: image.code,
       details: image.details,
       photographer: image.photographer,
