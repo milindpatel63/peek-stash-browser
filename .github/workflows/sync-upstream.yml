@@ -1,42 +1,53 @@
-name: Sync fork with upstream (main)
+name: Sync fork to latest upstream beta tag
 
-# Run on schedule and allow manual runs
 on:
   schedule:
-    - cron: "0 */12 * * *"   # every 6 hours (adjust as you like)
-  workflow_dispatch:        # allows manual trigger
+    - cron: "0 */12 * * *"
+  workflow_dispatch:
 
 jobs:
   sync:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout this repository (fork)
+      - name: Checkout fork
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          persist-credentials: false   # we will push with explicit token URL
 
-      - name: Configure git user
+      - name: Configure git
         run: |
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
 
-      - name: Add upstream and fetch
+      - name: Add upstream and fetch tags
         run: |
           git remote add upstream https://github.com/carrotwaxr/peek-stash-browser.git
-          git fetch upstream
+          git fetch upstream --tags
 
-      - name: Ensure we're on main
+      - name: Find latest beta tag
+        id: beta
         run: |
-          git checkout main
+          TAG=$(git tag -l "*beta*" --sort=-v:refname | head -n 1)
 
-      - name: Merge upstream/main (will fail on conflicts)
+          if [ -z "$TAG" ]; then
+            echo "No beta tag found"
+            exit 1
+          fi
+
+          echo "Using beta tag: $TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure main
+        run: git checkout main
+
+      - name: Merge beta tag commit (NO history rewrite)
         run: |
-          git merge upstream/main --no-edit
+          git merge --ff-only ${{ steps.beta.outputs.tag }} || \
+          git merge ${{ steps.beta.outputs.tag }} --no-edit
 
-      - name: Push merged main to fork
+      - name: Push to fork (GITHUB_TOKEN)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # push using token so the action can write to the fork
-          git push https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }} HEAD:main
+          git push https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }} main
