@@ -5,6 +5,14 @@
          <lastmod>2026-01-10</lastmod>
     </url>
     <url>
+         <loc>https://carrotwaxr.github.io/peek-stash-browser/audits/2026-01-04-frontend-api-usage-audit/</loc>
+         <lastmod>2026-01-10</lastmod>
+    </url>
+    <url>
+         <loc>https://carrotwaxr.github.io/peek-stash-browser/audits/2026-01-04-security-audit-unauthenticated-routes/</loc>
+         <lastmod>2026-01-10</lastmod>
+    </url>
+    <url>
          <loc>https://carrotwaxr.github.io/peek-stash-browser/design/cache-scalability-brainstorm/</loc>
          <lastmod>2026-01-10</lastmod>
     </url>
@@ -17,11 +25,23 @@
          <lastmod>2026-01-10</lastmod>
     </url>
     <url>
+         <loc>https://carrotwaxr.github.io/peek-stash-browser/design/scalability-audit-500k-scenes/</loc>
+         <lastmod>2026-01-10</lastmod>
+    </url>
+    <url>
          <loc>https://carrotwaxr.github.io/peek-stash-browser/design/sqlite-cache-schema/</loc>
          <lastmod>2026-01-10</lastmod>
     </url>
     <url>
+         <loc>https://carrotwaxr.github.io/peek-stash-browser/development/api-reference/</loc>
+         <lastmod>2026-01-10</lastmod>
+    </url>
+    <url>
          <loc>https://carrotwaxr.github.io/peek-stash-browser/development/regression-testing/</loc>
+         <lastmod>2026-01-10</lastmod>
+    </url>
+    <url>
+         <loc>https://carrotwaxr.github.io/peek-stash-browser/development/sync-architecture/</loc>
          <lastmod>2026-01-10</lastmod>
     </url>
     <url>
@@ -209,6 +229,110 @@
          <lastmod>2026-01-10</lastmod>
     </url>
     <url>
+         <loc>https://carrotwaxr.github.io/peek-stash-browser/plans/2026-01-04-api-docs-generator-design/</loc>
+         <lastmod>2026-01-10</lastmod>
+    </url>
+    <url>
+         <loc>https://carrotwaxr.github.io/peek-stash-browser/plans/2026-01-04-api-docs-generator-implementation/</loc>
+         <lastmod>2026-01-10</lastmod>
+    </url>
+    <url>
+         <loc>https://carrotwaxr.github.io/peek-stash-browser/plans/2026-01-04-integration-test-expansion-plan/</loc>
+         <lastmod>2026-01-10</lastmod>
+    </url>
+    <url>
+         <loc>https://carrotwaxr.github.io/peek-stash-browser/plans/2026-01-04-integration-test-failures-analysis/</loc>
+         <lastmod>2026-01-10</lastmod>
+    </url>
+    <url>
+         <loc>https://carrotwaxr.github.io/peek-stash-browser/plans/2026-01-04-integration-testing-design/</loc>
+         <lastmod>2026-01-10</lastmod>
+    </url>
+    <url>
+         <loc>https://carrotwaxr.github.io/peek-stash-browser/plans/2026-01-04-integration-testing-implementation/</loc>
+         <lastmod>2026-01-10</lastmod>
+    </url>
+    <url>
+         <loc>https://carrotwaxr.github.io/peek-stash-browser/plans/2026-01-05-ui-component-refactor-3.2.0/</loc>
+         <lastmod>2026-01-10</lastmod>
+    </url>
+    <url>
+         <loc>https://carrotwaxr.github.io/peek-stash-browser/plans/2026-01-05-unified-settings-navigation-design/</loc>
+         <lastmod>2026-01-10</lastmod>
+    </url>
+    <url>
+         <loc>https://carrotwaxr.github.io/peek-stash-browser/plans/2026-01-05-unified-settings-navigation/</loc>
+         <lastmod>2026-01-10</lastmod>
+    </url>
+    <url>
+         <loc>https://carrotwaxr.github.io/peek-stash-browser/plans/2026-01-06-scalability-500k-fixes/</loc>
+         <lastmod>2026-01-10</lastmod>
+    </url>
+    <url>
+         <loc>https://carrotwaxr.github.io/peek-stash-browser/plans/2026-01-06-scalability-phase-2/</loc>
+         <lastmod>2026-01-10</lastmod>
+    </url>
+    <url>
+         <loc>https://carrotwaxr.github.io/peek-stash-browser/plans/2026-01-07-minimal-endpoints-count-filter/</loc>
+         <lastmod>2026-01-10</lastmod>
+    </url>
+    <url>
+         <loc>https://carrotwaxr.github.io/peek-stash-browser/plans/2026-01-07-rich-tooltip-indicators-design/</loc>
+         <lastmod>2026-01-10</lastmod>
+    </url>
+    <url>
+         <loc>https://carrotwaxr.github.io/peek-stash-browser/plans/2026-01-07-rich-tooltip-indicators-implementation/</loc>
+         <lastmod>2026-01-10</lastmod>
+    </url>
+    <url>
+         <loc>https://carrotwaxr.github.io/peek-stash-browser/plans/2026-01-08-card-interaction-improvements-design/</loc>
+         <lastmod>2026-01-10</lastmod>
+    </url>
+    <url>
+         <loc>https://carrotwaxr.github.io/peek-stash-browser/plans/2026-01-08-card-interaction-improvements/</loc>
+         <lastmod>2026-01-10</lastmod>
+    </url>
+    <url>
+         <loc>https://carrotwaxr.github.io/peek-stash-browser/plans/2026-01-08-docker-build-optimization/</loc>
+         <lastmod>2026-01-10</lastmod>
+    </url>
+    <url>
+         <loc>https://carrotwaxr.github.io/peek-stash-browser/plans/2026-01-08-scenecard-navigation-issue/</loc>
+         <lastmod>2026-01-10</lastmod>
+    </url>
+    <url>
+         <loc>https://carrotwaxr.github.io/peek-stash-browser/plans/2026-01-08-tabs-pagination-url-sync/</loc>
+         <lastmod>2026-01-10</lastmod>
+    </url>
+    <url>
+         <loc>https://carrotwaxr.github.io/peek-stash-browser/plans/2026-01-08-unified-card-architecture-design/</loc>
+         <lastmod>2026-01-10</lastmod>
+    </url>
+    <url>
+         <loc>https://carrotwaxr.github.io/peek-stash-browser/plans/2026-01-08-url-state-management-design/</loc>
+         <lastmod>2026-01-10</lastmod>
+    </url>
+    <url>
+         <loc>https://carrotwaxr.github.io/peek-stash-browser/plans/2026-01-08-url-state-management-implementation/</loc>
+         <lastmod>2026-01-10</lastmod>
+    </url>
+    <url>
+         <loc>https://carrotwaxr.github.io/peek-stash-browser/plans/2026-01-09-auth-session-improvements-design/</loc>
+         <lastmod>2026-01-10</lastmod>
+    </url>
+    <url>
+         <loc>https://carrotwaxr.github.io/peek-stash-browser/plans/2026-01-09-contextual-back-navigation-design/</loc>
+         <lastmod>2026-01-10</lastmod>
+    </url>
+    <url>
+         <loc>https://carrotwaxr.github.io/peek-stash-browser/plans/2026-01-09-contextual-back-navigation-implementation/</loc>
+         <lastmod>2026-01-10</lastmod>
+    </url>
+    <url>
+         <loc>https://carrotwaxr.github.io/peek-stash-browser/plans/2026-01-09-server-side-title-fallback/</loc>
+         <lastmod>2026-01-10</lastmod>
+    </url>
+    <url>
          <loc>https://carrotwaxr.github.io/peek-stash-browser/plans/MULTI_INSTANCE_STASH/</loc>
          <lastmod>2026-01-10</lastmod>
     </url>
@@ -225,6 +349,14 @@
          <lastmod>2026-01-10</lastmod>
     </url>
     <url>
+         <loc>https://carrotwaxr.github.io/peek-stash-browser/releases/3.1.0-testing-checklist/</loc>
+         <lastmod>2026-01-10</lastmod>
+    </url>
+    <url>
+         <loc>https://carrotwaxr.github.io/peek-stash-browser/releases/v3.1.0/</loc>
+         <lastmod>2026-01-10</lastmod>
+    </url>
+    <url>
          <loc>https://carrotwaxr.github.io/peek-stash-browser/user-guide/custom-carousels/</loc>
          <lastmod>2026-01-10</lastmod>
     </url>
@@ -237,11 +369,19 @@
          <lastmod>2026-01-10</lastmod>
     </url>
     <url>
+         <loc>https://carrotwaxr.github.io/peek-stash-browser/user-guide/images/</loc>
+         <lastmod>2026-01-10</lastmod>
+    </url>
+    <url>
          <loc>https://carrotwaxr.github.io/peek-stash-browser/user-guide/keyboard-navigation/</loc>
          <lastmod>2026-01-10</lastmod>
     </url>
     <url>
          <loc>https://carrotwaxr.github.io/peek-stash-browser/user-guide/playlists/</loc>
+         <lastmod>2026-01-10</lastmod>
+    </url>
+    <url>
+         <loc>https://carrotwaxr.github.io/peek-stash-browser/user-guide/recommendations/</loc>
          <lastmod>2026-01-10</lastmod>
     </url>
     <url>
