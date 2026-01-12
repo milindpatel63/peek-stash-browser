@@ -28,7 +28,7 @@ jobs:
       - name: Find latest tag
         id: beta
         run: |
-          TAG=$(git tag --sort=-v:refname | head -n 1)
+          TAG=$(git for-each-ref --sort=-creatordate --format '%(refname:short)' refs/tags | head -n 1)
 
           if [ -z "$TAG" ]; then
             echo "No tagged release found"
