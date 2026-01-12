@@ -25,23 +25,23 @@ jobs:
           git remote add upstream https://github.com/carrotwaxr/peek-stash-browser.git
           git fetch upstream --tags
 
-      - name: Find latest beta tag
+      - name: Find latest tag
         id: beta
         run: |
-          TAG=$(git tag -l "*beta*" --sort=-v:refname | head -n 1)
+          TAG=$(git tag --sort=-v:refname | head -n 1)
 
           if [ -z "$TAG" ]; then
-            echo "No beta tag found"
+            echo "No tagged release found"
             exit 1
           fi
 
-          echo "Using beta tag: $TAG"
+          echo "Using tag: $TAG"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       - name: Ensure main
         run: git checkout main
 
-      - name: Merge beta tag commit (NO history rewrite)
+      - name: Merge tag commit (NO history rewrite)
         run: |
           git merge --ff-only ${{ steps.beta.outputs.tag }} || \
           git merge ${{ steps.beta.outputs.tag }} --no-edit
