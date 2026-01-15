@@ -38,6 +38,9 @@ const getContextLabel = (ctx) => {
  * @param {Object} props.permanentFilters - Permanent filters to exclude from saved presets
  * @param {string} props.currentSort - Current sort field
  * @param {string} props.currentDirection - Current sort direction
+ * @param {string} props.currentViewMode - Current view mode (grid/wall/table)
+ * @param {string} props.currentZoomLevel - Current zoom level (small/medium/large)
+ * @param {Object} props.currentTableColumns - Current table columns config { visible: [], order: [] }
  * @param {Function} props.onLoadPreset - Callback when a preset is loaded
  */
 const FilterPresets = ({
@@ -47,6 +50,9 @@ const FilterPresets = ({
   permanentFilters = {},
   currentSort,
   currentDirection,
+  currentViewMode = "grid",
+  currentZoomLevel = "medium",
+  currentTableColumns = null,
   onLoadPreset,
 }) => {
   // Use context if provided, otherwise fall back to artifactType
@@ -113,6 +119,9 @@ const FilterPresets = ({
         filters: filtersToSave,
         sort: currentSort,
         direction: currentDirection,
+        viewMode: currentViewMode,
+        zoomLevel: currentZoomLevel,
+        tableColumns: currentViewMode === "table" ? currentTableColumns : null,
         setAsDefault,
       });
 
@@ -144,6 +153,9 @@ const FilterPresets = ({
       filters: mergedFilters,
       sort: preset.sort,
       direction: preset.direction,
+      viewMode: preset.viewMode || "grid",
+      zoomLevel: preset.zoomLevel || "medium",
+      tableColumns: preset.tableColumns || null,
     });
     setIsDropdownOpen(false);
     setSuccess(`Preset "${preset.name}" loaded!`);

@@ -33,12 +33,15 @@ import {
 import {
   ActiveFilterChips,
   Button,
+  ContextSettings,
   FilterControl,
   FilterPanel,
   FilterPresets,
   Pagination,
   SearchInput,
   SortControl,
+  ViewModeToggle,
+  ZoomSlider,
 } from "./index.js";
 
 const buildFilter = (artifactType, filters, unitPreference) => {
@@ -94,6 +97,17 @@ const SearchControls = ({
   totalPages,
   totalCount,
   syncToUrl = true,
+  // View mode props
+  supportsWallView = false,
+  viewModes, // Array of mode configs for ViewModeToggle (optional, overrides supportsWallView)
+  onViewModeChange, // Callback when view mode changes (optional)
+  wallPlayback = "autoplay",
+  onWallPlaybackChange, // Callback when wall playback setting changes
+  // Table view props
+  currentTableColumns = null, // Current table columns config for saving to presets
+  tableColumnsPopover = null, // ColumnConfigPopover component to render in toolbar
+  // Context settings - config array for the settings cog
+  contextSettings = [], // Array of setting configs: [{key, label, type, options}]
   // TV Mode props
   tvSearchZoneActive = false,
   tvTopPaginationZoneActive = false,
@@ -113,13 +127,16 @@ const SearchControls = ({
   // Unit preference for filter conversions
   const { unitPreference } = useUnitPreference();
 
-  // Search zone items: SearchInput, SortControl, SortDirection, Filters, FilterPresets
+  // Search zone items: SearchInput, SortControl, SortDirection, Filters, FilterPresets, ViewMode, Zoom, ContextSettings
   const searchZoneItems = useMemo(() => [
     { id: "search-input", name: "Search" },
     { id: "sort-control", name: "Sort" },
     { id: "sort-direction", name: "Direction" },
     { id: "filters-button", name: "Filters" },
     { id: "filter-presets", name: "Presets" },
+    { id: "view-mode", name: "View" },
+    { id: "zoom-level", name: "Zoom" },
+    { id: "context-settings", name: "Settings" },
   ], []);
 
   // Horizontal navigation for search zone
@@ -220,6 +237,8 @@ const SearchControls = ({
     sort,
     pagination,
     searchText,
+    viewMode,
+    zoomLevel,
     isInitialized,
     isLoadingPresets,
     setFilters: setFiltersAction,
@@ -229,6 +248,8 @@ const SearchControls = ({
     setPage,
     setPerPage: setPerPageAction,
     setSearchText: setSearchTextAction,
+    setViewMode,
+    setZoomLevel,
     loadPreset,
   } = useFilterState({
     artifactType,
@@ -251,6 +272,13 @@ const SearchControls = ({
       onPerPageStateChange(perPage);
     }
   }, [perPage, onPerPageStateChange]);
+
+  // Notify parent of view mode changes
+  useEffect(() => {
+    if (onViewModeChange) {
+      onViewModeChange(viewMode);
+    }
+  }, [viewMode, onViewModeChange]);
 
   // Local filters state for filter panel editing (before submit)
   const [localFilters, setLocalFilters] = useState(filters);
@@ -624,8 +652,8 @@ const SearchControls = ({
 
   return (
     <div>
-      {/* Mobile-responsive controls - optimized for minimal vertical space */}
-      <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 mb-4">
+      {/* Row 1: Search, Sort, Filters - "What to show" */}
+      <div className="flex flex-col sm:flex-row items-stretch sm:items-center sm:justify-center gap-3 mb-3">
         {/* Search Input - Flexible width with min-width */}
         <div
           data-tv-search-item="search-input"
@@ -642,7 +670,7 @@ const SearchControls = ({
           />
         </div>
 
-        {/* Sort, Filter, Presets - Wrap on narrow widths */}
+        {/* Sort, Filter */}
         <div className="flex flex-wrap items-center gap-2 sm:gap-3 sm:flex-nowrap">
           {/* Sort Control - No label, just dropdown + direction button */}
           <div className="flex items-center gap-1">
@@ -723,23 +751,77 @@ const SearchControls = ({
               )}
             </Button>
           </div>
+        </div>
+      </div>
 
-          {/* Filter Presets */}
+      {/* Row 2: Presets, View Mode, Zoom, Settings - "How to show it" */}
+      <div className="flex flex-wrap items-center justify-center gap-2 sm:gap-3 mb-4">
+        {/* Filter Presets */}
+        <div
+          data-tv-search-item="filter-presets"
+          ref={(el) => searchZoneNav.setItemRef(4, el)}
+          className={searchZoneNav.isFocused(4) ? "keyboard-focus" : ""}
+        >
+          <FilterPresets
+            artifactType={artifactType}
+            context={effectiveContext}
+            currentFilters={filters}
+            currentSort={sortField}
+            currentDirection={sortDirection}
+            currentViewMode={viewMode}
+            currentZoomLevel={zoomLevel}
+            currentTableColumns={currentTableColumns}
+            permanentFilters={permanentFilters}
+            onLoadPreset={handleLoadPreset}
+          />
+        </div>
+
+        {/* View Mode Toggle - Show if supportsWallView or viewModes provided */}
+        {(supportsWallView || viewModes) && (
           <div
-            data-tv-search-item="filter-presets"
-            ref={(el) => searchZoneNav.setItemRef(4, el)}
-            className={searchZoneNav.isFocused(4) ? "keyboard-focus" : ""}
+            data-tv-search-item="view-mode"
+            ref={(el) => searchZoneNav.setItemRef(5, el)}
+            className={searchZoneNav.isFocused(5) ? "keyboard-focus" : ""}
           >
-            <FilterPresets
-              artifactType={artifactType}
-              context={effectiveContext}
-              currentFilters={filters}
-              currentSort={sortField}
-              currentDirection={sortDirection}
-              permanentFilters={permanentFilters}
-              onLoadPreset={handleLoadPreset}
+            <ViewModeToggle
+              modes={viewModes}
+              value={viewMode}
+              onChange={setViewMode}
             />
           </div>
+        )}
+
+        {/* Table Columns Popover - Only shown in table mode */}
+        {viewMode === "table" && tableColumnsPopover && (
+          <div>{tableColumnsPopover}</div>
+        )}
+
+        {/* Zoom Slider - Only shown in wall mode */}
+        {(supportsWallView || viewModes?.some(m => m.id === "wall")) && viewMode === "wall" && (
+          <div
+            data-tv-search-item="zoom-level"
+            ref={(el) => searchZoneNav.setItemRef(6, el)}
+            className={searchZoneNav.isFocused(6) ? "keyboard-focus" : ""}
+          >
+            <ZoomSlider value={zoomLevel} onChange={setZoomLevel} />
+          </div>
+        )}
+
+        {/* Context Settings Cog */}
+        <div
+          data-tv-search-item="context-settings"
+          ref={(el) => searchZoneNav.setItemRef(7, el)}
+          className={searchZoneNav.isFocused(7) ? "keyboard-focus" : ""}
+        >
+          <ContextSettings
+            settings={contextSettings}
+            currentValues={{ wallPlayback }}
+            onSettingChange={(key, value) => {
+              if (key === "wallPlayback" && onWallPlaybackChange) {
+                onWallPlaybackChange(value);
+              }
+            }}
+          />
         </div>
       </div>
 
@@ -902,7 +984,10 @@ const SearchControls = ({
           );
         })}
       </FilterPanel>
-      {children}
+      {/* Children: render prop or direct children */}
+      {typeof children === "function"
+        ? children({ viewMode, zoomLevel, wallPlayback, sortField, sortDirection, onSort: handleSortChange })
+        : children}
       {/* Bottom Pagination */}
       {totalPages >= 1 && (
         <div className="mt-4">

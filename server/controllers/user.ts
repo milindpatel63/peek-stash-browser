@@ -16,6 +16,14 @@ interface CarouselPreference {
 }
 
 /**
+ * Table column configuration for a preset
+ */
+interface TableColumnsConfig {
+  visible: string[];
+  order: string[];
+}
+
+/**
  * Filter preset for scene/performer/studio/tag filtering
  */
 interface FilterPreset {
@@ -24,6 +32,9 @@ interface FilterPreset {
   filters: unknown;
   sort?: string;
   direction?: string;
+  viewMode?: string;
+  zoomLevel?: string;
+  tableColumns?: TableColumnsConfig | null;
   createdAt?: string;
   [key: string]: unknown;
 }
@@ -121,6 +132,8 @@ export const getUserSettings = async (
         syncToStash: true,
         hideConfirmationDisabled: true,
         unitPreference: true,
+        wallPlayback: true,
+        tableColumnDefaults: true,
       },
     });
 
@@ -142,6 +155,8 @@ export const getUserSettings = async (
         syncToStash: user.syncToStash,
         hideConfirmationDisabled: user.hideConfirmationDisabled,
         unitPreference: user.unitPreference || "metric",
+        wallPlayback: user.wallPlayback || "autoplay",
+        tableColumnDefaults: user.tableColumnDefaults || null,
       },
     });
   } catch (error) {
@@ -190,6 +205,8 @@ export const updateUserSettings = async (
       minimumPlayPercent,
       syncToStash,
       unitPreference,
+      wallPlayback,
+      tableColumnDefaults,
     } = req.body;
 
     // Validate values
@@ -243,6 +260,16 @@ export const updateUserSettings = async (
       }
     }
 
+    // Validate wallPlayback if provided
+    if (wallPlayback !== undefined) {
+      const validWallPlayback = ["autoplay", "hover", "static"];
+      if (!validWallPlayback.includes(wallPlayback)) {
+        return res
+          .status(400)
+          .json({ error: "Wall playback must be 'autoplay', 'hover', or 'static'" });
+      }
+    }
+
     // Validate carousel preferences if provided
     if (carouselPreferences !== undefined) {
       if (!Array.isArray(carouselPreferences)) {
@@ -287,6 +314,58 @@ export const updateUserSettings = async (
       }
     }
 
+    // Validate table column defaults if provided
+    if (tableColumnDefaults !== undefined) {
+      if (tableColumnDefaults !== null && typeof tableColumnDefaults !== "object") {
+        return res
+          .status(400)
+          .json({ error: "Table column defaults must be an object or null" });
+      }
+
+      if (tableColumnDefaults !== null) {
+        const validEntityTypes = [
+          "scene",
+          "performer",
+          "studio",
+          "tag",
+          "group",
+          "gallery",
+          "image",
+        ];
+
+        for (const [entityType, config] of Object.entries(tableColumnDefaults)) {
+          if (!validEntityTypes.includes(entityType)) {
+            return res
+              .status(400)
+              .json({ error: `Invalid entity type in table column defaults: ${entityType}` });
+          }
+
+          const typedConfig = config as TableColumnsConfig;
+          if (
+            !typedConfig ||
+            !Array.isArray(typedConfig.visible) ||
+            !Array.isArray(typedConfig.order)
+          ) {
+            return res
+              .status(400)
+              .json({ error: `Invalid table column config for ${entityType}: must have visible and order arrays` });
+          }
+
+          // Validate that arrays contain strings
+          if (!typedConfig.visible.every((v: unknown) => typeof v === "string")) {
+            return res
+              .status(400)
+              .json({ error: `Invalid visible columns for ${entityType}: must be string array` });
+          }
+          if (!typedConfig.order.every((v: unknown) => typeof v === "string")) {
+            return res
+              .status(400)
+              .json({ error: `Invalid column order for ${entityType}: must be string array` });
+          }
+        }
+      }
+    }
+
     const updatedUser = await prisma.user.update({
       where: { id: targetUserId },
       data: {
@@ -302,6 +381,8 @@ export const updateUserSettings = async (
         ...(minimumPlayPercent !== undefined && { minimumPlayPercent }),
         ...(syncToStash !== undefined && { syncToStash }),
         ...(unitPreference !== undefined && { unitPreference }),
+        ...(wallPlayback !== undefined && { wallPlayback }),
+        ...(tableColumnDefaults !== undefined && { tableColumnDefaults }),
       },
       select: {
         id: true,
@@ -315,6 +396,8 @@ export const updateUserSettings = async (
         navPreferences: true,
         minimumPlayPercent: true,
         syncToStash: true,
+        wallPlayback: true,
+        tableColumnDefaults: true,
       },
     });
 
@@ -329,6 +412,8 @@ export const updateUserSettings = async (
         navPreferences: updatedUser.navPreferences || null,
         minimumPlayPercent: updatedUser.minimumPlayPercent,
         syncToStash: updatedUser.syncToStash,
+        wallPlayback: updatedUser.wallPlayback || "autoplay",
+        tableColumnDefaults: updatedUser.tableColumnDefaults || null,
       },
     });
   } catch (error) {
@@ -655,6 +740,9 @@ export const saveFilterPreset = async (
       filters,
       sort,
       direction,
+      viewMode,
+      zoomLevel,
+      tableColumns,
       setAsDefault,
     } = req.body;
 
@@ -712,6 +800,9 @@ export const saveFilterPreset = async (
       filters,
       sort,
       direction,
+      viewMode: viewMode || "grid",
+      zoomLevel: zoomLevel || "medium",
+      tableColumns: tableColumns || null,
       createdAt: new Date().toISOString(),
     };
 

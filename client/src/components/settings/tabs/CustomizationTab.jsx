@@ -6,6 +6,7 @@ import { migrateNavPreferences } from "../../../constants/navigation.js";
 import { showError, showSuccess } from "../../../utils/toast.jsx";
 import CarouselSettings from "../CarouselSettings.jsx";
 import NavigationSettings from "../NavigationSettings.jsx";
+import TableColumnSettings from "../TableColumnSettings.jsx";
 
 const api = axios.create({
   baseURL: "/api",
@@ -17,6 +18,9 @@ const CustomizationTab = () => {
   const { unitPreference, setUnitPreference } = useUnitPreference();
   const [carouselPreferences, setCarouselPreferences] = useState([]);
   const [navPreferences, setNavPreferences] = useState([]);
+  const [preferredPreviewQuality, setPreferredPreviewQuality] = useState("sprite");
+  const [wallPlayback, setWallPlayback] = useState("autoplay");
+  const [tableColumnDefaults, setTableColumnDefaults] = useState({});
 
   // Load settings on mount
   useEffect(() => {
@@ -33,6 +37,10 @@ const CustomizationTab = () => {
 
         const migratedNavPrefs = migrateNavPreferences(settings.navPreferences);
         setNavPreferences(migratedNavPrefs);
+
+        setPreferredPreviewQuality(settings.preferredPreviewQuality || "sprite");
+        setWallPlayback(settings.wallPlayback || "autoplay");
+        setTableColumnDefaults(settings.tableColumnDefaults || {});
       } catch {
         showError("Failed to load customization settings");
       } finally {
@@ -72,6 +80,37 @@ const CustomizationTab = () => {
     }
   };
 
+  const saveViewPreference = async (key, value) => {
+    try {
+      await api.put("/user/settings", {
+        [key]: value,
+      });
+
+      if (key === "preferredPreviewQuality") {
+        setPreferredPreviewQuality(value);
+      } else if (key === "wallPlayback") {
+        setWallPlayback(value);
+      }
+      showSuccess("View preference saved!");
+    } catch (err) {
+      showError(err.response?.data?.error || "Failed to save view preference");
+    }
+  };
+
+  const saveTableColumnDefaults = async (newDefaults) => {
+    try {
+      await api.put("/user/settings", {
+        tableColumnDefaults: newDefaults,
+      });
+      setTableColumnDefaults(newDefaults);
+      showSuccess("Table column defaults saved!");
+    } catch (err) {
+      showError(
+        err.response?.data?.error || "Failed to save table column defaults"
+      );
+    }
+  };
+
   if (loading) {
     return (
       <div
@@ -85,6 +124,98 @@ const CustomizationTab = () => {
 
   return (
     <div className="space-y-6">
+      {/* View Preferences */}
+      <div
+        className="p-6 rounded-lg border"
+        style={{
+          backgroundColor: "var(--bg-card)",
+          borderColor: "var(--border-color)",
+        }}
+      >
+        <h3
+          className="text-lg font-semibold mb-4"
+          style={{ color: "var(--text-primary)" }}
+        >
+          View Preferences
+        </h3>
+        <div className="space-y-4">
+          {/* Scene Card Preview Quality */}
+          <div>
+            <label
+              htmlFor="preferredPreviewQuality"
+              className="block text-sm font-medium mb-2"
+              style={{ color: "var(--text-secondary)" }}
+            >
+              Scene Card Preview Quality
+            </label>
+            <select
+              id="preferredPreviewQuality"
+              value={preferredPreviewQuality}
+              onChange={(e) => saveViewPreference("preferredPreviewQuality", e.target.value)}
+              className="w-full px-4 py-2 rounded-lg"
+              style={{
+                backgroundColor: "var(--bg-secondary)",
+                border: "1px solid var(--border-color)",
+                color: "var(--text-primary)",
+              }}
+            >
+              <option value="sprite">Low Quality - Sprite (Default)</option>
+              <option value="webp">High Quality - WebP Animation</option>
+              <option value="mp4">High Quality - MP4 Video</option>
+            </select>
+            <p className="text-sm mt-1" style={{ color: "var(--text-muted)" }}>
+              Quality of preview animations shown when hovering over scene cards. Low
+              quality (sprite) uses less bandwidth.
+            </p>
+          </div>
+
+          {/* Wall View Preview Behavior */}
+          <div>
+            <label
+              htmlFor="wallPlayback"
+              className="block text-sm font-medium mb-2"
+              style={{ color: "var(--text-secondary)" }}
+            >
+              Wall View Preview Behavior
+            </label>
+            <select
+              id="wallPlayback"
+              value={wallPlayback}
+              onChange={(e) => saveViewPreference("wallPlayback", e.target.value)}
+              className="w-full px-4 py-2 rounded-lg"
+              style={{
+                backgroundColor: "var(--bg-secondary)",
+                border: "1px solid var(--border-color)",
+                color: "var(--text-primary)",
+              }}
+            >
+              <option value="autoplay">Autoplay All (Default)</option>
+              <option value="hover">Play on Hover Only</option>
+              <option value="static">Static Thumbnails</option>
+            </select>
+            <p className="text-sm mt-1" style={{ color: "var(--text-muted)" }}>
+              Controls how scene previews behave in Wall view. Autoplay plays all visible
+              previews simultaneously. Hover only plays when you mouse over. Static shows
+              thumbnails only.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {/* Table Column Defaults */}
+      <div
+        className="p-6 rounded-lg border"
+        style={{
+          backgroundColor: "var(--bg-card)",
+          borderColor: "var(--border-color)",
+        }}
+      >
+        <TableColumnSettings
+          tableColumnDefaults={tableColumnDefaults}
+          onSave={saveTableColumnDefaults}
+        />
+      </div>
+
       {/* Measurement Units */}
       <div
         className="p-6 rounded-lg border"

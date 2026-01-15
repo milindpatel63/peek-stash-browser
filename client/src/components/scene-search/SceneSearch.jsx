@@ -1,8 +1,10 @@
-import { useCallback, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useGridColumns } from "../../hooks/useGridColumns.js";
 import { useGridPageTVNavigation } from "../../hooks/useGridPageTVNavigation.js";
 import { useCancellableQuery } from "../../hooks/useCancellableQuery.js";
+import { useTableColumns } from "../../hooks/useTableColumns.js";
+import { useWallPlayback } from "../../hooks/useWallPlayback.js";
 import { libraryApi } from "../../services/api.js";
 import {
   SyncProgressBanner,
@@ -11,7 +13,29 @@ import {
   PageLayout,
   SearchControls,
 } from "../ui/index.js";
+import { TableView, ColumnConfigPopover } from "../table/index.js";
 import SceneGrid from "./SceneGrid.jsx";
+import WallView from "../wall/WallView.jsx";
+
+// View modes available for scene search
+const VIEW_MODES = [
+  { id: "grid", label: "Grid view" },
+  { id: "table", label: "Table view" },
+];
+
+// Context settings for wall view preview behavior
+const WALL_VIEW_SETTINGS = [
+  {
+    key: "wallPlayback",
+    label: "Preview Behavior",
+    type: "select",
+    options: [
+      { value: "autoplay", label: "Autoplay All" },
+      { value: "hover", label: "Play on Hover" },
+      { value: "static", label: "Static Thumbnails" },
+    ],
+  },
+];
 
 /**
  * SceneSearch is one of the more core Components of the app. It appears on most pages, and utilizes the
@@ -35,8 +59,29 @@ const SceneSearch = ({
   const [searchParams] = useSearchParams();
 
   const columns = useGridColumns("scenes");
+  const { wallPlayback, updateWallPlayback } = useWallPlayback();
+
+  // Table columns hook for table view
+  const {
+    allColumns,
+    visibleColumns,
+    visibleColumnIds,
+    columnOrder,
+    toggleColumn,
+    hideColumn,
+    moveColumn,
+    getColumnConfig,
+  } = useTableColumns("scene");
 
   const { data, isLoading, error, initMessage, execute, setData } = useCancellableQuery();
+
+  // Track current view mode for context settings
+  const [currentViewMode, setCurrentViewMode] = useState("grid");
+
+  // Context settings only shown in wall view
+  const contextSettings = useMemo(() => {
+    return currentViewMode === "wall" ? WALL_VIEW_SETTINGS : [];
+  }, [currentViewMode]);
 
   // Handle successful hide - remove scene from state
   const handleHideSuccess = (sceneId) => {
@@ -138,23 +183,63 @@ const SceneSearch = ({
         totalPages={totalPages}
         totalCount={totalCount}
         syncToUrl={syncToUrl}
+        supportsWallView={true}
+        wallPlayback={wallPlayback}
+        onWallPlaybackChange={updateWallPlayback}
+        viewModes={VIEW_MODES}
+        currentTableColumns={getColumnConfig()}
+        tableColumnsPopover={
+          <ColumnConfigPopover
+            allColumns={allColumns}
+            visibleColumnIds={visibleColumnIds}
+            columnOrder={columnOrder}
+            onToggleColumn={toggleColumn}
+            onMoveColumn={moveColumn}
+          />
+        }
+        contextSettings={contextSettings}
+        onViewModeChange={setCurrentViewMode}
         {...searchControlsProps}
       >
-        <SceneGrid
-          scenes={currentScenes || []}
-          loading={isLoading}
-          error={error}
-          onSceneClick={handleSceneClick}
-          onHideSuccess={handleHideSuccess}
-          fromPageTitle={fromPageTitle}
-          emptyMessage="No scenes found"
-          emptyDescription="Try adjusting your search filters"
-          enableKeyboard={true}
-          isTVMode={isTVMode}
-          tvGridZoneActive={isTVMode && tvNavigation.isZoneActive("grid")}
-          gridNavigation={gridNavigation}
-          gridItemProps={gridItemProps}
-        />
+        {({ viewMode, zoomLevel, sortField, sortDirection, onSort }) =>
+          viewMode === "table" ? (
+            <TableView
+              items={currentScenes}
+              columns={visibleColumns}
+              sort={{ field: sortField, direction: sortDirection }}
+              onSort={onSort}
+              onHideColumn={hideColumn}
+              entityType="scene"
+              isLoading={isLoading}
+            />
+          ) : viewMode === "wall" ? (
+            <WallView
+              items={currentScenes}
+              entityType="scene"
+              zoomLevel={zoomLevel}
+              playbackMode={wallPlayback}
+              onItemClick={handleSceneClick}
+              loading={isLoading}
+              emptyMessage="No scenes found"
+            />
+          ) : (
+            <SceneGrid
+              scenes={currentScenes || []}
+              loading={isLoading}
+              error={error}
+              onSceneClick={handleSceneClick}
+              onHideSuccess={handleHideSuccess}
+              fromPageTitle={fromPageTitle}
+              emptyMessage="No scenes found"
+              emptyDescription="Try adjusting your search filters"
+              enableKeyboard={true}
+              isTVMode={isTVMode}
+              tvGridZoneActive={isTVMode && tvNavigation.isZoneActive("grid")}
+              gridNavigation={gridNavigation}
+              gridItemProps={gridItemProps}
+            />
+          )
+        }
       </SearchControls>
     </PageLayout>
   );

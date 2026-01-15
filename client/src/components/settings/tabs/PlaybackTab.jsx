@@ -13,7 +13,6 @@ const PlaybackTab = () => {
   const [saving, setSaving] = useState(false);
   const [preferredQuality, setPreferredQuality] = useState("auto");
   const [preferredPlaybackMode, setPreferredPlaybackMode] = useState("auto");
-  const [preferredPreviewQuality, setPreferredPreviewQuality] = useState("sprite");
   const [enableCast, setEnableCast] = useState(true);
   const [minimumPlayPercent, setMinimumPlayPercent] = useState(20);
 
@@ -27,7 +26,6 @@ const PlaybackTab = () => {
 
         setPreferredQuality(settings.preferredQuality || "auto");
         setPreferredPlaybackMode(settings.preferredPlaybackMode || "auto");
-        setPreferredPreviewQuality(settings.preferredPreviewQuality || "sprite");
         setEnableCast(settings.enableCast !== false);
         setMinimumPlayPercent(settings.minimumPlayPercent ?? 20);
       } catch {
@@ -48,7 +46,6 @@ const PlaybackTab = () => {
       await api.put("/user/settings", {
         preferredQuality,
         preferredPlaybackMode,
-        preferredPreviewQuality,
         enableCast,
         minimumPlayPercent,
       });
@@ -111,36 +108,6 @@ const PlaybackTab = () => {
             <p className="text-sm mt-1" style={{ color: "var(--text-muted)" }}>
               Default quality for video playback. Auto selects the best quality based on
               your connection.
-            </p>
-          </div>
-
-          {/* Preferred Preview Quality */}
-          <div>
-            <label
-              htmlFor="preferredPreviewQuality"
-              className="block text-sm font-medium mb-2"
-              style={{ color: "var(--text-secondary)" }}
-            >
-              Scene Card Preview Quality
-            </label>
-            <select
-              id="preferredPreviewQuality"
-              value={preferredPreviewQuality}
-              onChange={(e) => setPreferredPreviewQuality(e.target.value)}
-              className="w-full px-4 py-2 rounded-lg"
-              style={{
-                backgroundColor: "var(--bg-secondary)",
-                border: "1px solid var(--border-color)",
-                color: "var(--text-primary)",
-              }}
-            >
-              <option value="sprite">Low Quality - Sprite (Default)</option>
-              <option value="webp">High Quality - WebP Animation</option>
-              <option value="mp4">High Quality - MP4 Video</option>
-            </select>
-            <p className="text-sm mt-1" style={{ color: "var(--text-muted)" }}>
-              Quality of preview animations shown when hovering over scene cards. Low
-              quality (sprite) uses less bandwidth.
             </p>
           </div>
 

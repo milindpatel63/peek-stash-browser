@@ -7,6 +7,8 @@ import { usePageTitle } from "../../hooks/usePageTitle.js";
 import { useGridPageTVNavigation } from "../../hooks/useGridPageTVNavigation.js";
 import { useCancellableQuery } from "../../hooks/useCancellableQuery.js";
 import { usePaginatedLightbox } from "../../hooks/usePaginatedLightbox.js";
+import { useWallPlayback } from "../../hooks/useWallPlayback.js";
+import { useTableColumns } from "../../hooks/useTableColumns.js";
 import { libraryApi } from "../../services/api.js";
 import { ImageCard } from "../cards/index.js";
 import {
@@ -17,6 +19,14 @@ import {
   SearchControls,
 } from "../ui/index.js";
 import Lightbox from "../ui/Lightbox.jsx";
+import WallView from "../wall/WallView.jsx";
+import { TableView, ColumnConfigPopover } from "../table/index.js";
+
+// View modes available for images page
+const VIEW_MODES = [
+  { id: "grid", label: "Grid view" },
+  { id: "table", label: "Table view" },
+];
 
 const Images = () => {
   usePageTitle("Images");
@@ -24,6 +34,19 @@ const Images = () => {
   const pageRef = useRef(null);
   const gridRef = useRef(null);
   const columns = useGridColumns("images");
+  const { wallPlayback } = useWallPlayback();
+
+  // Table columns hook for table view
+  const {
+    allColumns,
+    visibleColumns,
+    visibleColumnIds,
+    columnOrder,
+    toggleColumn,
+    hideColumn,
+    moveColumn,
+    getColumnConfig,
+  } = useTableColumns("image");
 
   // Extract URL pagination params early (needed for hooks)
   const urlPerPage = parseInt(searchParams.get("per_page")) || 24;
@@ -164,24 +187,69 @@ const Images = () => {
           onPerPageStateChange={setEffectivePerPage}
           totalPages={totalPages}
           totalCount={totalCount}
+          supportsWallView={true}
+          wallPlayback={wallPlayback}
+          viewModes={VIEW_MODES}
+          currentTableColumns={getColumnConfig()}
+          tableColumnsPopover={
+            <ColumnConfigPopover
+              allColumns={allColumns}
+              visibleColumnIds={visibleColumnIds}
+              columnOrder={columnOrder}
+              onToggleColumn={toggleColumn}
+              onMoveColumn={moveColumn}
+            />
+          }
           {...searchControlsProps}
           paginationHandlerRef={paginationHandlerRef}
         >
-          {isLoading ? (
-            <div className={`${STANDARD_GRID_CONTAINER_CLASSNAMES} xl:grid-cols-4 2xl:grid-cols-5`}>
-              {[...Array(24)].map((_, i) => (
-                <div
-                  key={i}
-                  className="rounded-lg animate-pulse"
-                  style={{
-                    backgroundColor: "var(--bg-tertiary)",
-                    height: "16rem",
-                  }}
+          {({ viewMode, zoomLevel, sortField, sortDirection, onSort }) =>
+            isLoading ? (
+              viewMode === "table" ? (
+                <TableView
+                  items={[]}
+                  columns={visibleColumns}
+                  sort={{ field: sortField, direction: sortDirection }}
+                  onSort={onSort}
+                  onHideColumn={hideColumn}
+                  entityType="image"
+                  isLoading={true}
                 />
-              ))}
-            </div>
-          ) : (
-            <>
+              ) : (
+                <div className={`${STANDARD_GRID_CONTAINER_CLASSNAMES} xl:grid-cols-4 2xl:grid-cols-5`}>
+                  {[...Array(24)].map((_, i) => (
+                    <div
+                      key={i}
+                      className="rounded-lg animate-pulse"
+                      style={{
+                        backgroundColor: "var(--bg-tertiary)",
+                        height: "16rem",
+                      }}
+                    />
+                  ))}
+                </div>
+              )
+            ) : viewMode === "table" ? (
+              <TableView
+                items={currentImages}
+                columns={visibleColumns}
+                sort={{ field: sortField, direction: sortDirection }}
+                onSort={onSort}
+                onHideColumn={hideColumn}
+                entityType="image"
+                isLoading={false}
+              />
+            ) : viewMode === "wall" ? (
+              <WallView
+                items={currentImages}
+                entityType="image"
+                zoomLevel={zoomLevel}
+                playbackMode={wallPlayback}
+                onItemClick={handleImageClick}
+                loading={isLoading}
+                emptyMessage="No images found"
+              />
+            ) : (
               <div ref={gridRef} className={`${STANDARD_GRID_CONTAINER_CLASSNAMES} xl:grid-cols-4 2xl:grid-cols-5`}>
                 {currentImages.map((image, index) => {
                   const itemProps = gridItemProps(index);
@@ -200,8 +268,8 @@ const Images = () => {
                   );
                 })}
               </div>
-            </>
-          )}
+            )
+          }
         </SearchControls>
 
         {/* Lightbox for viewing images */}

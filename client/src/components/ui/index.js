@@ -23,6 +23,7 @@ export {
 export { CardCountIndicators } from "./CardCountIndicators.jsx";
 export { default as CardStatusIcons } from "./CardStatusIcons.jsx";
 export { default as ConfirmDialog } from "./ConfirmDialog.jsx";
+export { default as ContextSettings } from "./ContextSettings.jsx";
 export { default as ContinueWatchingCarousel } from "./ContinueWatchingCarousel.jsx";
 export { default as EmptyState } from "./EmptyState.jsx";
 export { default as EntityMenu } from "./EntityMenu.jsx";
@@ -71,4 +72,6 @@ export { default as Tooltip } from "./Tooltip.jsx";
 export { TooltipEntityGrid } from "./TooltipEntityGrid.jsx";
 export { default as TopBar } from "./TopBar.jsx";
 export { default as UserMenu } from "./UserMenu.jsx";
+export { default as ViewModeToggle } from "./ViewModeToggle.jsx";
 export { default as WarningMessage } from "./WarningMessage.jsx";
+export { default as ZoomSlider } from "./ZoomSlider.jsx";
