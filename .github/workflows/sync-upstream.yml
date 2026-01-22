@@ -5,10 +5,6 @@ on:
     - cron: "0 */12 * * *"
   workflow_dispatch:
 
-permissions:
-  contents: write
-  workflows: write
-
 jobs:
   sync:
     runs-on: ubuntu-latest
@@ -50,8 +46,8 @@ jobs:
           git merge --ff-only ${{ steps.beta.outputs.tag }} || \
           git merge ${{ steps.beta.outputs.tag }} --no-edit
 
-      - name: Push to fork (GITHUB_TOKEN)
+      - name: Push to fork (PAT)
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SYNC_TOKEN: ${{ secrets.SYNC_TOKEN }}
         run: |
-          git push https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }} main
+          git push https://x-access-token:${SYNC_TOKEN}@github.com/${{ github.repository }} main
