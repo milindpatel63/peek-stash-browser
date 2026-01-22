@@ -3,6 +3,12 @@ import { LucideSettings } from "lucide-react";
 import axios from "axios";
 import { showError, showSuccess } from "../../utils/toast.jsx";
 import { useCardDisplaySettings } from "../../contexts/CardDisplaySettingsContext.jsx";
+import {
+  getAvailableSettings,
+  getViewModes,
+  SETTING_LABELS,
+} from "../../config/entityDisplayConfig.js";
+import ZoomSlider from "./ZoomSlider.jsx";
 
 const api = axios.create({
   baseURL: "/api",
@@ -132,10 +138,12 @@ const ContextSettings = ({
       {/* Popover */}
       {isOpen && hasSettings && (
         <div
-          className="absolute right-0 top-full mt-2 w-64 rounded-lg shadow-lg z-50"
+          className="absolute top-full mt-2 w-64 rounded-lg shadow-lg z-50"
           style={{
             backgroundColor: "var(--bg-card)",
             border: "1px solid var(--border-color)",
+            right: "max(-1rem, calc(-100vw + 100% + 1rem))",
+            maxWidth: "calc(100vw - 1rem)",
           }}
         >
           {/* Header */}
@@ -228,68 +236,76 @@ const ContextSettings = ({
                   Card Display
                 </h4>
                 <div className="space-y-2">
-                  {entityType === "scene" && (
-                    <label className="flex items-center cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={cardSettings?.showCodeOnCard ?? true}
-                        onChange={(e) => handleCardSettingChange("showCodeOnCard", e.target.checked)}
-                        className="w-4 h-4"
-                        style={{ accentColor: "var(--accent-primary)" }}
-                      />
-                      <span className="ml-2 text-sm" style={{ color: "var(--text-primary)" }}>
-                        Show code
-                      </span>
-                    </label>
+                  {/* Default View Mode dropdown */}
+                  {getAvailableSettings(entityType).includes("defaultViewMode") && (
+                    <div>
+                      <label
+                        htmlFor="context-defaultViewMode"
+                        className="block text-xs font-medium mb-1"
+                        style={{ color: "var(--text-secondary)" }}
+                      >
+                        {SETTING_LABELS.defaultViewMode}
+                      </label>
+                      <select
+                        id="context-defaultViewMode"
+                        value={cardSettings?.defaultViewMode || "grid"}
+                        onChange={(e) => handleCardSettingChange("defaultViewMode", e.target.value)}
+                        className="w-full px-2 py-1.5 rounded text-sm"
+                        style={{
+                          backgroundColor: "var(--bg-secondary)",
+                          border: "1px solid var(--border-color)",
+                          color: "var(--text-primary)",
+                        }}
+                      >
+                        {getViewModes(entityType).map((mode) => (
+                          <option key={mode.id} value={mode.id}>
+                            {mode.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
                   )}
-                  <label className="flex items-center cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={cardSettings?.showDescriptionOnCard ?? true}
-                      onChange={(e) => handleCardSettingChange("showDescriptionOnCard", e.target.checked)}
-                      className="w-4 h-4"
-                      style={{ accentColor: "var(--accent-primary)" }}
-                    />
-                    <span className="ml-2 text-sm" style={{ color: "var(--text-primary)" }}>
-                      Show description
-                    </span>
-                  </label>
-                  <label className="flex items-center cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={cardSettings?.showRating ?? true}
-                      onChange={(e) => handleCardSettingChange("showRating", e.target.checked)}
-                      className="w-4 h-4"
-                      style={{ accentColor: "var(--accent-primary)" }}
-                    />
-                    <span className="ml-2 text-sm" style={{ color: "var(--text-primary)" }}>
-                      Show rating
-                    </span>
-                  </label>
-                  <label className="flex items-center cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={cardSettings?.showFavorite ?? true}
-                      onChange={(e) => handleCardSettingChange("showFavorite", e.target.checked)}
-                      className="w-4 h-4"
-                      style={{ accentColor: "var(--accent-primary)" }}
-                    />
-                    <span className="ml-2 text-sm" style={{ color: "var(--text-primary)" }}>
-                      Show favorite
-                    </span>
-                  </label>
-                  <label className="flex items-center cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={cardSettings?.showOCounter ?? true}
-                      onChange={(e) => handleCardSettingChange("showOCounter", e.target.checked)}
-                      className="w-4 h-4"
-                      style={{ accentColor: "var(--accent-primary)" }}
-                    />
-                    <span className="ml-2 text-sm" style={{ color: "var(--text-primary)" }}>
-                      Show O counter
-                    </span>
-                  </label>
+                  {/* Default Density - shown for Grid or Wall view modes */}
+                  {(cardSettings?.defaultViewMode === "grid" || cardSettings?.defaultViewMode === "wall") && (
+                    <div className="mt-2">
+                      <label
+                        className="block text-xs font-medium mb-1"
+                        style={{ color: "var(--text-secondary)" }}
+                      >
+                        {cardSettings?.defaultViewMode === "grid" ? "Default Grid Density" : "Default Wall Size"}
+                      </label>
+                      <ZoomSlider
+                        value={
+                          cardSettings?.defaultViewMode === "grid"
+                            ? (cardSettings?.defaultGridDensity || "medium")
+                            : (cardSettings?.defaultWallZoom || "medium")
+                        }
+                        onChange={(density) =>
+                          handleCardSettingChange(
+                            cardSettings?.defaultViewMode === "grid" ? "defaultGridDensity" : "defaultWallZoom",
+                            density
+                          )
+                        }
+                      />
+                    </div>
+                  )}
+                  {/* Toggle settings */}
+                  {getAvailableSettings(entityType)
+                    .filter((key) => !["defaultViewMode", "defaultGridDensity", "defaultWallZoom", "showDescriptionOnDetail"].includes(key))
+                    .map((settingKey) => (
+                      <label key={settingKey} className="flex items-center cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={cardSettings?.[settingKey] ?? true}
+                          onChange={(e) => handleCardSettingChange(settingKey, e.target.checked)}
+                          className="w-4 h-4"
+                          style={{ accentColor: "var(--accent-primary)" }}
+                        />
+                        <span className="ml-2 text-sm" style={{ color: "var(--text-primary)" }}>
+                          {SETTING_LABELS[settingKey] || settingKey}
+                        </span>
+                      </label>
+                    ))}
                 </div>
               </div>
             )}

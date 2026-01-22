@@ -1,24 +1,33 @@
 import express from "express";
 import {
+  adminRegenerateRecoveryKey,
+  adminResetPassword,
   changePassword,
   createUser,
   deleteFilterPreset,
   deleteUser,
   deleteUserRestrictions,
   getAllUsers,
+  getAnyUserPermissions,
   getDefaultFilterPresets,
   getFilterPresets,
   getHiddenEntities,
   getHiddenEntityIds,
+  getRecoveryKey,
+  getUserGroupMemberships,
+  getUserPermissions,
   getUserRestrictions,
   getUserSettings,
+  hideEntities,
   hideEntity,
+  regenerateRecoveryKey,
   saveFilterPreset,
   setDefaultFilterPreset,
   syncFromStash,
   unhideAllEntities,
   unhideEntity,
   updateHideConfirmation,
+  updateUserPermissionOverrides,
   updateUserRestrictions,
   updateUserRole,
   updateUserSettings,
@@ -36,6 +45,10 @@ router.get("/settings", authenticated(getUserSettings));
 router.put("/settings", authenticated(updateUserSettings));
 router.post("/change-password", authenticated(changePassword));
 
+// Recovery key routes
+router.get("/recovery-key", authenticated(getRecoveryKey));
+router.post("/recovery-key/regenerate", authenticated(regenerateRecoveryKey));
+
 // Filter preset routes
 router.get("/filter-presets", authenticated(getFilterPresets));
 router.post("/filter-presets", authenticated(saveFilterPreset));
@@ -47,6 +60,9 @@ router.delete(
 // Default filter preset routes
 router.get("/default-presets", authenticated(getDefaultFilterPresets));
 router.put("/default-preset", authenticated(setDefaultFilterPreset));
+
+// User's own permissions
+router.get("/permissions", authenticated(getUserPermissions));
 
 // Admin-only user management routes
 router.get("/all", requireAdmin, authenticated(getAllUsers));
@@ -63,6 +79,39 @@ router.post(
   requireAdmin,
   authenticated(syncFromStash)
 ); // Admin can sync Stash data for any user
+
+// Admin: get/update any user's permissions
+router.get(
+  "/:userId/permissions",
+  requireAdmin,
+  authenticated(getAnyUserPermissions)
+);
+router.put(
+  "/:userId/permissions",
+  requireAdmin,
+  authenticated(updateUserPermissionOverrides)
+);
+
+// Admin: get user's group memberships
+router.get(
+  "/:userId/groups",
+  requireAdmin,
+  authenticated(getUserGroupMemberships)
+);
+
+// Admin: reset user password
+router.post(
+  "/:userId/reset-password",
+  requireAdmin,
+  authenticated(adminResetPassword)
+);
+
+// Admin: regenerate user recovery key
+router.post(
+  "/:userId/regenerate-recovery-key",
+  requireAdmin,
+  authenticated(adminRegenerateRecoveryKey)
+);
 
 // Admin-only content restriction routes
 router.get(
@@ -83,6 +132,7 @@ router.delete(
 
 // Hidden entity routes (authenticated users only)
 router.post("/hidden-entities", authenticated(hideEntity)); // Hide an entity
+router.post("/hidden-entities/bulk", authenticated(hideEntities)); // Hide multiple entities
 router.delete("/hidden-entities/all", authenticated(unhideAllEntities)); // Unhide all entities (optionally filtered by type) - must be before :entityType/:entityId route
 router.delete(
   "/hidden-entities/:entityType/:entityId",

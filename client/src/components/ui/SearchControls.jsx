@@ -3,6 +3,7 @@ import { LucideArrowDown, LucideArrowUp } from "lucide-react";
 import { useTVMode } from "../../hooks/useTVMode.js";
 import { useHorizontalNavigation } from "../../hooks/useHorizontalNavigation.js";
 import { useUnitPreference } from "../../contexts/UnitPreferenceContext.js";
+import { useCardDisplaySettings } from "../../contexts/CardDisplaySettingsContext.jsx";
 import { useFilterState } from "../../hooks/useFilterState.js";
 import {
   GALLERY_FILTER_OPTIONS,
@@ -108,6 +109,8 @@ const SearchControls = ({
   tableColumnsPopover = null, // ColumnConfigPopover component to render in toolbar
   // Context settings - config array for the settings cog
   contextSettings = [], // Array of setting configs: [{key, label, type, options}]
+  // Timeline view props
+  deferInitialQueryUntilFiltersReady = false, // When true, wait for permanentFilters to be non-empty before initial query
   // TV Mode props
   tvSearchZoneActive = false,
   tvTopPaginationZoneActive = false,
@@ -117,6 +120,7 @@ const SearchControls = ({
   const effectiveContext = context || artifactType;
   const [isFilterPanelOpen, setIsFilterPanelOpen] = useState(false);
   const [highlightedFilterKey, setHighlightedFilterKey] = useState(null);
+  const [isControlsCollapsed, setIsControlsCollapsed] = useState(false);
   const topPaginationRef = useRef(null); // Ref for top pagination element
   const filterRefs = useRef({}); // Refs for filter controls (for scroll-to-highlight)
   const randomSeedRef = useRef(-1); // Random seed for stable pagination (-1 = uninitialized)
@@ -126,6 +130,13 @@ const SearchControls = ({
 
   // Unit preference for filter conversions
   const { unitPreference } = useUnitPreference();
+
+  // Get default view mode and density settings from card display settings
+  const { getSettings } = useCardDisplaySettings();
+  const entitySettings = getSettings(artifactType);
+  const defaultViewMode = entitySettings.defaultViewMode || "grid";
+  const defaultGridDensity = entitySettings.defaultGridDensity || "medium";
+  const defaultZoomLevel = entitySettings.defaultWallZoom || "medium";
 
   // Search zone items: SearchInput, SortControl, SortDirection, Filters, FilterPresets, ViewMode, Zoom, ContextSettings
   const searchZoneItems = useMemo(() => [
@@ -250,7 +261,11 @@ const SearchControls = ({
     setSearchText: setSearchTextAction,
     setViewMode,
     setZoomLevel,
+    gridDensity,
+    setGridDensity,
     loadPreset,
+    timelinePeriod,
+    setTimelinePeriod,
   } = useFilterState({
     artifactType,
     context: effectiveContext,
@@ -258,6 +273,9 @@ const SearchControls = ({
     permanentFilters,
     filterOptions,
     syncToUrl,
+    defaultViewMode,
+    defaultGridDensity,
+    defaultZoomLevel,
   });
 
   // Extract values for compatibility with existing code
@@ -313,10 +331,17 @@ const SearchControls = ({
   // Track if we've triggered the initial query
   const hasTriggeredInitialQuery = useRef(false);
 
-  // Trigger initial query when hook is initialized
+  // Check if permanentFilters are ready (non-empty when deferring is enabled)
+  const permanentFiltersReady = !deferInitialQueryUntilFiltersReady ||
+    Object.keys(permanentFilters).length > 0;
+
+  // Trigger initial query when hook is initialized and filters are ready
   useEffect(() => {
-    if (!isInitialized || hasTriggeredInitialQuery.current) return;
+    if (!isInitialized || hasTriggeredInitialQuery.current || !permanentFiltersReady) return;
     hasTriggeredInitialQuery.current = true;
+
+    // Include permanent filters in initial query
+    const mergedFilters = { ...filters, ...permanentFilters };
 
     const query = {
       filter: {
@@ -326,10 +351,42 @@ const SearchControls = ({
         q: searchText,
         sort: getSortWithSeed(sortField),
       },
-      ...buildFilter(artifactType, filters, unitPreference),
+      ...buildFilter(artifactType, mergedFilters, unitPreference),
     };
     onQueryChange(query);
-  }, [isInitialized, sortDirection, currentPage, perPage, searchText, sortField, filters, artifactType, unitPreference, onQueryChange, getSortWithSeed]);
+  }, [isInitialized, permanentFiltersReady, sortDirection, currentPage, perPage, searchText, sortField, filters, permanentFilters, artifactType, unitPreference, onQueryChange, getSortWithSeed]);
+
+  // Track previous permanentFilters to detect changes
+  const prevPermanentFiltersRef = useRef(permanentFilters);
+
+  // Re-trigger query when permanentFilters change (e.g., timeline date filter)
+  useEffect(() => {
+    // Skip if not initialized or if initial query hasn't fired yet
+    if (!isInitialized || !hasTriggeredInitialQuery.current) return;
+
+    // Check if permanentFilters actually changed
+    const prev = prevPermanentFiltersRef.current;
+    const changed = JSON.stringify(prev) !== JSON.stringify(permanentFilters);
+
+    if (changed) {
+      prevPermanentFiltersRef.current = permanentFilters;
+
+      // Merge new permanent filters with current filters
+      const mergedFilters = { ...filters, ...permanentFilters };
+
+      const query = {
+        filter: {
+          direction: sortDirection,
+          page: 1, // Reset to first page when filters change
+          per_page: perPage,
+          q: searchText,
+          sort: getSortWithSeed(sortField),
+        },
+        ...buildFilter(artifactType, mergedFilters, unitPreference),
+      };
+      onQueryChange(query);
+    }
+  }, [isInitialized, permanentFilters, filters, sortDirection, perPage, searchText, sortField, artifactType, unitPreference, onQueryChange, getSortWithSeed]);
 
   // Clear all filters
   const handleClearFilters = useCallback(() => {
@@ -652,8 +709,38 @@ const SearchControls = ({
 
   return (
     <div>
-      {/* Row 1: Search, Sort, Filters - "What to show" */}
-      <div className="flex flex-col sm:flex-row items-stretch sm:items-center sm:justify-center gap-3 mb-3">
+      {/* Collapsible Search Controls Container */}
+      <div
+        className="rounded-lg mb-4"
+        style={{
+          backgroundColor: "var(--bg-card)",
+          border: "1px solid var(--border-color)",
+        }}
+      >
+        {/* Header */}
+        <div
+          className="flex items-center justify-between px-3 py-2 cursor-pointer hover:opacity-80 transition-opacity"
+          style={{
+            borderBottom: isControlsCollapsed ? "none" : "1px solid var(--border-color)",
+          }}
+          onClick={() => setIsControlsCollapsed(!isControlsCollapsed)}
+        >
+          <h3
+            className="font-semibold text-sm uppercase tracking-wide"
+            style={{ color: "var(--text-primary)" }}
+          >
+            Search &amp; Filter
+          </h3>
+          <span style={{ color: "var(--text-secondary)" }}>
+            {isControlsCollapsed ? "▶" : "▼"}
+          </span>
+        </div>
+
+        {/* Collapsible controls content */}
+        {!isControlsCollapsed && (
+          <div className="p-3">
+            {/* Row 1: Search, Sort, Filters - "What to show" */}
+            <div className="flex flex-col sm:flex-row items-stretch sm:items-center sm:justify-center gap-3 mb-3">
         {/* Search Input - Flexible width with min-width */}
         <div
           data-tv-search-item="search-input"
@@ -770,6 +857,7 @@ const SearchControls = ({
             currentDirection={sortDirection}
             currentViewMode={viewMode}
             currentZoomLevel={zoomLevel}
+            currentGridDensity={gridDensity}
             currentTableColumns={currentTableColumns}
             permanentFilters={permanentFilters}
             onLoadPreset={handleLoadPreset}
@@ -807,6 +895,17 @@ const SearchControls = ({
           </div>
         )}
 
+        {/* Grid Density Slider - Shown in grid, folder, and timeline modes */}
+        {(viewMode === "grid" || viewMode === "folder" || viewMode === "timeline") && (
+          <div
+            data-tv-search-item="grid-density"
+            ref={(el) => searchZoneNav.setItemRef(6, el)}
+            className={searchZoneNav.isFocused(6) ? "keyboard-focus" : ""}
+          >
+            <ZoomSlider value={gridDensity} onChange={setGridDensity} />
+          </div>
+        )}
+
         {/* Context Settings Cog */}
         <div
           data-tv-search-item="context-settings"
@@ -826,15 +925,18 @@ const SearchControls = ({
         </div>
       </div>
 
-      {/* Active Filter Chips */}
-      <ActiveFilterChips
-        filters={filters}
-        filterOptions={filterOptions}
-        onRemoveFilter={handleRemoveFilter}
-        onChipClick={handleFilterChipClick}
-        permanentFilters={permanentFilters}
-        permanentFiltersMetadata={permanentFiltersMetadata}
-      />
+            {/* Active Filter Chips */}
+            <ActiveFilterChips
+              filters={filters}
+              filterOptions={filterOptions}
+              onRemoveFilter={handleRemoveFilter}
+              onChipClick={handleFilterChipClick}
+              permanentFilters={permanentFilters}
+              permanentFiltersMetadata={permanentFiltersMetadata}
+            />
+          </div>
+        )}
+      </div>
 
       {/* Top Pagination */}
       {totalPages >= 1 && (
@@ -987,7 +1089,7 @@ const SearchControls = ({
       </FilterPanel>
       {/* Children: render prop or direct children */}
       {typeof children === "function"
-        ? children({ viewMode, zoomLevel, wallPlayback, sortField, sortDirection, onSort: handleSortChange })
+        ? children({ viewMode, zoomLevel, gridDensity, wallPlayback, sortField, sortDirection, onSort: handleSortChange, timelinePeriod, setTimelinePeriod })
         : children}
       {/* Bottom Pagination */}
       {totalPages >= 1 && (

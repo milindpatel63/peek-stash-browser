@@ -8,19 +8,24 @@ import {
   ChevronDown,
   ChevronsUp,
   ChevronsDown,
+  Copy,
   Edit2,
   MoreVertical,
   Play,
   Repeat,
   Repeat1,
   Save,
+  Share2,
   Shuffle,
   X,
 } from "lucide-react";
 import { useNavigationState } from "../../hooks/useNavigationState.js";
 import { usePageTitle } from "../../hooks/usePageTitle.js";
+import { apiPost, duplicatePlaylist, getMyPermissions } from "../../services/api.js";
+import SharePlaylistModal from "../playlists/SharePlaylistModal.jsx";
 import { getSceneTitle } from "../../utils/format.js";
 import { showError, showSuccess } from "../../utils/toast.jsx";
+import { ThemedIcon } from "../icons/index.js";
 import {
   AddToPlaylistButton,
   Button,
@@ -51,6 +56,12 @@ const PlaylistDetail = () => {
   const [reorderMode, setReorderMode] = useState(false);
   const [shuffle, setShuffle] = useState(false);
   const [repeat, setRepeat] = useState("none"); // "none", "all", "one"
+  const [downloading, setDownloading] = useState(false);
+  const [permissions, setPermissions] = useState(null);
+  const [isOwner, setIsOwner] = useState(true);
+  const [ownerName, setOwnerName] = useState(null);
+  const [shareModalOpen, setShareModalOpen] = useState(false);
+  const [duplicating, setDuplicating] = useState(false);
 
   // Navigation state for back button
   const { goBack, backButtonText } = useNavigationState();
@@ -63,6 +74,20 @@ const PlaylistDetail = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [playlistId]); // loadPlaylist is stable and doesn't need to be in dependencies
 
+  // Fetch user permissions on mount
+  useEffect(() => {
+    const fetchPermissions = async () => {
+      try {
+        const result = await getMyPermissions();
+        setPermissions(result.permissions);
+      } catch (error) {
+        // Silently fail - permissions will remain null and download button won't show
+        console.error("Failed to fetch permissions:", error);
+      }
+    };
+    fetchPermissions();
+  }, []);
+
   const loadPlaylist = async () => {
     try {
       setLoading(true);
@@ -73,6 +98,12 @@ const PlaylistDetail = () => {
       setEditDescription(playlistData.description || "");
       setShuffle(playlistData.shuffle || false);
       setRepeat(playlistData.repeat || "none");
+
+      // Set access info from response
+      setIsOwner(response.data.isOwner !== false);
+      if (!response.data.isOwner && playlistData?.user?.username) {
+        setOwnerName(playlistData.user.username);
+      }
 
       // Backend now returns items with scene data attached
       if (playlistData.items && playlistData.items.length > 0) {
@@ -253,6 +284,37 @@ const PlaylistDetail = () => {
     }
   };
 
+  // Handle playlist download
+  const handleDownload = async () => {
+    try {
+      setDownloading(true);
+      await apiPost(`/downloads/playlist/${playlist.id}`);
+      showSuccess("Download started - check Downloads page for progress");
+    } catch (error) {
+      const message = error.data?.error || error.message || "Download failed";
+      if (error.data?.totalSizeMB) {
+        showError(`${message} (${error.data.totalSizeMB}MB exceeds ${error.data.maxSizeMB}MB limit)`);
+      } else {
+        showError(message);
+      }
+    } finally {
+      setDownloading(false);
+    }
+  };
+
+  const handleDuplicate = async () => {
+    try {
+      setDuplicating(true);
+      const result = await duplicatePlaylist(playlistId);
+      showSuccess("Playlist duplicated!");
+      navigate(`/playlist/${result.playlist.id}`);
+    } catch {
+      showError("Failed to duplicate playlist");
+    } finally {
+      setDuplicating(false);
+    }
+  };
+
   if (loading) {
     return (
       <PageLayout>
@@ -299,18 +361,20 @@ const PlaylistDetail = () => {
 
             {!isEditing && !reorderMode && (
               <>
-                {/* Edit button */}
-                <Button
-                  onClick={() => setIsEditing(true)}
-                  variant="primary"
-                  icon={<Edit2 size={16} className="sm:w-4 sm:h-4" />}
-                  title="Edit Playlist"
-                >
-                  <span className="hidden sm:inline">Edit</span>
-                </Button>
+                {/* Edit button - owner only */}
+                {isOwner && (
+                  <Button
+                    onClick={() => setIsEditing(true)}
+                    variant="primary"
+                    icon={<Edit2 size={16} className="sm:w-4 sm:h-4" />}
+                    title="Edit Playlist"
+                  >
+                    <span className="hidden sm:inline">Edit</span>
+                  </Button>
+                )}
 
-                {/* Reorder button */}
-                {scenes.length > 1 && (
+                {/* Reorder button - owner only */}
+                {isOwner && scenes.length > 1 && (
                   <Button
                     onClick={() => setReorderMode(true)}
                     variant="secondary"
@@ -318,6 +382,46 @@ const PlaylistDetail = () => {
                     title="Reorder Scenes"
                   >
                     <span className="hidden sm:inline">Reorder</span>
+                  </Button>
+                )}
+
+                {/* Download button - owner only */}
+                {isOwner && permissions?.canDownloadPlaylists && scenes.length > 0 && (
+                  <Button
+                    onClick={handleDownload}
+                    variant="secondary"
+                    disabled={downloading}
+                    icon={<ThemedIcon name="download" size={16} />}
+                    title="Download Playlist"
+                  >
+                    <span className="hidden sm:inline">
+                      {downloading ? "Starting..." : "Download"}
+                    </span>
+                  </Button>
+                )}
+
+                {/* Share button - owner only with share permission */}
+                {isOwner && permissions?.canShare && (
+                  <Button
+                    onClick={() => setShareModalOpen(true)}
+                    variant="secondary"
+                    icon={<Share2 size={16} />}
+                    title="Share Playlist"
+                  >
+                    <span className="hidden sm:inline">Share</span>
+                  </Button>
+                )}
+
+                {/* Duplicate button - non-owners only */}
+                {!isOwner && (
+                  <Button
+                    onClick={handleDuplicate}
+                    variant="secondary"
+                    disabled={duplicating}
+                    icon={<Copy size={16} />}
+                    title="Duplicate to My Playlists"
+                  >
+                    <span className="hidden sm:inline">{duplicating ? "Duplicating..." : "Duplicate"}</span>
                   </Button>
                 )}
               </>
@@ -480,6 +584,11 @@ const PlaylistDetail = () => {
                 title={playlist.name}
                 subtitle={playlist.description}
               />
+              {!isOwner && ownerName && (
+                <p className="text-sm" style={{ color: "var(--text-muted)" }}>
+                  Shared by {ownerName}
+                </p>
+              )}
               <p
                 className="text-sm mt-2"
                 style={{ color: "var(--text-muted)" }}
@@ -625,14 +734,16 @@ const PlaylistDetail = () => {
                 }
                 actionButtons={
                   <div className="flex items-center gap-2">
-                    <Button
-                      onClick={() => handleRemoveClick(item)}
-                      variant="destructive"
-                      size="sm"
-                      className="px-2 py-1 sm:px-3 sm:py-1.5 text-xs sm:text-sm flex-shrink-0"
-                    >
-                      Remove
-                    </Button>
+                    {isOwner && (
+                      <Button
+                        onClick={() => handleRemoveClick(item)}
+                        variant="destructive"
+                        size="sm"
+                        className="px-2 py-1 sm:px-3 sm:py-1.5 text-xs sm:text-sm flex-shrink-0"
+                      >
+                        Remove
+                      </Button>
+                    )}
                     {item.exists && item.scene && (
                       <AddToPlaylistButton
                         sceneId={item.sceneId}
@@ -669,6 +780,13 @@ const PlaylistDetail = () => {
         confirmText="Remove"
         cancelText="Cancel"
         confirmStyle="danger"
+      />
+
+      <SharePlaylistModal
+        playlistId={parseInt(playlistId, 10)}
+        playlistName={playlist?.name || ""}
+        isOpen={shareModalOpen}
+        onClose={() => setShareModalOpen(false)}
       />
     </>
   );

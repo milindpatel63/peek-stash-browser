@@ -26,12 +26,21 @@ vi.mock("../../../src/utils/toast.jsx", () => ({
 // Import after mocks
 import CardDisplaySettings from "../../../src/components/settings/CardDisplaySettings.jsx";
 import { showSuccess, showError } from "../../../src/utils/toast.jsx";
+import {
+  getAvailableSettings,
+  ENTITY_DISPLAY_CONFIG,
+} from "../../../src/config/entityDisplayConfig.js";
 
 describe("CardDisplaySettings", () => {
+  // Default settings matching the new config structure
   const defaultSettings = {
+    defaultViewMode: "grid",
     showCodeOnCard: true,
+    showStudio: true,
+    showDate: true,
     showDescriptionOnCard: true,
     showDescriptionOnDetail: true,
+    showRelationshipIndicators: true,
     showRating: true,
     showFavorite: true,
     showOCounter: true,
@@ -234,26 +243,79 @@ describe("CardDisplaySettings", () => {
       expect(mockGetSettings).toHaveBeenCalledWith("studio");
     });
 
-    it("renders consistent toggles for non-scene entities", async () => {
+    it("renders settings based on entity config", async () => {
       const user = userEvent.setup();
       render(<CardDisplaySettings />);
 
-      // Test each non-scene entity has the same toggles
-      const nonSceneEntities = ["Performer", "Studio", "Gallery", "Group", "Tag", "Image"];
+      // Scene has showCodeOnCard
+      expect(screen.getByLabelText(/Show studio code on cards/)).toBeInTheDocument();
 
-      for (const entity of nonSceneEntities) {
-        await user.click(screen.getByRole("button", { name: new RegExp(entity, "i") }));
+      // Tag has fewer settings (no showRating, showFavorite, showOCounter)
+      await user.click(screen.getByRole("button", { name: /Tag/i }));
 
-        // Should NOT have code toggle
-        expect(screen.queryByLabelText(/Show studio code on cards/)).not.toBeInTheDocument();
+      // Tag should have description and relationship indicators
+      expect(screen.getByLabelText(/Show description on cards/)).toBeInTheDocument();
+      expect(screen.getByLabelText(/Show relationship indicators/)).toBeInTheDocument();
 
-        // Should have standard toggles
-        expect(screen.getByLabelText(/Show description on cards/)).toBeInTheDocument();
-        expect(screen.getByLabelText(/Show description on detail page/)).toBeInTheDocument();
-        expect(screen.getByLabelText(/Show rating/)).toBeInTheDocument();
-        expect(screen.getByLabelText(/Show favorite/)).toBeInTheDocument();
-        expect(screen.getByLabelText(/Show O counter/)).toBeInTheDocument();
-      }
+      // Tag should NOT have rating, favorite, o counter
+      expect(screen.queryByLabelText(/Show rating/)).not.toBeInTheDocument();
+      expect(screen.queryByLabelText(/Show favorite/)).not.toBeInTheDocument();
+      expect(screen.queryByLabelText(/Show O counter/)).not.toBeInTheDocument();
+    });
+
+    it("renders performer settings correctly", async () => {
+      const user = userEvent.setup();
+      render(<CardDisplaySettings />);
+
+      // Switch to Performer
+      await user.click(screen.getByRole("button", { name: /Performer/i }));
+
+      // Should NOT have code toggle (scene-only)
+      expect(screen.queryByLabelText(/Show studio code on cards/)).not.toBeInTheDocument();
+
+      // Should have standard toggles
+      expect(screen.getByLabelText(/Show description on cards/)).toBeInTheDocument();
+      expect(screen.getByLabelText(/Show description on detail page/)).toBeInTheDocument();
+      expect(screen.getByLabelText(/Show relationship indicators/)).toBeInTheDocument();
+      expect(screen.getByLabelText(/Show rating/)).toBeInTheDocument();
+      expect(screen.getByLabelText(/Show favorite/)).toBeInTheDocument();
+      expect(screen.getByLabelText(/Show O counter/)).toBeInTheDocument();
+    });
+  });
+
+  describe("default view mode dropdown", () => {
+    it("renders default view mode dropdown for scene", () => {
+      render(<CardDisplaySettings />);
+
+      // Scene should have a dropdown for default view mode
+      const dropdown = screen.getByRole("combobox");
+      expect(dropdown).toBeInTheDocument();
+      expect(dropdown).toHaveValue("grid");
+    });
+
+    it("shows available view modes in dropdown", () => {
+      render(<CardDisplaySettings />);
+
+      const dropdown = screen.getByRole("combobox");
+      const options = dropdown.querySelectorAll("option");
+
+      // Scene has grid, wall, table, timeline, folder
+      expect(options.length).toBe(5);
+      expect(options[0]).toHaveValue("grid");
+      expect(options[1]).toHaveValue("wall");
+      expect(options[2]).toHaveValue("table");
+      expect(options[3]).toHaveValue("timeline");
+      expect(options[4]).toHaveValue("folder");
+    });
+
+    it("calls updateSettings when view mode changes", async () => {
+      const user = userEvent.setup();
+      render(<CardDisplaySettings />);
+
+      const dropdown = screen.getByRole("combobox");
+      await user.selectOptions(dropdown, "wall");
+
+      expect(mockUpdateSettings).toHaveBeenCalledWith("scene", "defaultViewMode", "wall");
     });
   });
 
@@ -261,20 +323,26 @@ describe("CardDisplaySettings", () => {
     it("all toggles have accessible labels", () => {
       render(<CardDisplaySettings />);
 
-      // All toggles should be checkboxes with labels
+      // Scene toggle settings exclude dropdown settings (defaultViewMode, defaultGridDensity, defaultWallZoom)
+      const dropdownSettings = ["defaultViewMode", "defaultGridDensity", "defaultWallZoom"];
+      const sceneToggleSettings = getAvailableSettings("scene").filter(
+        (s) => !dropdownSettings.includes(s)
+      );
       const checkboxes = screen.getAllByRole("checkbox");
-      expect(checkboxes.length).toBe(6); // 5 standard + 1 code toggle for scene
+      expect(checkboxes.length).toBe(sceneToggleSettings.length);
     });
 
     it("accordion buttons are accessible", () => {
       render(<CardDisplaySettings />);
 
+      // Buttons include: 7 entity type accordions + 3 zoom slider buttons (smaller, reset, larger)
       const buttons = screen.getAllByRole("button");
-      expect(buttons.length).toBe(7); // One for each entity type
+      expect(buttons.length).toBe(10);
 
-      // Each button should have text content
+      // Each button should have text content (zoom buttons may have empty text but have aria-labels)
       buttons.forEach((button) => {
-        expect(button.textContent).toBeTruthy();
+        const hasContent = button.textContent || button.getAttribute("aria-label");
+        expect(hasContent).toBeTruthy();
       });
     });
   });

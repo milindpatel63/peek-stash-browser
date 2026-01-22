@@ -73,6 +73,9 @@ server/*.sqlite3
 # MkDocs build output
 site/
 
+# Python virtual environment (for mkdocs)
+.venv/
+
 # Claude Code local settings (user-specific)
 .claude/settings.local.json
 
@@ -87,3 +90,9 @@ server/integration/.env.integration
 
 # Git worktrees
 .worktrees/
+
+# Local data directory (database backups, etc.)
+.peek-data/
+
+# Claude planning documents (session-specific)
+docs/plans/

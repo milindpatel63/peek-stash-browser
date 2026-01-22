@@ -28,10 +28,15 @@ import ratingsRoutes from "../routes/ratings.js";
 import setupRoutes from "../routes/setup.js";
 import syncRoutes from "../routes/sync.js";
 import exclusionsRoutes from "../routes/exclusions.js";
+import mergeReconciliationRoutes from "../routes/mergeReconciliation.js";
+import databaseBackupRoutes from "../routes/databaseBackup.js";
+import downloadRoutes from "../routes/download.js";
 import userRoutes from "../routes/user.js";
+import groupRoutes from "../routes/groups.js";
 import videoRoutes from "../routes/video.js";
 import watchHistoryRoutes from "../routes/watchHistory.js";
 import userStatsRoutes from "../routes/userStats.js";
+import timelineRoutes from "../routes/timeline.js";
 import { logger } from "../utils/logger.js";
 
 // ES module equivalent of __dirname
@@ -115,11 +120,23 @@ export const setupAPI = () => {
   // Exclusion routes (protected - admin only for recomputing exclusions)
   app.use("/api/exclusions", exclusionsRoutes);
 
+  // Merge reconciliation routes (admin only)
+  app.use("/api/admin", mergeReconciliationRoutes);
+
+  // Database backup routes (admin only)
+  app.use("/api/admin", databaseBackupRoutes);
+
   // User settings routes (protected)
   app.use("/api/user", userRoutes);
 
+  // User group routes (protected, mostly admin only)
+  app.use("/api/groups", groupRoutes);
+
   // Playlist routes (protected)
   app.use("/api/playlists", playlistRoutes);
+
+  // Download routes (protected)
+  app.use("/api/downloads", downloadRoutes);
 
   // Custom carousel routes (protected)
   app.use("/api/carousels", carouselRoutes);
@@ -138,6 +155,9 @@ export const setupAPI = () => {
 
   // Custom theme routes (protected)
   app.use("/api/themes/custom", customThemeRoutes);
+
+  // Timeline routes (date distribution)
+  app.use("/api/timeline", timelineRoutes);
 
   // Library routes (all entities)
   app.use("/api/library", libraryScenesRoutes);

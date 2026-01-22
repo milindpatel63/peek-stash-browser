@@ -691,3 +691,187 @@ export const imageViewHistoryApi = {
    */
   getViewHistory: (imageId) => apiGet(`/image-view-history/${imageId}`),
 };
+
+// ============================================================================
+// Groups API
+// ============================================================================
+
+/**
+ * Admin: Get all groups
+ * @returns {Promise<{groups: Array}>}
+ */
+export const getGroups = () => apiGet("/groups");
+
+/**
+ * Admin: Get single group with members
+ * @param {string} groupId - Group ID
+ * @returns {Promise<{group: Object}>}
+ */
+export const getGroup = (groupId) => apiGet(`/groups/${groupId}`);
+
+/**
+ * Admin: Create group
+ * @param {Object} data - Group data
+ * @param {string} data.name - Group name
+ * @param {string} data.description - Group description (optional)
+ * @param {Object} data.permissions - Group permissions
+ * @returns {Promise<{group: Object}>}
+ */
+export const createGroup = (data) => apiPost("/groups", data);
+
+/**
+ * Admin: Update group
+ * @param {string} groupId - Group ID
+ * @param {Object} data - Updated group data
+ * @returns {Promise<{group: Object}>}
+ */
+export const updateGroup = (groupId, data) => apiPut(`/groups/${groupId}`, data);
+
+/**
+ * Admin: Delete group
+ * @param {string} groupId - Group ID
+ * @returns {Promise<{success: boolean, message: string}>}
+ */
+export const deleteGroup = (groupId) => apiDelete(`/groups/${groupId}`);
+
+/**
+ * Admin: Add user to group
+ * @param {string} groupId - Group ID
+ * @param {string} userId - User ID
+ * @returns {Promise<{success: boolean, message: string}>}
+ */
+export const addGroupMember = (groupId, userId) =>
+  apiPost(`/groups/${groupId}/members`, { userId });
+
+/**
+ * Admin: Remove user from group
+ * @param {string} groupId - Group ID
+ * @param {string} userId - User ID
+ * @returns {Promise<{success: boolean, message: string}>}
+ */
+export const removeGroupMember = (groupId, userId) =>
+  apiDelete(`/groups/${groupId}/members/${userId}`);
+
+/**
+ * Get group memberships for a specific user (admin only)
+ * @param {number} userId - User ID
+ * @returns {Promise<{groups: Array}>}
+ */
+export const getUserGroupMemberships = (userId) =>
+  apiGet(`/user/${userId}/groups`);
+
+/**
+ * User: Get my groups (for sharing UI)
+ * @returns {Promise<{groups: Array}>}
+ */
+export const getMyGroups = () => apiGet("/groups/user/mine");
+
+// ============================================================================
+// Permissions API
+// ============================================================================
+
+/**
+ * User: Get my resolved permissions
+ * @returns {Promise<{permissions: Object}>}
+ */
+export const getMyPermissions = () => apiGet("/user/permissions");
+
+/**
+ * Admin: Get any user's resolved permissions
+ * @param {string} userId - User ID
+ * @returns {Promise<{permissions: Object}>}
+ */
+export const getUserPermissions = (userId) => apiGet(`/user/${userId}/permissions`);
+
+/**
+ * Admin: Update user permission overrides
+ * @param {string} userId - User ID
+ * @param {Object} overrides - Permission overrides
+ * @returns {Promise<{success: boolean, permissions: Object}>}
+ */
+export const updateUserPermissionOverrides = (userId, overrides) =>
+  apiPut(`/user/${userId}/permissions`, overrides);
+
+// ============================================================================
+// Recovery Key & Password Reset API
+// ============================================================================
+
+/**
+ * Get current user's recovery key
+ * @returns {Promise<{recoveryKey: string | null}>}
+ */
+export const getRecoveryKey = () => apiGet("/user/recovery-key");
+
+/**
+ * Regenerate current user's recovery key
+ * @returns {Promise<{recoveryKey: string}>}
+ */
+export const regenerateRecoveryKey = () => apiPost("/user/recovery-key/regenerate");
+
+/**
+ * Forgot password - check if user has recovery key
+ * @param {string} username
+ * @returns {Promise<{hasRecoveryKey: boolean}>}
+ */
+export const forgotPasswordInit = (username) =>
+  apiPost("/auth/forgot-password/init", { username });
+
+/**
+ * Forgot password - reset with recovery key
+ * @param {string} username
+ * @param {string} recoveryKey
+ * @param {string} newPassword
+ * @returns {Promise<{success: boolean}>}
+ */
+export const forgotPasswordReset = (username, recoveryKey, newPassword) =>
+  apiPost("/auth/forgot-password/reset", { username, recoveryKey, newPassword });
+
+/**
+ * Admin: Reset user's password
+ * @param {number} userId
+ * @param {string} newPassword
+ * @returns {Promise<{success: boolean}>}
+ */
+export const adminResetPassword = (userId, newPassword) =>
+  apiPost(`/user/${userId}/reset-password`, { newPassword });
+
+/**
+ * Admin: Regenerate user's recovery key
+ * @param {number} userId
+ * @returns {Promise<{recoveryKey: string}>}
+ */
+export const adminRegenerateRecoveryKey = (userId) =>
+  apiPost(`/user/${userId}/regenerate-recovery-key`);
+
+// ============================================================================
+// Playlist Sharing API
+// ============================================================================
+
+/**
+ * Get playlists shared with current user
+ * @returns {Promise<{playlists: Array}>}
+ */
+export const getSharedPlaylists = () => apiGet("/playlists/shared");
+
+/**
+ * Get sharing info for a playlist (owner only)
+ * @param {number} playlistId - Playlist ID
+ * @returns {Promise<{shares: Array}>}
+ */
+export const getPlaylistShares = (playlistId) => apiGet(`/playlists/${playlistId}/shares`);
+
+/**
+ * Update playlist sharing
+ * @param {number} playlistId - Playlist ID
+ * @param {number[]} groupIds - Array of group IDs to share with
+ * @returns {Promise<{shares: Array}>}
+ */
+export const updatePlaylistShares = (playlistId, groupIds) =>
+  apiPut(`/playlists/${playlistId}/shares`, { groupIds });
+
+/**
+ * Duplicate a playlist
+ * @param {number} playlistId - Playlist ID to duplicate
+ * @returns {Promise<{playlist: Object}>}
+ */
+export const duplicatePlaylist = (playlistId) => apiPost(`/playlists/${playlistId}/duplicate`);

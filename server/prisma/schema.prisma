@@ -29,6 +29,7 @@ model User {
   unitPreference          String? @default("metric") // "metric" or "imperial" for measurement display
   tableColumnDefaults     Json? // Object with keys: scene, performer, studio, tag, group, gallery, image - each containing {visible: string[], order: string[]}
   cardDisplaySettings     Json? // Object with per-entity-type card display toggles: {scene: {showCodeOnCard, showDescriptionOnCard, ...}, performer: {...}, ...}
+  landingPagePreference   Json? @default("{\"pages\":[\"home\"],\"randomize\":false}")
 
   // Watch history settings
   minimumPlayPercent Int     @default(20) // Percent of video to watch before incrementing play_count (0-100)
@@ -49,6 +50,9 @@ model User {
   imageRatings     ImageRating[]
   imageViewHistory ImageViewHistory[]
 
+  // Merge reconciliation audit records
+  mergeRecords MergeRecord[]
+
   // Content restrictions
   contentRestrictions UserContentRestriction[]
 
@@ -56,12 +60,57 @@ model User {
   hiddenEntities           UserHiddenEntity[]
   hideConfirmationDisabled Boolean            @default(false) // Don't show hide confirmation dialog
 
+  // Permission overrides (null = inherit from groups, true/false = explicit override)
+  canShareOverride             Boolean?
+  canDownloadFilesOverride     Boolean?
+  canDownloadPlaylistsOverride Boolean?
+
+  // Recovery key for password reset (stored plaintext for user viewing)
+  recoveryKey String?
+
+  // Group memberships relation
+  groupMemberships UserGroupMembership[]
+
   // Pre-computed exclusions cache
   excludedEntities UserExcludedEntity[]
   entityStats      UserEntityStats[]
 
   // Custom carousels
   customCarousels UserCarousel[]
+
+  // Downloads
+  downloads            Download[]
+}
+
+model UserGroup {
+  id          Int      @id @default(autoincrement())
+  name        String   @unique
+  description String?
+
+  // Permission defaults for group members
+  canShare             Boolean @default(false)
+  canDownloadFiles     Boolean @default(false)
+  canDownloadPlaylists Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  members UserGroupMembership[]
+  playlistShares PlaylistShare[]
+}
+
+model UserGroupMembership {
+  id      Int       @id @default(autoincrement())
+  userId  Int
+  groupId Int
+  user    User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  group   UserGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@unique([userId, groupId])
+  @@index([userId])
+  @@index([groupId])
 }
 
 model WatchHistory {
@@ -109,9 +158,23 @@ model Playlist {
 
   user  User           @relation(fields: [userId], references: [id], onDelete: Cascade)
   items PlaylistItem[]
+  shares PlaylistShare[]
 
   @@index([userId])
   @@index([updatedAt])
+}
+
+model PlaylistShare {
+  id         Int       @id @default(autoincrement())
+  playlistId Int
+  groupId    Int
+  sharedAt   DateTime  @default(now())
+
+  playlist   Playlist  @relation(fields: [playlistId], references: [id], onDelete: Cascade)
+  group      UserGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  @@unique([playlistId, groupId])
+  @@index([groupId])
 }
 
 model PlaylistItem {
@@ -361,9 +424,80 @@ model UserTagStats {
   @@index([tagId])
 }
 
+// Pre-computed percentile rankings for user stats "Top" lists
+// Refreshed on login or when engagement changes significantly
+model UserEntityRanking {
+  id         Int    @id @default(autoincrement())
+  userId     Int
+  entityType String // 'performer' | 'studio' | 'tag' | 'scene'
+  entityId   String // Stash entity ID
+
+  // Raw engagement metrics (for display)
+  playCount    Int   @default(0)
+  playDuration Float @default(0) // seconds
+  oCount       Int   @default(0)
+
+  // Computed ranking data
+  engagementScore  Float @default(0) // Raw weighted score: (oCount × 5) + (normalizedDuration) + (playCount)
+  libraryPresence  Int   @default(1) // Number of scenes in library for this entity
+  engagementRate   Float @default(0) // engagementScore / libraryPresence
+  percentileRank   Float @default(0) // 0-100, where 100 = top ranked among user's engaged entities of this type
+
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, entityType, entityId])
+  @@index([userId, entityType, percentileRank(sort: Desc)])
+  @@index([userId, entityType])
+}
+
 enum UserRole {
   ADMIN
   USER
+}
+
+enum DownloadType {
+  SCENE
+  IMAGE
+  PLAYLIST
+}
+
+enum DownloadStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  EXPIRED
+}
+
+model Download {
+  id          Int            @id @default(autoincrement())
+
+  userId      Int
+  user        User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  type        DownloadType
+  status      DownloadStatus @default(PENDING)
+
+  // For playlist downloads
+  playlistId  Int?
+
+  // For individual downloads
+  entityType  String?        // "scene" or "image"
+  entityId    String?
+
+  fileName    String
+  fileSize    BigInt?
+  filePath    String?        // Server path to completed zip (playlists only)
+  progress    Int            @default(0) // 0-100
+  error       String?
+
+  createdAt   DateTime       @default(now())
+  completedAt DateTime?
+  expiresAt   DateTime?      // 24h after completion for playlists
+
+  @@index([userId])
+  @@index([status])
+  @@index([expiresAt])
 }
 
 model UserHiddenEntity {
@@ -513,6 +647,10 @@ model StashScene {
   // === Inherited tags (denormalized for filtering) ===
   inheritedTagIds String? // JSON array of tag IDs from performers, studio, groups
 
+  // === Fingerprint data (for merge detection) ===
+  phash   String? // Primary perceptual hash (from first file)
+  phashes String? // JSON array of all phashes if scene has multiple files
+
   // === Junction table relations ===
   performers ScenePerformer[]
   tags       SceneTag[]
@@ -528,6 +666,7 @@ model StashScene {
   @@index([deletedAt])
   @@index([oCounter])
   @@index([playCount])
+  @@index([phash])
   // Compound indexes for efficient browse queries (deletedAt filter + sort)
   @@index([deletedAt, stashCreatedAt(sort: Desc)], map: "StashScene_browse_idx")
   @@index([deletedAt, stashUpdatedAt(sort: Desc)], map: "StashScene_browse_updated_idx")
@@ -982,4 +1121,37 @@ model SyncSettings {
   enablePluginWebhook    Boolean @default(false) // Accept webhook from Stash plugin
 
   updatedAt DateTime @updatedAt
+}
+
+// ============================================================================
+// Merge Reconciliation
+// ============================================================================
+
+model MergeRecord {
+  id              String   @id @default(uuid())
+  sourceSceneId   String // The scene that was merged away (soft-deleted)
+  targetSceneId   String // The scene it was merged into (survivor)
+  matchedByPhash  String? // The phash that linked them (null if manual)
+
+  // User data that was transferred
+  userId Int
+  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Transfer details
+  playCountTransferred    Int     @default(0)
+  playDurationTransferred Float   @default(0)
+  oCountTransferred       Int     @default(0)
+  ratingTransferred       Int?
+  favoriteTransferred     Boolean @default(false)
+
+  // Audit
+  reconciledAt DateTime @default(now())
+  reconciledBy Int? // Admin user ID (null if automatic)
+  automatic    Boolean  @default(true) // true = sync-time, false = manual
+
+  createdAt DateTime @default(now())
+
+  @@index([sourceSceneId])
+  @@index([targetSceneId])
+  @@index([userId])
 }

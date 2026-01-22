@@ -2,6 +2,7 @@ import { Suspense, lazy, useEffect, useState } from "react";
 import { Route, BrowserRouter as Router, Routes, Navigate } from "react-router-dom";
 import { Toaster } from "react-hot-toast";
 import Login from "./components/pages/Login.jsx";
+import ForgotPasswordPage from "./components/pages/ForgotPasswordPage.jsx";
 import SetupWizard from "./components/pages/SetupWizard.jsx";
 import { GlobalLayout } from "./components/ui/index.js";
 import { AuthProvider } from "./contexts/AuthContext.jsx";
@@ -43,6 +44,7 @@ const UserStats = lazy(() => import("./components/pages/UserStats/index.js"));
 const HiddenItemsPage = lazy(
   () => import("./components/pages/HiddenItemsPage.jsx")
 );
+const Downloads = lazy(() => import("./components/pages/Downloads.jsx"));
 const CarouselBuilder = lazy(
   () => import("./components/carousel-builder/CarouselBuilder.jsx")
 );
@@ -83,11 +85,6 @@ const AppContent = () => {
     window.location.href = "/";
   };
 
-  // Handler for successful login - navigate to home
-  const handleLoginSuccess = () => {
-    window.location.href = "/";
-  };
-
   // Ensure setupStatus has defaults to prevent null access in guards
   const safeSetupStatus = setupStatus || { setupComplete: false, hasUsers: false, hasStashInstance: false };
 
@@ -113,10 +110,13 @@ const AppContent = () => {
             path="/login"
             element={
               <LoginGuard setupStatus={safeSetupStatus} checkingSetup={checkingSetup}>
-                <Login onLoginSuccess={handleLoginSuccess} />
+                <Login />
               </LoginGuard>
             }
           />
+
+          {/* Forgot password route */}
+          <Route path="/forgot-password" element={<ForgotPasswordPage />} />
 
           {/* Protected app routes */}
           <Route
@@ -285,6 +285,16 @@ const AppContent = () => {
               <ProtectedRoute setupStatus={safeSetupStatus} checkingSetup={checkingSetup}>
                 <GlobalLayout>
                   <HiddenItemsPage />
+                </GlobalLayout>
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/downloads"
+            element={
+              <ProtectedRoute setupStatus={safeSetupStatus} checkingSetup={checkingSetup}>
+                <GlobalLayout>
+                  <Downloads />
                 </GlobalLayout>
               </ProtectedRoute>
             }

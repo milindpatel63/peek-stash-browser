@@ -7,6 +7,7 @@ import { useTableColumns } from "../../hooks/useTableColumns.js";
 import { useWallPlayback } from "../../hooks/useWallPlayback.js";
 import { libraryApi } from "../../services/api.js";
 import {
+  SceneCard,
   SyncProgressBanner,
   ErrorMessage,
   PageHeader,
@@ -16,12 +17,17 @@ import {
 import { TableView, ColumnConfigPopover } from "../table/index.js";
 import SceneGrid from "./SceneGrid.jsx";
 import WallView from "../wall/WallView.jsx";
+import TimelineView from "../timeline/TimelineView.jsx";
+import { FolderView } from "../folder/index.js";
+import { useFolderViewTags } from "../../hooks/useFolderViewTags.js";
 
 // View modes available for scene search
 const VIEW_MODES = [
   { id: "grid", label: "Grid view" },
   { id: "wall", label: "Wall view" },
   { id: "table", label: "Table view" },
+  { id: "timeline", label: "Timeline view" },
+  { id: "folder", label: "Folder view" },
 ];
 
 // Context settings for wall view preview behavior
@@ -78,6 +84,66 @@ const SceneSearch = ({
 
   // Track current view mode for context settings
   const [currentViewMode, setCurrentViewMode] = useState("grid");
+
+  // Extract filter IDs for timeline/folder views
+  const viewFilters = useMemo(() => {
+    const filters = {};
+
+    // Extract performer ID
+    if (permanentFilters.performers?.value?.length > 0) {
+      filters.performerId = String(permanentFilters.performers.value[0]);
+    }
+
+    // Extract tag ID
+    if (permanentFilters.tags?.value?.length > 0) {
+      filters.tagId = String(permanentFilters.tags.value[0]);
+    }
+
+    // Extract studio ID
+    if (permanentFilters.studios?.value?.length > 0) {
+      filters.studioId = String(permanentFilters.studios.value[0]);
+    }
+
+    // Extract group ID
+    if (permanentFilters.groups?.value?.length > 0) {
+      filters.groupId = String(permanentFilters.groups.value[0]);
+    }
+
+    return Object.keys(filters).length > 0 ? filters : null;
+  }, [permanentFilters]);
+
+  // Fetch tags for folder view (only when folder view is active)
+  const { tags: folderTags, isLoading: tagsLoading } = useFolderViewTags(
+    currentViewMode === "folder",
+    viewFilters
+  );
+
+  // Track timeline date filter for filtering by selected period
+  const [timelineDateFilter, setTimelineDateFilter] = useState(null);
+
+  // Track folder tag filter for filtering by selected folder
+  const [folderTagFilter, setFolderTagFilter] = useState(null);
+
+  // Merge timeline/folder filters into permanent filters based on view mode
+  const effectivePermanentFilters = useMemo(() => {
+    let filters = { ...permanentFilters };
+
+    // Add timeline date filter when in timeline view
+    if (currentViewMode === "timeline" && timelineDateFilter) {
+      filters.date = timelineDateFilter;
+    }
+
+    // Add folder tag filter when in folder view
+    if (currentViewMode === "folder" && folderTagFilter) {
+      filters.tags = {
+        value: [folderTagFilter],
+        modifier: "INCLUDES",
+        depth: -1, // Include child tags (hierarchical)
+      };
+    }
+
+    return filters;
+  }, [permanentFilters, currentViewMode, timelineDateFilter, folderTagFilter]);
 
   // Context settings only shown in wall view
   const contextSettings = useMemo(() => {
@@ -179,8 +245,9 @@ const SceneSearch = ({
         initialSort={initialSort}
         onQueryChange={handleQueryChange}
         onPerPageStateChange={setEffectivePerPage}
-        permanentFilters={permanentFilters}
+        permanentFilters={effectivePermanentFilters}
         permanentFiltersMetadata={permanentFiltersMetadata}
+        deferInitialQueryUntilFiltersReady={currentViewMode === "timeline"}
         totalPages={totalPages}
         totalCount={totalCount}
         syncToUrl={syncToUrl}
@@ -202,7 +269,7 @@ const SceneSearch = ({
         onViewModeChange={setCurrentViewMode}
         {...searchControlsProps}
       >
-        {({ viewMode, zoomLevel, sortField, sortDirection, onSort }) =>
+        {({ viewMode, zoomLevel, gridDensity, sortField, sortDirection, onSort, timelinePeriod, setTimelinePeriod }) =>
           viewMode === "table" ? (
             <TableView
               items={currentScenes}
@@ -232,9 +299,51 @@ const SceneSearch = ({
               loading={isLoading}
               emptyMessage="No scenes found"
             />
+          ) : viewMode === "timeline" ? (
+            <TimelineView
+              entityType="scene"
+              items={currentScenes}
+              renderItem={(scene) => (
+                <SceneCard
+                  key={scene.id}
+                  scene={scene}
+                  onHideSuccess={handleHideSuccess}
+                  fromPageTitle={fromPageTitle}
+                  tabIndex={0}
+                />
+              )}
+              onItemClick={handleSceneClick}
+              onDateFilterChange={setTimelineDateFilter}
+              onPeriodChange={setTimelinePeriod}
+              initialPeriod={timelinePeriod}
+              loading={isLoading}
+              emptyMessage="No scenes found for this time period"
+              gridDensity={gridDensity}
+              filters={viewFilters}
+            />
+          ) : viewMode === "folder" ? (
+            <FolderView
+              items={currentScenes}
+              tags={folderTags}
+              gridDensity={gridDensity}
+              loading={isLoading || tagsLoading}
+              emptyMessage="No scenes found"
+              onFolderPathChange={setFolderTagFilter}
+              filters={viewFilters}
+              renderItem={(scene) => (
+                <SceneCard
+                  key={scene.id}
+                  scene={scene}
+                  onHideSuccess={handleHideSuccess}
+                  fromPageTitle={fromPageTitle}
+                  tabIndex={0}
+                />
+              )}
+            />
           ) : (
             <SceneGrid
               scenes={currentScenes || []}
+              density={gridDensity}
               loading={isLoading}
               error={error}
               onSceneClick={handleSceneClick}

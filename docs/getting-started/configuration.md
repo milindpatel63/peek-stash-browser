@@ -41,7 +41,7 @@ These settings have sensible defaults but can be customized:
 | Variable             | Description                | Default                                | Notes                        |
 | -------------------- | -------------------------- | -------------------------------------- | ---------------------------- |
 | `DATABASE_URL`       | SQLite database file       | `file:/app/data/peek-stash-browser.db` | Path inside container        |
-| `CONFIG_DIR`         | App data directory         | `/app/data`                            | Database + HLS cache         |
+| `CONFIG_DIR`         | App data directory         | `/app/data`                            | Database location            |
 | `NODE_ENV`           | Environment mode           | `production`                           | `development` or `production`|
 | `PROXY_AUTH_HEADER`  | Proxy Auth Header          |                                        | Disabled by default          |
 
@@ -250,6 +250,9 @@ volumes:
 !!! tip "Stash Connection"
     Stash URL and API key are configured via the Setup Wizard on first access and stored in the database.
 
+!!! warning "Port Conflict with Whisparr"
+    Peek's default port (6969) is the same as Whisparr's default port. If you're running Whisparr, change the port mapping to `"6970:80"` or another available port.
+
 ## Troubleshooting Configuration Issues
 
 ### Cannot Connect to Stash
@@ -287,4 +290,4 @@ Check:
 ## Next Steps
 
 - [Quick Start Guide](quick-start.md)
-- [Troubleshooting](../reference/troubleshooting.md)
+- [Troubleshooting](troubleshooting.md)

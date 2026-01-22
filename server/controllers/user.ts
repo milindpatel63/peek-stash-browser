@@ -4,7 +4,10 @@ import { Response } from "express";
 import { AuthenticatedRequest } from "../middleware/auth.js";
 import prisma from "../prisma/singleton.js";
 import { exclusionComputationService } from "../services/ExclusionComputationService.js";
+import { resolveUserPermissions } from "../services/PermissionService.js";
 import { logger } from "../utils/logger.js";
+import { generateRecoveryKey, formatRecoveryKey } from "../utils/recoveryKey.js";
+import { validatePassword } from "../utils/passwordValidation.js";
 
 /**
  * Carousel preference configuration
@@ -135,6 +138,7 @@ export const getUserSettings = async (
         wallPlayback: true,
         tableColumnDefaults: true,
         cardDisplaySettings: true,
+        landingPagePreference: true,
       },
     });
 
@@ -159,6 +163,7 @@ export const getUserSettings = async (
         wallPlayback: user.wallPlayback || "autoplay",
         tableColumnDefaults: user.tableColumnDefaults || null,
         cardDisplaySettings: user.cardDisplaySettings || null,
+        landingPagePreference: user.landingPagePreference || { pages: ["home"], randomize: false },
       },
     });
   } catch (error) {
@@ -210,6 +215,7 @@ export const updateUserSettings = async (
       wallPlayback,
       tableColumnDefaults,
       cardDisplaySettings,
+      landingPagePreference,
     } = req.body;
 
     // Validate values
@@ -378,6 +384,49 @@ export const updateUserSettings = async (
       }
     }
 
+    // Validate landing page preference if provided
+    if (landingPagePreference !== undefined) {
+      if (landingPagePreference !== null && typeof landingPagePreference !== "object") {
+        return res
+          .status(400)
+          .json({ error: "Landing page preference must be an object or null" });
+      }
+
+      if (landingPagePreference !== null) {
+        if (!Array.isArray(landingPagePreference.pages) || landingPagePreference.pages.length === 0) {
+          return res
+            .status(400)
+            .json({ error: "Landing page preference must have at least one page" });
+        }
+
+        if (typeof landingPagePreference.randomize !== "boolean") {
+          return res
+            .status(400)
+            .json({ error: "Landing page preference randomize must be a boolean" });
+        }
+
+        // Validate minimum pages for randomize mode
+        if (landingPagePreference.randomize && landingPagePreference.pages.length < 2) {
+          return res
+            .status(400)
+            .json({ error: "Random mode requires at least 2 pages selected" });
+        }
+
+        // Validate page keys
+        const validPageKeys = [
+          "home", "scenes", "performers", "studios", "tags", "collections",
+          "galleries", "images", "playlists", "recommended", "watch-history", "user-stats"
+        ];
+        for (const pageKey of landingPagePreference.pages) {
+          if (!validPageKeys.includes(pageKey)) {
+            return res
+              .status(400)
+              .json({ error: `Invalid landing page key: ${pageKey}` });
+          }
+        }
+      }
+    }
+
     const updatedUser = await prisma.user.update({
       where: { id: targetUserId },
       data: {
@@ -396,6 +445,7 @@ export const updateUserSettings = async (
         ...(wallPlayback !== undefined && { wallPlayback }),
         ...(tableColumnDefaults !== undefined && { tableColumnDefaults }),
         ...(cardDisplaySettings !== undefined && { cardDisplaySettings }),
+        ...(landingPagePreference !== undefined && { landingPagePreference }),
       },
       select: {
         id: true,
@@ -412,6 +462,7 @@ export const updateUserSettings = async (
         wallPlayback: true,
         tableColumnDefaults: true,
         cardDisplaySettings: true,
+        landingPagePreference: true,
       },
     });
 
@@ -429,6 +480,7 @@ export const updateUserSettings = async (
         wallPlayback: updatedUser.wallPlayback || "autoplay",
         tableColumnDefaults: updatedUser.tableColumnDefaults || null,
         cardDisplaySettings: updatedUser.cardDisplaySettings || null,
+        landingPagePreference: updatedUser.landingPagePreference || { pages: ["home"], randomize: false },
       },
     });
   } catch (error) {
@@ -459,10 +511,9 @@ export const changePassword = async (
         .json({ error: "Current password and new password are required" });
     }
 
-    if (newPassword.length < 6) {
-      return res
-        .status(400)
-        .json({ error: "New password must be at least 6 characters" });
+    const passwordValidation = validatePassword(newPassword);
+    if (!passwordValidation.valid) {
+      return res.status(400).json({ error: passwordValidation.errors.join(". ") });
     }
 
     // Get current user with password
@@ -497,6 +548,72 @@ export const changePassword = async (
 };
 
 /**
+ * Get current user's recovery key (formatted for display)
+ */
+export const getRecoveryKey = async (
+  req: AuthenticatedRequest,
+  res: Response
+) => {
+  try {
+    const userId = req.user?.id;
+
+    if (!userId) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { recoveryKey: true },
+    });
+
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    // Format with dashes if key exists
+    const formattedKey = user.recoveryKey
+      ? formatRecoveryKey(user.recoveryKey)
+      : null;
+
+    res.json({ recoveryKey: formattedKey });
+  } catch (error) {
+    console.error("Error getting recovery key:", error);
+    res.status(500).json({ error: "Failed to get recovery key" });
+  }
+};
+
+/**
+ * Regenerate current user's recovery key
+ */
+export const regenerateRecoveryKey = async (
+  req: AuthenticatedRequest,
+  res: Response
+) => {
+  try {
+    const userId = req.user?.id;
+
+    if (!userId) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    // Generate new recovery key
+    const newKey = generateRecoveryKey();
+
+    // Update user in database
+    await prisma.user.update({
+      where: { id: userId },
+      data: { recoveryKey: newKey },
+    });
+
+    // Return formatted key
+    res.json({ recoveryKey: formatRecoveryKey(newKey) });
+  } catch (error) {
+    console.error("Error regenerating recovery key:", error);
+    res.status(500).json({ error: "Failed to regenerate recovery key" });
+  }
+};
+
+/**
  * Get all users (admin only)
  */
 export const getAllUsers = async (req: AuthenticatedRequest, res: Response) => {
@@ -516,13 +633,26 @@ export const getAllUsers = async (req: AuthenticatedRequest, res: Response) => {
         createdAt: true,
         updatedAt: true,
         syncToStash: true,
+        groupMemberships: {
+          select: {
+            group: {
+              select: { id: true, name: true },
+            },
+          },
+        },
       },
       orderBy: {
         createdAt: "desc",
       },
     });
 
-    res.json({ users });
+    res.json({
+      users: users.map((u) => ({
+        ...u,
+        groups: u.groupMemberships.map((m) => m.group),
+        groupMemberships: undefined,
+      })),
+    });
   } catch (error) {
     console.error("Error getting all users:", error);
     res.status(500).json({ error: "Failed to get users" });
@@ -2132,6 +2262,87 @@ export const getHiddenEntityIds = async (
 };
 
 /**
+ * Hide multiple entities in a single request
+ */
+export const hideEntities = async (
+  req: AuthenticatedRequest,
+  res: Response
+) => {
+  try {
+    const userId = req.user?.id;
+
+    if (!userId) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const { entities } = req.body;
+
+    if (!Array.isArray(entities) || entities.length === 0) {
+      return res
+        .status(400)
+        .json({ error: "entities must be a non-empty array" });
+    }
+
+    // Validate entity types
+    const validTypes = [
+      "scene",
+      "performer",
+      "studio",
+      "tag",
+      "group",
+      "gallery",
+      "image",
+    ];
+
+    for (const entity of entities) {
+      if (!entity.entityType || !entity.entityId) {
+        return res
+          .status(400)
+          .json({ error: "Each entity must have entityType and entityId" });
+      }
+      if (!validTypes.includes(entity.entityType)) {
+        return res
+          .status(400)
+          .json({ error: `Invalid entity type: ${entity.entityType}` });
+      }
+    }
+
+    // Import service
+    const { userHiddenEntityService } = await import(
+      "../services/UserHiddenEntityService.js"
+    );
+
+    // Hide all entities
+    let successCount = 0;
+    let failCount = 0;
+
+    for (const entity of entities) {
+      try {
+        await userHiddenEntityService.hideEntity(
+          userId,
+          entity.entityType,
+          entity.entityId
+        );
+        successCount++;
+      } catch (error) {
+        failCount++;
+        console.error(`Failed to hide ${entity.entityType} ${entity.entityId}:`, error);
+      }
+    }
+
+    res.json({
+      success: true,
+      message: `${successCount} entities hidden successfully`,
+      successCount,
+      failCount,
+    });
+  } catch (error) {
+    console.error("Error hiding entities:", error);
+    res.status(500).json({ error: "Failed to hide entities" });
+  }
+};
+
+/**
  * Update hide confirmation preference
  */
 export const updateHideConfirmation = async (
@@ -2164,5 +2375,268 @@ export const updateHideConfirmation = async (
     res
       .status(500)
       .json({ error: "Failed to update hide confirmation preference" });
+  }
+};
+
+/**
+ * Get current user's resolved permissions
+ */
+export const getUserPermissions = async (
+  req: AuthenticatedRequest,
+  res: Response
+) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    const permissions = await resolveUserPermissions(req.user.id);
+
+    if (!permissions) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    res.json({ permissions });
+  } catch (error) {
+    console.error("Error getting user permissions:", error);
+    res.status(500).json({ error: "Failed to get permissions" });
+  }
+};
+
+/**
+ * Admin endpoint to get any user's permissions
+ */
+export const getAnyUserPermissions = async (
+  req: AuthenticatedRequest,
+  res: Response
+) => {
+  try {
+    if (req.user?.role !== "ADMIN") {
+      return res.status(403).json({ error: "Forbidden: Admin access required" });
+    }
+
+    const userId = parseInt(req.params.userId);
+    if (isNaN(userId)) {
+      return res.status(400).json({ error: "Invalid user ID" });
+    }
+
+    const permissions = await resolveUserPermissions(userId);
+
+    if (!permissions) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    res.json({ permissions });
+  } catch (error) {
+    console.error("Error getting user permissions:", error);
+    res.status(500).json({ error: "Failed to get permissions" });
+  }
+};
+
+/**
+ * Admin endpoint to update user permission overrides
+ */
+export const updateUserPermissionOverrides = async (
+  req: AuthenticatedRequest,
+  res: Response
+) => {
+  try {
+    if (req.user?.role !== "ADMIN") {
+      return res.status(403).json({ error: "Forbidden: Admin access required" });
+    }
+
+    const userId = parseInt(req.params.userId);
+    if (isNaN(userId)) {
+      return res.status(400).json({ error: "Invalid user ID" });
+    }
+
+    const { canShareOverride, canDownloadFilesOverride, canDownloadPlaylistsOverride } =
+      req.body;
+
+    // Validate values (must be boolean or null)
+    const validateOverride = (value: unknown): boolean | null | undefined => {
+      if (value === undefined) return undefined;
+      if (value === null) return null;
+      if (typeof value === "boolean") return value;
+      throw new Error("Invalid override value");
+    };
+
+    try {
+      const updates: Record<string, boolean | null> = {};
+
+      const shareOverride = validateOverride(canShareOverride);
+      if (shareOverride !== undefined) updates.canShareOverride = shareOverride;
+
+      const filesOverride = validateOverride(canDownloadFilesOverride);
+      if (filesOverride !== undefined) updates.canDownloadFilesOverride = filesOverride;
+
+      const playlistsOverride = validateOverride(canDownloadPlaylistsOverride);
+      if (playlistsOverride !== undefined) updates.canDownloadPlaylistsOverride = playlistsOverride;
+
+      if (Object.keys(updates).length === 0) {
+        return res.status(400).json({ error: "No valid updates provided" });
+      }
+
+      await prisma.user.update({
+        where: { id: userId },
+        data: updates,
+      });
+
+      // Return updated permissions
+      const permissions = await resolveUserPermissions(userId);
+      res.json({ success: true, permissions });
+    } catch {
+      return res.status(400).json({ error: "Invalid override value - must be true, false, or null" });
+    }
+  } catch (error) {
+    console.error("Error updating permission overrides:", error);
+    res.status(500).json({ error: "Failed to update permission overrides" });
+  }
+};
+
+/**
+ * Get user's group memberships (admin only)
+ */
+export const getUserGroupMemberships = async (
+  req: AuthenticatedRequest,
+  res: Response
+) => {
+  try {
+    if (req.user?.role !== "ADMIN") {
+      return res.status(403).json({ error: "Forbidden: Admin access required" });
+    }
+
+    const userId = parseInt(req.params.userId);
+    if (isNaN(userId)) {
+      return res.status(400).json({ error: "Invalid user ID" });
+    }
+
+    const memberships = await prisma.userGroupMembership.findMany({
+      where: { userId },
+      include: {
+        group: {
+          select: {
+            id: true,
+            name: true,
+            description: true,
+            canShare: true,
+            canDownloadFiles: true,
+            canDownloadPlaylists: true,
+          },
+        },
+      },
+    });
+
+    res.json({
+      groups: memberships.map((m) => m.group),
+    });
+  } catch (error) {
+    console.error("Error getting user group memberships:", error);
+    res.status(500).json({ error: "Failed to get user group memberships" });
+  }
+};
+
+/**
+ * Admin: Reset a user's password
+ */
+export const adminResetPassword = async (
+  req: AuthenticatedRequest,
+  res: Response
+) => {
+  try {
+    // Check if user is admin
+    if (req.user?.role !== "ADMIN") {
+      return res
+        .status(403)
+        .json({ error: "Forbidden: Admin access required" });
+    }
+
+    const { userId } = req.params;
+    const { newPassword } = req.body;
+    const userIdInt = parseInt(userId, 10);
+
+    if (isNaN(userIdInt)) {
+      return res.status(400).json({ error: "Invalid user ID" });
+    }
+
+    if (!newPassword) {
+      return res.status(400).json({ error: "New password is required" });
+    }
+
+    const passwordValidation = validatePassword(newPassword);
+    if (!passwordValidation.valid) {
+      return res.status(400).json({ error: passwordValidation.errors.join(". ") });
+    }
+
+    // Check if user exists
+    const user = await prisma.user.findUnique({
+      where: { id: userIdInt },
+    });
+
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    // Hash new password
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+
+    // Update password
+    await prisma.user.update({
+      where: { id: userIdInt },
+      data: { password: hashedPassword },
+    });
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error("Error resetting user password:", error);
+    res.status(500).json({ error: "Failed to reset user password" });
+  }
+};
+
+/**
+ * Admin: Regenerate a user's recovery key
+ */
+export const adminRegenerateRecoveryKey = async (
+  req: AuthenticatedRequest,
+  res: Response
+) => {
+  try {
+    // Check if user is admin
+    if (req.user?.role !== "ADMIN") {
+      return res
+        .status(403)
+        .json({ error: "Forbidden: Admin access required" });
+    }
+
+    const { userId } = req.params;
+    const userIdInt = parseInt(userId, 10);
+
+    if (isNaN(userIdInt)) {
+      return res.status(400).json({ error: "Invalid user ID" });
+    }
+
+    // Check if user exists
+    const user = await prisma.user.findUnique({
+      where: { id: userIdInt },
+    });
+
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    // Generate new recovery key
+    const newKey = generateRecoveryKey();
+
+    // Update user in database
+    await prisma.user.update({
+      where: { id: userIdInt },
+      data: { recoveryKey: newKey },
+    });
+
+    // Return formatted key
+    res.json({ recoveryKey: formatRecoveryKey(newKey) });
+  } catch (error) {
+    console.error("Error regenerating user recovery key:", error);
+    res.status(500).json({ error: "Failed to regenerate user recovery key" });
   }
 };

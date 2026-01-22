@@ -13,6 +13,9 @@ export const useFilterState = ({
   permanentFilters = {},
   filterOptions = [],
   syncToUrl = true,
+  defaultViewMode = "grid",
+  defaultGridDensity = "medium",
+  defaultZoomLevel = "medium",
 } = {}) => {
   const effectiveContext = context || artifactType;
   const [searchParams, setSearchParams] = useSearchParams();
@@ -27,9 +30,11 @@ export const useFilterState = ({
   const [sort, setSortState] = useState({ field: initialSort, direction: "DESC" });
   const [pagination, setPaginationState] = useState({ page: 1, perPage: 24 });
   const [searchText, setSearchTextState] = useState("");
-  const [viewMode, setViewModeState] = useState("grid");
-  const [zoomLevel, setZoomLevelState] = useState("medium");
+  const [viewMode, setViewModeState] = useState(defaultViewMode);
+  const [zoomLevel, setZoomLevelState] = useState(defaultZoomLevel);
+  const [gridDensity, setGridDensityState] = useState(defaultGridDensity);
   const [tableColumns, setTableColumnsState] = useState(null);
+  const [timelinePeriod, setTimelinePeriodState] = useState(null);
 
   // Initialize on mount
   useEffect(() => {
@@ -87,6 +92,8 @@ export const useFilterState = ({
             searchText: urlState.searchText,
             viewMode: urlState.viewMode,
             zoomLevel: urlState.zoomLevel,
+            gridDensity: urlState.gridDensity,
+            timelinePeriod: urlState.timelinePeriod,
           };
         } else if (defaultPreset) {
           // No URL params: use full preset
@@ -97,8 +104,10 @@ export const useFilterState = ({
             currentPage: 1,
             perPage: urlState.perPage,
             searchText: "",
-            viewMode: defaultPreset.viewMode || "grid",
-            zoomLevel: defaultPreset.zoomLevel || "medium",
+            viewMode: defaultPreset.viewMode || defaultViewMode,
+            zoomLevel: defaultPreset.zoomLevel || defaultZoomLevel,
+            gridDensity: defaultPreset.gridDensity || defaultGridDensity,
+            timelinePeriod: null,
           };
         } else {
           // No URL params, no preset: use defaults
@@ -109,8 +118,10 @@ export const useFilterState = ({
             currentPage: 1,
             perPage: urlState.perPage,
             searchText: "",
-            viewMode: "grid",
-            zoomLevel: "medium",
+            viewMode: defaultViewMode,
+            zoomLevel: defaultZoomLevel,
+            gridDensity: defaultGridDensity,
+            timelinePeriod: null,
           };
         }
 
@@ -121,6 +132,8 @@ export const useFilterState = ({
         setSearchTextState(finalState.searchText);
         setViewModeState(finalState.viewMode);
         setZoomLevelState(finalState.zoomLevel);
+        setGridDensityState(finalState.gridDensity);
+        setTimelinePeriodState(finalState.timelinePeriod);
 
       } catch (err) {
         console.error("Error loading presets:", err);
@@ -136,6 +149,8 @@ export const useFilterState = ({
         setSearchTextState(urlState.searchText);
         setViewModeState(urlState.viewMode);
         setZoomLevelState(urlState.zoomLevel);
+        setGridDensityState(urlState.gridDensity);
+        setTimelinePeriodState(urlState.timelinePeriod);
       } finally {
         setIsLoadingPresets(false);
         setIsInitialized(true);
@@ -156,10 +171,11 @@ export const useFilterState = ({
 
   // Keep stateRef updated with current values for use in debounced callbacks
   useEffect(() => {
-    stateRef.current = { filters, sort, pagination, searchText, viewMode, zoomLevel };
-  }, [filters, sort, pagination, searchText, viewMode, zoomLevel]);
+    stateRef.current = { filters, sort, pagination, searchText, viewMode, zoomLevel, gridDensity, timelinePeriod };
+  }, [filters, sort, pagination, searchText, viewMode, zoomLevel, gridDensity, timelinePeriod]);
 
   // URL sync helper - writes to URL without reading back
+  // Preserves unknown params (like folderPath) that other components may use
   const syncToUrlParams = useCallback((state, options = {}) => {
     if (!syncToUrl || !isInitialized) return;
 
@@ -174,9 +190,24 @@ export const useFilterState = ({
       filterOptions,
       viewMode: state.viewMode,
       zoomLevel: state.zoomLevel,
+      gridDensity: state.gridDensity,
+      timelinePeriod: state.timelinePeriod,
     });
 
-    setSearchParams(params, { replace });
+    // Preserve specific params we don't manage (folderPath from FolderView)
+    const preserveParams = ["folderPath"];
+
+    setSearchParams((prev) => {
+      // Start with new params
+      const merged = new URLSearchParams(params);
+      // Copy over preserved params from previous URL
+      for (const key of preserveParams) {
+        if (prev.has(key) && !merged.has(key)) {
+          merged.set(key, prev.get(key));
+        }
+      }
+      return merged;
+    }, { replace });
   }, [syncToUrl, isInitialized, filterOptions, setSearchParams]);
 
   // Actions
@@ -189,8 +220,10 @@ export const useFilterState = ({
       searchText,
       viewMode,
       zoomLevel,
+      gridDensity,
+      timelinePeriod,
     });
-  }, [filters, sort, pagination, searchText, viewMode, zoomLevel, syncToUrlParams]);
+  }, [filters, sort, pagination, searchText, viewMode, zoomLevel, gridDensity, timelinePeriod, syncToUrlParams]);
 
   const setPerPage = useCallback((perPage) => {
     setPaginationState({ page: 1, perPage });
@@ -201,8 +234,10 @@ export const useFilterState = ({
       searchText,
       viewMode,
       zoomLevel,
+      gridDensity,
+      timelinePeriod,
     });
-  }, [filters, sort, searchText, viewMode, zoomLevel, syncToUrlParams]);
+  }, [filters, sort, searchText, viewMode, zoomLevel, gridDensity, timelinePeriod, syncToUrlParams]);
 
   const setSort = useCallback((field, direction) => {
     const newDirection = direction || (sort.field === field && sort.direction === "DESC" ? "ASC" : "DESC");
@@ -214,8 +249,10 @@ export const useFilterState = ({
       searchText,
       viewMode,
       zoomLevel,
+      gridDensity,
+      timelinePeriod,
     });
-  }, [filters, sort, pagination, searchText, viewMode, zoomLevel, syncToUrlParams]);
+  }, [filters, sort, pagination, searchText, viewMode, zoomLevel, gridDensity, timelinePeriod, syncToUrlParams]);
 
   const setFilter = useCallback((key, value) => {
     const newFilters = { ...filters, [key]: value };
@@ -228,8 +265,10 @@ export const useFilterState = ({
       searchText,
       viewMode,
       zoomLevel,
+      gridDensity,
+      timelinePeriod,
     });
-  }, [filters, sort, pagination, searchText, viewMode, zoomLevel, syncToUrlParams]);
+  }, [filters, sort, pagination, searchText, viewMode, zoomLevel, gridDensity, timelinePeriod, syncToUrlParams]);
 
   const setFilters = useCallback((newFilters) => {
     setFiltersState(newFilters);
@@ -241,8 +280,10 @@ export const useFilterState = ({
       searchText,
       viewMode,
       zoomLevel,
+      gridDensity,
+      timelinePeriod,
     });
-  }, [sort, pagination, searchText, viewMode, zoomLevel, syncToUrlParams]);
+  }, [sort, pagination, searchText, viewMode, zoomLevel, gridDensity, timelinePeriod, syncToUrlParams]);
 
   const removeFilter = useCallback((key) => {
     const newFilters = { ...filters };
@@ -258,8 +299,10 @@ export const useFilterState = ({
       searchText,
       viewMode,
       zoomLevel,
+      gridDensity,
+      timelinePeriod,
     });
-  }, [filters, permanentFilters, sort, pagination, searchText, viewMode, zoomLevel, syncToUrlParams]);
+  }, [filters, permanentFilters, sort, pagination, searchText, viewMode, zoomLevel, gridDensity, timelinePeriod, syncToUrlParams]);
 
   const clearFilters = useCallback(() => {
     const newFilters = { ...permanentFilters };
@@ -272,8 +315,10 @@ export const useFilterState = ({
       searchText,
       viewMode,
       zoomLevel,
+      gridDensity,
+      timelinePeriod,
     });
-  }, [permanentFilters, sort, pagination, searchText, viewMode, zoomLevel, syncToUrlParams]);
+  }, [permanentFilters, sort, pagination, searchText, viewMode, zoomLevel, gridDensity, timelinePeriod, syncToUrlParams]);
 
   const setSearchText = useCallback((text) => {
     setSearchTextState(text);
@@ -295,21 +340,27 @@ export const useFilterState = ({
         searchText: text,
         viewMode: current.viewMode,
         zoomLevel: current.zoomLevel,
+        gridDensity: current.gridDensity,
+        timelinePeriod: current.timelinePeriod,
       }, { replace: true });
     }, 500);
   }, [syncToUrlParams]);
 
   const loadPreset = useCallback((preset) => {
     const newFilters = { ...permanentFilters, ...preset.filters };
-    const newViewMode = preset.viewMode || "grid";
-    const newZoomLevel = preset.zoomLevel || "medium";
+    const newViewMode = preset.viewMode || defaultViewMode;
+    const newZoomLevel = preset.zoomLevel || defaultZoomLevel;
+    const newGridDensity = preset.gridDensity || defaultGridDensity;
     const newTableColumns = preset.tableColumns || null;
     setFiltersState(newFilters);
     setSortState({ field: preset.sort, direction: preset.direction });
     setPaginationState((prev) => ({ ...prev, page: 1 }));
     setViewModeState(newViewMode);
     setZoomLevelState(newZoomLevel);
+    setGridDensityState(newGridDensity);
     setTableColumnsState(newTableColumns);
+    // Clear timeline period when loading preset (presets don't include timeline state)
+    setTimelinePeriodState(null);
     syncToUrlParams({
       filters: newFilters,
       sort: { field: preset.sort, direction: preset.direction },
@@ -317,8 +368,10 @@ export const useFilterState = ({
       searchText,
       viewMode: newViewMode,
       zoomLevel: newZoomLevel,
+      gridDensity: newGridDensity,
+      timelinePeriod: null,
     });
-  }, [permanentFilters, pagination, searchText, syncToUrlParams]);
+  }, [permanentFilters, pagination, searchText, syncToUrlParams, defaultViewMode, defaultZoomLevel, defaultGridDensity]);
 
   const setTableColumns = useCallback((columns) => {
     setTableColumnsState(columns);
@@ -326,6 +379,11 @@ export const useFilterState = ({
 
   const setViewMode = useCallback((mode) => {
     setViewModeState(mode);
+    // Clear timeline period when switching away from timeline view
+    const newTimelinePeriod = mode === "timeline" ? timelinePeriod : null;
+    if (mode !== "timeline") {
+      setTimelinePeriodState(null);
+    }
     syncToUrlParams({
       filters,
       sort,
@@ -333,8 +391,10 @@ export const useFilterState = ({
       searchText,
       viewMode: mode,
       zoomLevel,
+      gridDensity,
+      timelinePeriod: newTimelinePeriod,
     });
-  }, [filters, sort, pagination, searchText, zoomLevel, syncToUrlParams]);
+  }, [filters, sort, pagination, searchText, zoomLevel, gridDensity, timelinePeriod, syncToUrlParams]);
 
   const setZoomLevel = useCallback((level) => {
     setZoomLevelState(level);
@@ -345,8 +405,41 @@ export const useFilterState = ({
       searchText,
       viewMode,
       zoomLevel: level,
+      gridDensity,
+      timelinePeriod,
     });
-  }, [filters, sort, pagination, searchText, viewMode, syncToUrlParams]);
+  }, [filters, sort, pagination, searchText, viewMode, gridDensity, timelinePeriod, syncToUrlParams]);
+
+  const setGridDensity = useCallback((density) => {
+    setGridDensityState(density);
+    syncToUrlParams({
+      filters,
+      sort,
+      pagination,
+      searchText,
+      viewMode,
+      zoomLevel,
+      gridDensity: density,
+      timelinePeriod,
+    });
+  }, [filters, sort, pagination, searchText, viewMode, zoomLevel, timelinePeriod, syncToUrlParams]);
+
+  const setTimelinePeriod = useCallback((period) => {
+    setTimelinePeriodState(period);
+    // Reset to page 1 when timeline period changes
+    setPaginationState((prev) => ({ ...prev, page: 1 }));
+    // Use replace: true to avoid polluting browser history with every period selection
+    syncToUrlParams({
+      filters,
+      sort,
+      pagination: { ...pagination, page: 1 },
+      searchText,
+      viewMode,
+      zoomLevel,
+      gridDensity,
+      timelinePeriod: period,
+    }, { replace: true });
+  }, [filters, sort, pagination, searchText, viewMode, zoomLevel, gridDensity, syncToUrlParams]);
 
   return {
     filters,
@@ -355,7 +448,9 @@ export const useFilterState = ({
     searchText,
     viewMode,
     zoomLevel,
+    gridDensity,
     tableColumns,
+    timelinePeriod,
     isInitialized,
     isLoadingPresets,
     // Actions
@@ -369,7 +464,9 @@ export const useFilterState = ({
     setSearchText,
     setViewMode,
     setZoomLevel,
+    setGridDensity,
     setTableColumns,
+    setTimelinePeriod,
     loadPreset,
   };
 };

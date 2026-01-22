@@ -1,3 +1,5 @@
+import { ENTITY_ICON_NAMES } from "./entityIcons.js";
+
 /**
  * Navigation item definitions with stable keys
  * These keys should NEVER change even if display names or paths are updated
@@ -7,7 +9,7 @@ export const NAV_DEFINITIONS = [
     key: "scenes",
     name: "Scenes",
     path: "/scenes",
-    icon: "clapperboard",
+    icon: ENTITY_ICON_NAMES.scene,
     description: "Browse all scenes in your library",
   },
   {
@@ -21,52 +23,117 @@ export const NAV_DEFINITIONS = [
     key: "performers",
     name: "Performers",
     path: "/performers",
-    icon: "user",
+    icon: ENTITY_ICON_NAMES.performer,
     description: "Browse performers in your library",
   },
   {
     key: "studios",
     name: "Studios",
     path: "/studios",
-    icon: "spotlight",
+    icon: ENTITY_ICON_NAMES.studio,
     description: "Browse studios in your library",
   },
   {
     key: "tags",
     name: "Tags",
     path: "/tags",
-    icon: "tags",
+    icon: ENTITY_ICON_NAMES.tag,
     description: "Browse tags in your library",
   },
   {
     key: "groups",
     name: "Collections",
     path: "/collections",
-    icon: "film",
+    icon: ENTITY_ICON_NAMES.group,
     description: "Browse collections and movies in your library",
   },
   {
     key: "galleries",
     name: "Galleries",
     path: "/galleries",
-    icon: "gallery-vertical",
+    icon: ENTITY_ICON_NAMES.gallery,
     description: "Browse image galleries in your library",
   },
   {
     key: "images",
     name: "Images",
     path: "/images",
-    icon: "image",
+    icon: ENTITY_ICON_NAMES.image,
     description: "Browse all images in your library",
   },
   {
     key: "playlists",
     name: "Playlists",
     path: "/playlists",
-    icon: "list",
+    icon: ENTITY_ICON_NAMES.playlist,
     description: "Manage your custom playlists",
   },
 ];
+
+/**
+ * Landing page options for post-login redirect
+ * Order matters - this is the display order in settings
+ */
+export const LANDING_PAGE_OPTIONS = [
+  { key: "home", label: "Home", path: "/" },
+  { key: "scenes", label: "Scenes", path: "/scenes" },
+  { key: "performers", label: "Performers", path: "/performers" },
+  { key: "studios", label: "Studios", path: "/studios" },
+  { key: "tags", label: "Tags", path: "/tags" },
+  { key: "collections", label: "Collections", path: "/collections" },
+  { key: "galleries", label: "Galleries", path: "/galleries" },
+  { key: "images", label: "Images", path: "/images" },
+  { key: "playlists", label: "Playlists", path: "/playlists" },
+  { key: "recommended", label: "Recommended", path: "/recommended" },
+  { key: "watch-history", label: "Watch History", path: "/watch-history" },
+  { key: "user-stats", label: "User Stats", path: "/user-stats" },
+];
+
+/**
+ * Get the path for a landing page key
+ * @param {string} key - Landing page key
+ * @returns {string} Path for the landing page, defaults to "/"
+ */
+export const getLandingPagePath = (key) => {
+  const option = LANDING_PAGE_OPTIONS.find((opt) => opt.key === key);
+  return option?.path || "/";
+};
+
+/**
+ * Get the landing page destination based on user preference
+ * @param {Object} preference - User's landing page preference {pages: string[], randomize: boolean}
+ * @param {string} [currentPath] - Current path to exclude from random selection
+ * @returns {string} Path to navigate to
+ */
+export const getLandingPage = (preference, currentPath) => {
+  // Default fallback
+  if (!preference || !preference.pages?.length) {
+    return "/";
+  }
+
+  if (preference.randomize && preference.pages.length > 1) {
+    // Filter out the current page from random selection (if provided)
+    let availablePages = preference.pages;
+    if (currentPath) {
+      const currentKey = LANDING_PAGE_OPTIONS.find(
+        (opt) => opt.path === currentPath
+      )?.key;
+      if (currentKey) {
+        availablePages = preference.pages.filter((key) => key !== currentKey);
+      }
+    }
+
+    // If all pages were filtered (shouldn't happen with 2+ pages), fall back to all pages
+    if (availablePages.length === 0) {
+      availablePages = preference.pages;
+    }
+
+    const randomIndex = Math.floor(Math.random() * availablePages.length);
+    return getLandingPagePath(availablePages[randomIndex]);
+  }
+
+  return getLandingPagePath(preference.pages[0]);
+};
 
 /**
  * Migrate navigation preferences to include any new items

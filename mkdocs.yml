@@ -1,13 +1,13 @@
 # Project information
 site_name: Peek Stash Browser
-site_description: Modern web application for browsing and streaming Stash media content with real-time HLS transcoding
+site_description: Modern web application for browsing and streaming your Stash media library
 site_author: carrotwaxr
 site_url: https://carrotwaxr.github.io/peek-stash-browser
 
 # Repository
 repo_name: carrotwaxr/peek-stash-browser
 repo_url: https://github.com/carrotwaxr/peek-stash-browser
-edit_uri: edit/master/docs/
+edit_uri: edit/main/docs/
 
 # Copyright
 copyright: Copyright &copy; 2025 carrotwaxr
@@ -35,7 +35,6 @@ theme:
   features:
     - navigation.instant
     - navigation.tracking
-    - navigation.tabs
     - navigation.sections
     - navigation.expand
     - navigation.top
@@ -55,6 +54,13 @@ theme:
 plugins:
   - search:
       separator: '[\s\-,:!=\[\]()"/]+|(?!\b)(?=[A-Z][a-z])|\.(?!\d)|&[lg]t;'
+  - redirects:
+      redirect_maps:
+        # Files moved in v3.2.1
+        'getting-started/docker-basics.md': 'reference/docker-basics.md'
+        'development/api-reference.md': 'reference/api-reference.md'
+        'reference/troubleshooting.md': 'getting-started/troubleshooting.md'
+        'reference/faq.md': 'getting-started/faq.md'
   - minify:
       minify_html: true
 
@@ -112,25 +118,32 @@ nav:
       - Configuration: getting-started/configuration.md
       - Quick Start: getting-started/quick-start.md
       - Upgrading: getting-started/upgrading.md
+      - Troubleshooting: getting-started/troubleshooting.md
+      - FAQ: getting-started/faq.md
   - User Guide:
-      - Images: user-guide/images.md
-      - Recommendations: user-guide/recommendations.md
+      - Browse and Display: user-guide/browse-and-display.md
+      - Content Restrictions: user-guide/content-restrictions.md
       - Custom Carousels: user-guide/custom-carousels.md
-      - Watch History: user-guide/watch-history.md
-      - Keyboard Navigation: user-guide/keyboard-navigation.md
-      - Playlists: user-guide/playlists.md
-      - Hidden Items: user-guide/hidden-items.md
+      - Downloads: user-guide/downloads.md
       - External Player: user-guide/external-player.md
+      - Hidden Items: user-guide/hidden-items.md
+      - Images: user-guide/images.md
+      - Keyboard Navigation: user-guide/keyboard-navigation.md
+      - Merge Detection: user-guide/merge-detection.md
+      - Personalization: user-guide/personalization.md
+      - Playlists: user-guide/playlists.md
+      - Recommendations: user-guide/recommendations.md
+      - User Management: user-guide/user-management.md
+      - Watch History: user-guide/watch-history.md
+  - Reference:
+      - Docker Basics: reference/docker-basics.md
+      - API Reference: reference/api-reference.md
+      - Entity Relationships: reference/entity-relationships.md
   - Development:
+      - Local Setup: development/local-setup.md
       - Technical Overview: development/technical-overview.md
       - Sync Architecture: development/sync-architecture.md
-      - API Reference: development/api-reference.md
       - Regression Testing Guide: development/regression-testing.md
-  - Reference:
-      - Troubleshooting: reference/troubleshooting.md
-      - FAQ: reference/faq.md
-  - Releases:
-      - v3.1.0: releases/v3.1.0.md
 
 # Social links
 extra:

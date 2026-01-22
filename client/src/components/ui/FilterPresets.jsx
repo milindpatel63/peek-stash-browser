@@ -2,8 +2,8 @@ import { useEffect, useState } from "react";
 import {
   LucideBookmark,
   LucideChevronDown,
+  LucidePin,
   LucideSave,
-  LucideStar,
   LucideTrash2,
 } from "lucide-react";
 import { apiDelete, apiGet, apiPost, apiPut } from "../../services/api.js";
@@ -39,7 +39,8 @@ const getContextLabel = (ctx) => {
  * @param {string} props.currentSort - Current sort field
  * @param {string} props.currentDirection - Current sort direction
  * @param {string} props.currentViewMode - Current view mode (grid/wall/table)
- * @param {string} props.currentZoomLevel - Current zoom level (small/medium/large)
+ * @param {string} props.currentZoomLevel - Current zoom level for wall view (small/medium/large)
+ * @param {string} props.currentGridDensity - Current grid density (small/medium/large)
  * @param {Object} props.currentTableColumns - Current table columns config { visible: [], order: [] }
  * @param {Function} props.onLoadPreset - Callback when a preset is loaded
  */
@@ -52,6 +53,7 @@ const FilterPresets = ({
   currentDirection,
   currentViewMode = "grid",
   currentZoomLevel = "medium",
+  currentGridDensity = "medium",
   currentTableColumns = null,
   onLoadPreset,
 }) => {
@@ -121,6 +123,7 @@ const FilterPresets = ({
         direction: currentDirection,
         viewMode: currentViewMode,
         zoomLevel: currentZoomLevel,
+        gridDensity: currentGridDensity,
         tableColumns: currentViewMode === "table" ? currentTableColumns : null,
         setAsDefault,
       });
@@ -155,6 +158,7 @@ const FilterPresets = ({
       direction: preset.direction,
       viewMode: preset.viewMode || "grid",
       zoomLevel: preset.zoomLevel || "medium",
+      gridDensity: preset.gridDensity || "medium",
       tableColumns: preset.tableColumns || null,
     });
     setIsDropdownOpen(false);
@@ -243,9 +247,10 @@ const FilterPresets = ({
             className="text-sm"
             disabled={isLoading}
             icon={<LucideBookmark className="w-4 h-4" />}
+            title="Load Preset"
           >
-            <span>Load Preset</span>
-            <LucideChevronDown className="w-3 h-3" />
+            <span className="hidden sm:inline">Load Preset</span>
+            <LucideChevronDown className="w-3 h-3 sm:ml-0" />
           </Button>
 
           {/* Dropdown Menu */}
@@ -307,15 +312,15 @@ const FilterPresets = ({
                                   : "Set as default"
                               }
                             >
-                              <LucideStar
+                              <LucidePin
                                 className={`w-3.5 h-3.5 ${
                                   isDefault
-                                    ? "fill-yellow-400 stroke-yellow-400"
+                                    ? "fill-current"
                                     : ""
                                 }`}
                                 style={{
                                   color: isDefault
-                                    ? "rgb(250, 204, 21)"
+                                    ? "var(--accent-primary)"
                                     : "currentColor",
                                 }}
                               />
@@ -348,8 +353,9 @@ const FilterPresets = ({
           className="text-sm"
           disabled={isLoading}
           icon={<LucideSave className="w-4 h-4" />}
+          title="Save Preset"
         >
-          Save Preset
+          <span className="hidden sm:inline">Save Preset</span>
         </Button>
       </div>
 
