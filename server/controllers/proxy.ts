@@ -349,6 +349,111 @@ export const proxyStashMedia = async (req: Request, res: Response) => {
 };
 
 /**
+ * Proxy clip preview video (MP4 stream)
+ * GET /api/proxy/clip/:id/preview
+ *
+ * Returns the marker stream video for hover previews.
+ * Falls back to screenshot if stream is unavailable.
+ */
+export const proxyClipPreview = async (req: Request, res: Response) => {
+  const { id } = req.params;
+
+  if (!id) {
+    return res.status(400).json({ error: "Missing clip ID" });
+  }
+
+  // Get clip from database - prefer streamPath for video, fallback to screenshotPath
+  const clip = await prisma.stashClip.findFirst({
+    where: { id },
+    select: { streamPath: true, screenshotPath: true },
+  });
+
+  // Use streamPath (video) if available, otherwise screenshotPath (image)
+  const mediaPath = clip?.streamPath || clip?.screenshotPath;
+
+  if (!mediaPath) {
+    return res.status(404).json({ error: "Clip preview not found" });
+  }
+
+  let apiKey: string;
+
+  try {
+    apiKey = stashInstanceManager.getApiKey();
+  } catch {
+    logger.error("No Stash instance configured");
+    return res.status(500).json({ error: "Stash configuration missing" });
+  }
+
+  // Acquire concurrency slot before making request
+  await acquireConcurrencySlot();
+
+  try {
+    // mediaPath is already a full URL from Stash, just append API key
+    const fullUrl = `${mediaPath}${mediaPath.includes("?") ? "&" : "?"}apikey=${apiKey}`;
+
+    logger.debug("Proxying clip preview", {
+      clipId: id,
+      url: fullUrl.replace(apiKey, "***"),
+    });
+
+    // Parse URL to determine protocol
+    const urlObj = new URL(fullUrl);
+    const httpModule = urlObj.protocol === "https:" ? https : http;
+    const agent = getAgentForUrl(urlObj);
+
+    // Make request to Stash with connection pooling
+    const proxyReq = httpModule.get(fullUrl, { agent }, (proxyRes) => {
+      // Forward response headers
+      if (proxyRes.headers["content-type"]) {
+        res.setHeader("Content-Type", proxyRes.headers["content-type"]);
+      }
+      if (proxyRes.headers["content-length"]) {
+        res.setHeader("Content-Length", proxyRes.headers["content-length"]);
+      }
+      // Cache clip previews for 24 hours
+      res.setHeader("Cache-Control", "public, max-age=86400");
+
+      // Set status code
+      res.status(proxyRes.statusCode || 200);
+
+      // Stream response back to client
+      proxyRes.pipe(res);
+
+      // Release slot when response ends
+      proxyRes.on("end", releaseConcurrencySlot);
+      proxyRes.on("error", releaseConcurrencySlot);
+    });
+
+    // Handle request errors
+    proxyReq.on("error", (error: Error) => {
+      releaseConcurrencySlot();
+      logger.error("Error proxying clip preview", {
+        clipId: id,
+        error: error.message,
+      });
+      if (!res.headersSent) {
+        res.status(500).json({ error: "Proxy request failed" });
+      }
+    });
+
+    // Set timeout
+    proxyReq.setTimeout(30000, () => {
+      releaseConcurrencySlot();
+      proxyReq.destroy();
+      if (!res.headersSent) {
+        res.status(504).json({ error: "Proxy request timeout" });
+      }
+    });
+  } catch (error) {
+    releaseConcurrencySlot();
+    logger.error("Error proxying clip preview", { error });
+    if (!res.headersSent) {
+      res.status(500).json({ error: "Internal server error" });
+    }
+  }
+};
+
+/**
  * Proxy image requests by image ID and type
  * GET /api/proxy/image/:imageId/:type
  * :type = "thumbnail" | "preview" | "image"

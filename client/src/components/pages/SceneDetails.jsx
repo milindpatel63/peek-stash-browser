@@ -1,6 +1,9 @@
+import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { useScenePlayer } from "../../contexts/ScenePlayerContext.jsx";
 import { useCardDisplaySettings } from "../../contexts/CardDisplaySettingsContext.jsx";
+import { getClipsForScene } from "../../services/api.js";
+import ClipList from "../clips/ClipList.jsx";
 import { LazyThumbnail, Paper, SectionLink, TagChips } from "../ui/index.js";
 import { formatBitRate, formatFileSize } from "../../utils/format.js";
 
@@ -47,6 +50,39 @@ const SceneDetails = ({
   const { scene, sceneLoading, compatibility } = useScenePlayer();
   const { getSettings } = useCardDisplaySettings();
   const sceneSettings = getSettings("scene");
+
+  // Clips state
+  const [clips, setClips] = useState([]);
+  const [clipsLoading, setClipsLoading] = useState(true);
+  const [showClips, setShowClips] = useState(false); // Collapsed by default
+
+  // Fetch clips when scene changes
+  useEffect(() => {
+    async function fetchClips() {
+      if (!scene?.id) return;
+      setClipsLoading(true);
+      try {
+        const response = await getClipsForScene(scene.id, true);
+        setClips(response.clips || []);
+      } catch (err) {
+        console.error("Failed to fetch clips", err);
+        setClips([]);
+      } finally {
+        setClipsLoading(false);
+      }
+    }
+    fetchClips();
+  }, [scene?.id]);
+
+  // Handle clip click - dispatch event to seek video player
+  const handleClipClick = (clip) => {
+    // Dispatch custom event that VideoPlayer listens for
+    window.dispatchEvent(
+      new CustomEvent("seekToTime", {
+        detail: { seconds: clip.seconds },
+      })
+    );
+  };
 
   // Don't render if no scene data yet
   if (!scene) {
@@ -247,6 +283,44 @@ const SceneDetails = ({
             </Paper.Body>
           </Paper>
         </div>
+
+        {/* Clips Section - Collapsible, collapsed by default */}
+        {(clips.length > 0 || clipsLoading) && (
+          <div>
+            <Paper>
+              <Paper.Header
+                className="cursor-pointer"
+                onClick={() => setShowClips(!showClips)}
+              >
+                <div className="flex items-center justify-between">
+                  <Paper.Title>
+                    Clips
+                    {!clipsLoading && clips.length > 0 && (
+                      <span
+                        className="ml-2 text-sm font-normal"
+                        style={{ color: "var(--text-secondary)" }}
+                      >
+                        ({clips.length})
+                      </span>
+                    )}
+                  </Paper.Title>
+                  <span style={{ color: "var(--text-secondary)" }}>
+                    {showClips ? "▼" : "▶"}
+                  </span>
+                </div>
+              </Paper.Header>
+              {showClips && (
+                <Paper.Body>
+                  <ClipList
+                    clips={clips}
+                    onClipClick={handleClipClick}
+                    loading={clipsLoading}
+                  />
+                </Paper.Body>
+              )}
+            </Paper>
+          </div>
+        )}
 
         {/* URLs/Links Section */}
         {scene.urls && scene.urls.length > 0 && (

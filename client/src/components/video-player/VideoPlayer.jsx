@@ -5,6 +5,7 @@ import "video.js/dist/video-js.css";
 import { useScenePlayer } from "../../contexts/ScenePlayerContext.jsx";
 import { usePlaylistMediaKeys } from "../../hooks/useMediaKeys.js";
 import { useWatchHistory } from "../../hooks/useWatchHistory.js";
+import { getClipsForScene } from "../../services/api.js";
 import "./VideoPlayer.css";
 import { useOrientationFullscreen } from "./useOrientationFullscreen.js";
 import { useVideoPlayer } from "./useVideoPlayer.js";
@@ -46,6 +47,7 @@ const VideoPlayer = () => {
   const initialResumeTimeRef = useRef(null); // Capture resume time once
 
   const [enableCast, setEnableCast] = useState(true); // Default to true
+  const [clips, setClips] = useState([]);
 
   // Fetch user settings for cast preference
   useEffect(() => {
@@ -90,6 +92,42 @@ const VideoPlayer = () => {
   const videoWidth = firstFile?.width || 1920;
   const videoHeight = firstFile?.height || 1080;
   const aspectRatio = `${videoWidth} / ${videoHeight}`;
+
+  // Fetch clips when scene changes
+  useEffect(() => {
+    async function fetchClips() {
+      if (!scene?.id) {
+        setClips([]);
+        return;
+      }
+      try {
+        const response = await getClipsForScene(scene.id, true);
+        setClips(response.clips || []);
+      } catch (err) {
+        console.error("Failed to fetch clips for timeline", err);
+        setClips([]);
+      }
+    }
+    fetchClips();
+  }, [scene?.id]);
+
+  // Add clip markers to timeline using the markers plugin
+  useEffect(() => {
+    const player = playerRef.current;
+    if (!player) return;
+
+    const markersPlugin = player.markers?.();
+    if (!markersPlugin) return;
+
+    // Clear existing markers before adding new ones
+    markersPlugin.clearMarkers();
+
+    // Filter to only generated clips and add to timeline
+    const generatedClips = clips.filter((c) => c.isGenerated);
+    if (generatedClips.length > 0) {
+      markersPlugin.addClipMarkers(generatedClips);
+    }
+  }, [clips]);
 
   // ============================================================================
   // WATCH HISTORY TRACKING
@@ -141,6 +179,21 @@ const VideoPlayer = () => {
 
   // Auto-fullscreen on mobile orientation change
   useOrientationFullscreen(playerRef, scene?.id, true);
+
+  // Listen for seekToTime events (e.g., from ClipList clicks)
+  useEffect(() => {
+    const handleSeekToTime = (event) => {
+      const { seconds } = event.detail;
+      if (playerRef.current && typeof seconds === "number") {
+        playerRef.current.currentTime(seconds);
+      }
+    };
+
+    window.addEventListener("seekToTime", handleSeekToTime);
+    return () => {
+      window.removeEventListener("seekToTime", handleSeekToTime);
+    };
+  }, []);
 
   return (
     <section className="video-container">
@@ -200,6 +253,7 @@ const VideoPlayer = () => {
             </div>
           </div>
         )}
+
       </div>
     </section>
   );
