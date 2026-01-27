@@ -3,6 +3,7 @@ import {
   adminRegenerateRecoveryKey,
   adminResetPassword,
   changePassword,
+  completeSetup,
   createUser,
   deleteFilterPreset,
   deleteUser,
@@ -14,10 +15,12 @@ import {
   getHiddenEntities,
   getHiddenEntityIds,
   getRecoveryKey,
+  getSetupStatus,
   getUserGroupMemberships,
   getUserPermissions,
   getUserRestrictions,
   getUserSettings,
+  getUserStashInstances,
   hideEntities,
   hideEntity,
   regenerateRecoveryKey,
@@ -31,6 +34,7 @@ import {
   updateUserRestrictions,
   updateUserRole,
   updateUserSettings,
+  updateUserStashInstances,
 } from "../controllers/user.js";
 import { authenticate, requireAdmin } from "../middleware/auth.js";
 import { authenticated } from "../utils/routeHelpers.js";
@@ -48,6 +52,10 @@ router.post("/change-password", authenticated(changePassword));
 // Recovery key routes
 router.get("/recovery-key", authenticated(getRecoveryKey));
 router.post("/recovery-key/regenerate", authenticated(regenerateRecoveryKey));
+
+// Setup wizard routes
+router.get("/setup-status", authenticated(getSetupStatus));
+router.post("/complete-setup", authenticated(completeSetup));
 
 // Filter preset routes
 router.get("/filter-presets", authenticated(getFilterPresets));
@@ -143,5 +151,9 @@ router.get("/hidden-entities/ids", authenticated(getHiddenEntityIds)); // Get hi
 
 // Hide confirmation preference
 router.put("/hide-confirmation", authenticated(updateHideConfirmation)); // Update hide confirmation preference
+
+// Stash instance selection (for multi-instance support)
+router.get("/stash-instances", authenticated(getUserStashInstances)); // Get user's selected instances
+router.put("/stash-instances", authenticated(updateUserStashInstances)); // Update user's instance selection
 
 export default router;

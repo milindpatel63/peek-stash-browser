@@ -19,6 +19,7 @@ export interface ImageQueryOptions {
   userId: number;
   filters?: ImageFilter;
   applyExclusions?: boolean; // Default true - use pre-computed exclusions
+  allowedInstanceIds?: string[]; // Multi-instance support
   sort: string;
   sortDirection: "ASC" | "DESC";
   page: number;
@@ -55,7 +56,7 @@ export interface ImageQueryResult {
 class ImageQueryBuilder {
   // Column list for SELECT - all StashImage fields plus user data
   private readonly SELECT_COLUMNS = `
-    i.id, i.title, i.code, i.details, i.photographer, i.urls, i.date,
+    i.id, i.stashInstanceId, i.title, i.code, i.details, i.photographer, i.urls, i.date,
     i.studioId, i.rating100 AS stashRating100, i.oCounter AS stashOCounter,
     i.organized, i.filePath, i.width, i.height, i.fileSize,
     i.pathThumbnail, i.pathPreview, i.pathImage,
@@ -72,8 +73,8 @@ class ImageQueryBuilder {
   ): { sql: string; params: number[] } {
     const baseJoins = `
         FROM StashImage i
-        LEFT JOIN ImageRating r ON i.id = r.imageId AND r.userId = ?
-        LEFT JOIN ImageViewHistory v ON i.id = v.imageId AND v.userId = ?
+        LEFT JOIN ImageRating r ON i.id = r.imageId AND i.stashInstanceId = r.instanceId AND r.userId = ?
+        LEFT JOIN ImageViewHistory v ON i.id = v.imageId AND i.stashInstanceId = v.instanceId AND v.userId = ?
     `.trim();
 
     if (applyExclusions) {
@@ -101,6 +102,20 @@ class ImageQueryBuilder {
     return {
       sql: "i.deletedAt IS NULL",
       params: [],
+    };
+  }
+
+  /**
+   * Build instance filter clause for multi-instance support
+   */
+  private buildInstanceFilter(allowedInstanceIds: string[] | undefined): FilterClause {
+    if (!allowedInstanceIds || allowedInstanceIds.length === 0) {
+      return { sql: "", params: [] };
+    }
+    const placeholders = allowedInstanceIds.map(() => "?").join(", ");
+    return {
+      sql: `(i.stashInstanceId IN (${placeholders}) OR i.stashInstanceId IS NULL)`,
+      params: allowedInstanceIds,
     };
   }
 
@@ -183,22 +198,17 @@ class ImageQueryBuilder {
     switch (modifier) {
       case "INCLUDES":
         return {
-          sql: `i.id IN (SELECT imageId FROM ImagePerformer WHERE performerId IN (${placeholders}))`,
+          sql: `EXISTS (SELECT 1 FROM ImagePerformer ip WHERE ip.imageId = i.id AND ip.imageInstanceId = i.stashInstanceId AND ip.performerId IN (${placeholders}))`,
           params: ids,
         };
       case "INCLUDES_ALL":
         return {
-          sql: `i.id IN (
-            SELECT imageId FROM ImagePerformer
-            WHERE performerId IN (${placeholders})
-            GROUP BY imageId
-            HAVING COUNT(DISTINCT performerId) = ?
-          )`,
+          sql: `(SELECT COUNT(DISTINCT ip.performerId) FROM ImagePerformer ip WHERE ip.imageId = i.id AND ip.imageInstanceId = i.stashInstanceId AND ip.performerId IN (${placeholders})) = ?`,
           params: [...ids, ids.length],
         };
       case "EXCLUDES":
         return {
-          sql: `i.id NOT IN (SELECT imageId FROM ImagePerformer WHERE performerId IN (${placeholders}))`,
+          sql: `NOT EXISTS (SELECT 1 FROM ImagePerformer ip WHERE ip.imageId = i.id AND ip.imageInstanceId = i.stashInstanceId AND ip.performerId IN (${placeholders}))`,
           params: ids,
         };
       default:
@@ -220,22 +230,17 @@ class ImageQueryBuilder {
     switch (modifier) {
       case "INCLUDES":
         return {
-          sql: `i.id IN (SELECT imageId FROM ImageTag WHERE tagId IN (${placeholders}))`,
+          sql: `EXISTS (SELECT 1 FROM ImageTag it WHERE it.imageId = i.id AND it.imageInstanceId = i.stashInstanceId AND it.tagId IN (${placeholders}))`,
           params: ids,
         };
       case "INCLUDES_ALL":
         return {
-          sql: `i.id IN (
-            SELECT imageId FROM ImageTag
-            WHERE tagId IN (${placeholders})
-            GROUP BY imageId
-            HAVING COUNT(DISTINCT tagId) = ?
-          )`,
+          sql: `(SELECT COUNT(DISTINCT it.tagId) FROM ImageTag it WHERE it.imageId = i.id AND it.imageInstanceId = i.stashInstanceId AND it.tagId IN (${placeholders})) = ?`,
           params: [...ids, ids.length],
         };
       case "EXCLUDES":
         return {
-          sql: `i.id NOT IN (SELECT imageId FROM ImageTag WHERE tagId IN (${placeholders}))`,
+          sql: `NOT EXISTS (SELECT 1 FROM ImageTag it WHERE it.imageId = i.id AND it.imageInstanceId = i.stashInstanceId AND it.tagId IN (${placeholders}))`,
           params: ids,
         };
       default:
@@ -453,7 +458,7 @@ class ImageQueryBuilder {
       }),
     ]);
 
-    // Build lookup maps with transformed URLs
+    // Build lookup maps with transformed URLs including instanceId for multi-instance routing
     // Note: Frontend expects snake_case field names (image_path) and paths.cover for galleries
     const performersByImage = new Map<string, any[]>();
     for (const ip of performers) {
@@ -462,7 +467,7 @@ class ImageQueryBuilder {
       }
       performersByImage.get(ip.imageId)!.push({
         ...ip.performer,
-        image_path: this.transformUrl(ip.performer.imagePath),
+        image_path: this.transformUrl(ip.performer.imagePath, ip.performer.stashInstanceId),
       });
     }
 
@@ -473,7 +478,7 @@ class ImageQueryBuilder {
       }
       tagsByImage.get(it.imageId)!.push({
         ...it.tag,
-        image_path: this.transformUrl(it.tag.imagePath),
+        image_path: this.transformUrl(it.tag.imagePath, it.tag.stashInstanceId),
       });
     }
 
@@ -484,14 +489,14 @@ class ImageQueryBuilder {
       }
       galleriesByImage.get(ig.imageId)!.push({
         ...ig.gallery,
-        cover: this.transformUrl(ig.gallery.coverPath),
+        cover: this.transformUrl(ig.gallery.coverPath, ig.gallery.stashInstanceId),
       });
     }
 
     const studiosById = new Map(
       studios.map((s) => [
         s.id,
-        { ...s, image_path: this.transformUrl(s.imagePath) },
+        { ...s, image_path: this.transformUrl(s.imagePath, s.stashInstanceId) },
       ])
     );
 
@@ -507,13 +512,19 @@ class ImageQueryBuilder {
 
   async execute(options: ImageQueryOptions): Promise<ImageQueryResult> {
     const startTime = Date.now();
-    const { userId, page, perPage, applyExclusions = true, filters } = options;
+    const { userId, page, perPage, applyExclusions = true, allowedInstanceIds, filters } = options;
 
     // Build FROM clause with optional exclusion JOIN
     const fromClause = this.buildFromClause(userId, applyExclusions);
 
     // Build WHERE clauses
     const whereClauses: FilterClause[] = [this.buildBaseWhere(applyExclusions)];
+
+    // Instance filter (multi-instance support)
+    const instanceFilter = this.buildInstanceFilter(allowedInstanceIds);
+    if (instanceFilter.sql) {
+      whereClauses.push(instanceFilter);
+    }
 
     // Add user data filters
     if (filters?.favorite !== undefined) {
@@ -618,14 +629,14 @@ class ImageQueryBuilder {
     // Execute query
     const rows = await prisma.$queryRawUnsafe<any[]>(sql, ...params);
 
-    // Convert BigInt fields to Number and transform URLs to proxy paths
+    // Convert BigInt fields to Number and transform URLs to proxy paths with instanceId
     const transformedRows = rows.map((row) => ({
       ...row,
       title: row.title || getImageFallbackTitle(row.filePath),
       fileSize: row.fileSize != null ? Number(row.fileSize) : null,
-      pathThumbnail: this.transformUrl(row.pathThumbnail),
-      pathPreview: this.transformUrl(row.pathPreview),
-      pathImage: this.transformUrl(row.pathImage),
+      pathThumbnail: this.transformUrl(row.pathThumbnail, row.stashInstanceId),
+      pathPreview: this.transformUrl(row.pathPreview, row.stashInstanceId),
+      pathImage: this.transformUrl(row.pathImage, row.stashInstanceId),
     }));
 
     // Hydrate with related entities
@@ -677,8 +688,10 @@ class ImageQueryBuilder {
 
   /**
    * Transform a Stash URL/path to a proxy URL
+   * @param urlOrPath - The URL or path to transform
+   * @param instanceId - Optional Stash instance ID for multi-instance routing
    */
-  private transformUrl(urlOrPath: string | null): string | null {
+  private transformUrl(urlOrPath: string | null, instanceId?: string | null): string | null {
     if (!urlOrPath) return null;
 
     // If it's already a proxy URL, return as-is
@@ -686,20 +699,30 @@ class ImageQueryBuilder {
       return urlOrPath;
     }
 
+    // Build base proxy URL
+    let proxyPath: string;
+
     // If it's a full URL (http://...), extract path + query
     if (urlOrPath.startsWith("http://") || urlOrPath.startsWith("https://")) {
       try {
         const url = new URL(urlOrPath);
         const pathWithQuery = url.pathname + url.search;
-        return `/api/proxy/stash?path=${encodeURIComponent(pathWithQuery)}`;
+        proxyPath = `/api/proxy/stash?path=${encodeURIComponent(pathWithQuery)}`;
       } catch {
         // If URL parsing fails, treat as path
-        return `/api/proxy/stash?path=${encodeURIComponent(urlOrPath)}`;
+        proxyPath = `/api/proxy/stash?path=${encodeURIComponent(urlOrPath)}`;
       }
+    } else {
+      // Otherwise treat as path and encode it
+      proxyPath = `/api/proxy/stash?path=${encodeURIComponent(urlOrPath)}`;
     }
 
-    // Otherwise treat as path and encode it
-    return `/api/proxy/stash?path=${encodeURIComponent(urlOrPath)}`;
+    // Add instanceId for multi-instance routing
+    if (instanceId) {
+      proxyPath += `&instanceId=${encodeURIComponent(instanceId)}`;
+    }
+
+    return proxyPath;
   }
 }
 

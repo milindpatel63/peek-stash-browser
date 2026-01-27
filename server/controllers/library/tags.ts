@@ -15,8 +15,10 @@ import { entityExclusionHelper } from "../../services/EntityExclusionHelper.js";
 import { stashEntityService } from "../../services/StashEntityService.js";
 import { stashInstanceManager } from "../../services/StashInstanceManager.js";
 import { tagQueryBuilder } from "../../services/TagQueryBuilder.js";
+import { getUserAllowedInstanceIds } from "../../services/UserInstanceService.js";
 import { userStatsService } from "../../services/UserStatsService.js";
 import type { NormalizedTag, PeekTagFilter } from "../../types/index.js";
+import { disambiguateEntityNames } from "../../utils/entityInstanceId.js";
 import { hydrateTagRelationships } from "../../utils/hierarchyUtils.js";
 import { logger } from "../../utils/logger.js";
 import { buildStashEntityUrl } from "../../utils/stashUrl.js";
@@ -94,10 +96,14 @@ export const findTags = async (
     const isFetchingByIds = ids && Array.isArray(ids) && ids.length > 0;
     const applyExclusions = requestingUser?.role !== "ADMIN" && !isFetchingByIds;
 
+    // Get user's allowed instance IDs for multi-instance filtering
+    const allowedInstanceIds = await getUserAllowedInstanceIds(userId);
+
     const { tags, total } = await tagQueryBuilder.execute({
       userId,
       filters: mergedFilter,
       applyExclusions,
+      allowedInstanceIds,
       sort: sortField,
       sortDirection,
       page,
@@ -143,10 +149,12 @@ export const findTags = async (
       // Get all tags for hierarchy lookup, then hydrate
       const allTags = await stashEntityService.getAllTags();
       const allHydrated = await hydrateTagRelationships(allTags);
-      hydratedTags = allHydrated.filter((t) => resultTags.some((r) => r.id === t.id));
+      hydratedTags = allHydrated.filter((t) =>
+        resultTags.some((r) => r.id === t.id && r.instanceId === t.instanceId)
+      );
       // Merge the computed counts back
       hydratedTags = hydratedTags.map((h) => {
-        const result = resultTags.find((r) => r.id === h.id);
+        const result = resultTags.find((r) => r.id === h.id && r.instanceId === h.instanceId);
         return result ? { ...h, ...result } : h;
       });
     } else {
@@ -555,7 +563,14 @@ export const findTagsMinimal = async (
       paginatedTags = tags.slice(0, perPage);
     }
 
-    const minimal = paginatedTags.map((t) => ({ id: t.id, name: t.name }));
+    // Disambiguate names for entities with same name across different instances
+    // Only non-default instances get suffixed with instance name when duplicates exist
+    const entitiesWithInstance = paginatedTags.map((t) => ({
+      id: t.id,
+      name: t.name,
+      instanceId: t.instanceId,
+    }));
+    const minimal = disambiguateEntityNames(entitiesWithInstance);
 
     res.json({
       tags: minimal,
