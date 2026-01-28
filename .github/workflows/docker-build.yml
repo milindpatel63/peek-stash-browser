@@ -6,7 +6,11 @@ on:
   push:
     tags: ["v*"]  # Only build on version tags (e.g., v1.0.1)
   workflow_dispatch:
-
+    inputs:
+      tag:
+        description: 'Tag to build (e.g., v3.3.0-beta.11). Leave empty to build from current branch.'
+        required: false
+        type: string
 env:
   REGISTRY: docker.io
   IMAGE_NAME: milindpatel63/peek-stash-browser
