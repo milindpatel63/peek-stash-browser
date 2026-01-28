@@ -21,12 +21,14 @@ export interface SceneQueryOptions {
   userId: number;
   filters?: PeekSceneFilter;
   applyExclusions?: boolean;  // Default true - use pre-computed exclusions
-  allowedInstanceIds?: string[];  // Multi-instance filtering - if provided, only return scenes from these instances
+  allowedInstanceIds?: string[];  // Multi-instance filtering - array of instances the user can access
+  specificInstanceId?: string;  // Single instance filter for disambiguation on detail pages
   sort: string;
   sortDirection: "ASC" | "DESC";
   page: number;
   perPage: number;
   randomSeed?: number;
+  searchQuery?: string;  // Text search query - searches title, details, path, performer names, studio name, tag names
 }
 
 // Query result
@@ -113,6 +115,20 @@ class SceneQueryBuilder {
     return {
       sql: `(s.stashInstanceId IN (${placeholders}) OR s.stashInstanceId IS NULL)`,
       params: allowedInstanceIds,
+    };
+  }
+
+  /**
+   * Build filter for a specific instance ID (for disambiguation on detail pages)
+   * This is different from allowedInstanceIds - it filters to exactly one instance.
+   */
+  private buildSpecificInstanceFilter(instanceId: string | undefined): FilterClause {
+    if (!instanceId) {
+      return { sql: "", params: [] };
+    }
+    return {
+      sql: `s.stashInstanceId = ?`,
+      params: [instanceId],
     };
   }
 
@@ -617,6 +633,49 @@ class SceneQueryBuilder {
   }
 
   /**
+   * Build text search filter clause (searches across title, details, path, performers, studio, tags)
+   * Uses LIKE with wildcard for broad text matching
+   */
+  private buildSearchQueryFilter(searchQuery: string | undefined): FilterClause {
+    if (!searchQuery || searchQuery.trim() === "") {
+      return { sql: "", params: [] };
+    }
+
+    const query = searchQuery.trim();
+    const likeParam = `%${query}%`;
+
+    // Build OR clause that searches across multiple fields including relations via subqueries
+    // Using LOWER() for case-insensitive matching
+    const sql = `(
+      LOWER(s.title) LIKE LOWER(?) OR
+      LOWER(s.details) LIKE LOWER(?) OR
+      LOWER(s.filePath) LIKE LOWER(?) OR
+      EXISTS (
+        SELECT 1 FROM ScenePerformer sp
+        INNER JOIN StashPerformer p ON sp.performerId = p.id AND sp.performerInstanceId = p.stashInstanceId
+        WHERE sp.sceneId = s.id AND sp.sceneInstanceId = s.stashInstanceId
+        AND LOWER(p.name) LIKE LOWER(?)
+      ) OR
+      EXISTS (
+        SELECT 1 FROM StashStudio st
+        WHERE st.id = s.studioId AND st.stashInstanceId = s.stashInstanceId
+        AND LOWER(st.name) LIKE LOWER(?)
+      ) OR
+      EXISTS (
+        SELECT 1 FROM SceneTag stag
+        INNER JOIN StashTag t ON stag.tagId = t.id AND stag.tagInstanceId = t.stashInstanceId
+        WHERE stag.sceneId = s.id AND stag.sceneInstanceId = s.stashInstanceId
+        AND LOWER(t.name) LIKE LOWER(?)
+      )
+    )`;
+
+    return {
+      sql,
+      params: [likeParam, likeParam, likeParam, likeParam, likeParam, likeParam],
+    };
+  }
+
+  /**
    * Build date filter clause (for scene date, created_at, updated_at, last_played_at)
    */
   private buildDateFilter(
@@ -1068,8 +1127,10 @@ class SceneQueryBuilder {
 
     // Build inherited tag check using json_each to search the JSON array
     // inheritedTagIds is stored as JSON string like '["284","313"]'
+    // IMPORTANT: Also verify the tag exists in the scene's instance to prevent cross-instance pollution
+    // Different instances can have different tags with the same ID
     const inheritedTagCheck = ids.map(() =>
-      `EXISTS (SELECT 1 FROM json_each(s.inheritedTagIds) WHERE json_each.value = ?)`
+      `EXISTS (SELECT 1 FROM json_each(s.inheritedTagIds) je WHERE je.value = ? AND EXISTS (SELECT 1 FROM StashTag t WHERE t.id = je.value AND t.stashInstanceId = s.stashInstanceId AND t.deletedAt IS NULL))`
     ).join(" OR ");
 
     switch (modifier) {
@@ -1082,9 +1143,9 @@ class SceneQueryBuilder {
 
       case "INCLUDES_ALL": {
         // Match if ALL tags are present (in direct tags OR inherited tags)
-        // For each tag, check if it's in SceneTag OR in inheritedTagIds
+        // For each tag, check if it's in SceneTag OR in inheritedTagIds (with instance validation)
         const allTagChecks = ids.map(() =>
-          `(EXISTS (SELECT 1 FROM SceneTag st WHERE st.sceneId = s.id AND st.sceneInstanceId = s.stashInstanceId AND st.tagId = ?) OR EXISTS (SELECT 1 FROM json_each(s.inheritedTagIds) WHERE json_each.value = ?))`
+          `(EXISTS (SELECT 1 FROM SceneTag st WHERE st.sceneId = s.id AND st.sceneInstanceId = s.stashInstanceId AND st.tagId = ?) OR EXISTS (SELECT 1 FROM json_each(s.inheritedTagIds) je WHERE je.value = ? AND EXISTS (SELECT 1 FROM StashTag t WHERE t.id = je.value AND t.stashInstanceId = s.stashInstanceId AND t.deletedAt IS NULL)))`
         ).join(" AND ");
         // Flatten params: for each id, we need it twice (once for SceneTag, once for json_each)
         const allTagParams = ids.flatMap(id => [id, id]);
@@ -1163,7 +1224,7 @@ class SceneQueryBuilder {
 
   async execute(options: SceneQueryOptions): Promise<SceneQueryResult> {
     const startTime = Date.now();
-    const { userId, page, perPage, applyExclusions = true, allowedInstanceIds, filters } = options;
+    const { userId, page, perPage, applyExclusions = true, allowedInstanceIds, specificInstanceId, filters } = options;
 
     // Build FROM clause with optional exclusion JOIN
     const fromClause = this.buildFromClause(userId, applyExclusions);
@@ -1175,6 +1236,14 @@ class SceneQueryBuilder {
     const instanceFilter = this.buildInstanceFilter(allowedInstanceIds);
     if (instanceFilter.sql) {
       whereClauses.push(instanceFilter);
+    }
+
+    // Specific instance filter (for disambiguation on detail pages)
+    if (specificInstanceId) {
+      const specificFilter = this.buildSpecificInstanceFilter(specificInstanceId);
+      if (specificFilter.sql) {
+        whereClauses.push(specificFilter);
+      }
     }
 
     // ID filter
@@ -1392,6 +1461,14 @@ class SceneQueryBuilder {
       whereClauses.push(this.buildTagFavoriteFilter(userId));
     }
 
+    // Text search query (searches across title, details, path, performers, studio, tags)
+    if (options.searchQuery) {
+      const searchFilter = this.buildSearchQueryFilter(options.searchQuery);
+      if (searchFilter.sql) {
+        whereClauses.push(searchFilter);
+      }
+    }
+
     // Combine WHERE clauses
     const whereSQL = whereClauses.map((c) => c.sql).filter(Boolean).join(" AND ");
     const whereParams = whereClauses.flatMap((c) => c.params);
@@ -1517,6 +1594,7 @@ class SceneQueryBuilder {
     // Create scene object with studioId preserved for population
     const scene: any = {
       id: row.id,
+      instanceId: row.stashInstanceId,
       title: row.title || getSceneFallbackTitle(row.filePath),
       code: row.code || null,
       date: row.date || null,
@@ -1593,16 +1671,33 @@ class SceneQueryBuilder {
   /**
    * Populate scene relations (performers, tags, studio, groups, galleries)
    * Called after main query with just the scene IDs we need
+   *
+   * Multi-instance aware: Uses composite keys (id:instanceId) throughout to
+   * correctly associate relations when same IDs exist across different instances.
    */
   async populateRelations(scenes: NormalizedScene[]): Promise<void> {
     if (scenes.length === 0) return;
 
+    // Build scene keys with instanceId for multi-instance support
+    // All scenes should have valid instanceIds after migration
+    const normalizeInstanceId = (id: string | null | undefined): string => {
+      if (!id) {
+        throw new Error('Scene has null/undefined instanceId - this should not happen after migration');
+      }
+      return id;
+    };
+
     const sceneIds = scenes.map((s) => s.id);
-    const studioIds = scenes.map((s) => (s as any).studioId).filter(Boolean) as string[];
+    const sceneInstanceIds = [...new Set(scenes.map((s) => normalizeInstanceId(s.instanceId)))];
+    // Collect unique (studioId, instanceId) pairs - each scene's studio comes from its own instance
+    const studioKeys = [...new Map(
+      scenes
+        .filter((s) => (s as any).studioId)
+        .map((s) => [`${(s as any).studioId}:${normalizeInstanceId(s.instanceId)}`, { id: (s as any).studioId, instanceId: normalizeInstanceId(s.instanceId) }])
+    ).values()];
 
     // Batch load all relations in parallel
-    // First get junction table records, then load entities separately
-    // This avoids Prisma errors from orphaned junction records
+    // Filter by both sceneId AND sceneInstanceId for multi-instance correctness
     const [
       performerJunctions,
       tagJunctions,
@@ -1610,26 +1705,47 @@ class SceneQueryBuilder {
       galleryJunctions,
     ] = await Promise.all([
       prisma.scenePerformer.findMany({
-        where: { sceneId: { in: sceneIds } },
+        where: {
+          sceneId: { in: sceneIds },
+          sceneInstanceId: { in: sceneInstanceIds },
+        },
       }),
       prisma.sceneTag.findMany({
-        where: { sceneId: { in: sceneIds } },
+        where: {
+          sceneId: { in: sceneIds },
+          sceneInstanceId: { in: sceneInstanceIds },
+        },
       }),
       prisma.sceneGroup.findMany({
-        where: { sceneId: { in: sceneIds } },
+        where: {
+          sceneId: { in: sceneIds },
+          sceneInstanceId: { in: sceneInstanceIds },
+        },
       }),
       prisma.sceneGallery.findMany({
-        where: { sceneId: { in: sceneIds } },
+        where: {
+          sceneId: { in: sceneIds },
+          sceneInstanceId: { in: sceneInstanceIds },
+        },
       }),
     ]);
 
-    // Collect unique entity IDs from junction tables
-    const performerIds = [...new Set(performerJunctions.map((j) => j.performerId))];
-    const tagIds = [...new Set(tagJunctions.map((j) => j.tagId))];
-    const groupIds = [...new Set(groupJunctions.map((j) => j.groupId))];
-    const galleryIds = [...new Set(galleryJunctions.map((j) => j.galleryId))];
+    // Collect unique entity keys (id:instanceId) from junction tables
+    const performerKeys = [...new Map(
+      performerJunctions.map((j) => [`${j.performerId}:${j.performerInstanceId}`, { id: j.performerId, instanceId: j.performerInstanceId }])
+    ).values()];
+    const tagKeys = [...new Map(
+      tagJunctions.map((j) => [`${j.tagId}:${j.tagInstanceId}`, { id: j.tagId, instanceId: j.tagInstanceId }])
+    ).values()];
+    const groupKeys = [...new Map(
+      groupJunctions.map((j) => [`${j.groupId}:${j.groupInstanceId}`, { id: j.groupId, instanceId: j.groupInstanceId }])
+    ).values()];
+    const galleryKeys = [...new Map(
+      galleryJunctions.map((j) => [`${j.galleryId}:${j.galleryInstanceId}`, { id: j.galleryId, instanceId: j.galleryInstanceId }])
+    ).values()];
 
     // Collect inherited tag IDs (these may not be in tagJunctions since they come from performers/studios/groups)
+    // For inherited tags, we use just ID since they're pre-computed and stored without instance info
     const inheritedTagIdSet = new Set<string>();
     for (const scene of scenes) {
       const sceneAny = scene as any;
@@ -1639,117 +1755,160 @@ class SceneQueryBuilder {
         }
       }
     }
-    // Merge inherited tag IDs with direct tag IDs for a single query
-    const allTagIds = [...new Set([...tagIds, ...inheritedTagIdSet])];
 
-    // Load actual entities (only those that exist)
+    // Build OR conditions for entity queries (need to match on composite keys)
+    const performerOrConditions = performerKeys.map((k) => ({
+      id: k.id,
+      stashInstanceId: k.instanceId,
+    }));
+    const tagOrConditions = tagKeys.map((k) => ({
+      id: k.id,
+      stashInstanceId: k.instanceId,
+    }));
+    // Add inherited tags - these use scene's instance since they're from the same Stash
+    const inheritedTagOrConditions = [...inheritedTagIdSet].map((tagId) => ({
+      id: tagId,
+      stashInstanceId: { in: sceneInstanceIds },
+    }));
+    const allTagOrConditions = [...tagOrConditions, ...inheritedTagOrConditions];
+    const groupOrConditions = groupKeys.map((k) => ({
+      id: k.id,
+      stashInstanceId: k.instanceId,
+    }));
+    const galleryOrConditions = galleryKeys.map((k) => ({
+      id: k.id,
+      stashInstanceId: k.instanceId,
+    }));
+    const studioOrConditions = studioKeys.map((k) => ({
+      id: k.id,
+      stashInstanceId: k.instanceId,
+    }));
+
+    // Load actual entities (only those that exist) using composite key lookups
     const [performers, tags, groups, galleries, studios] = await Promise.all([
-      performerIds.length > 0
+      performerOrConditions.length > 0
         ? prisma.stashPerformer.findMany({
-            where: { id: { in: performerIds } },
+            where: { OR: performerOrConditions },
           })
         : Promise.resolve([]),
-      allTagIds.length > 0
+      allTagOrConditions.length > 0
         ? prisma.stashTag.findMany({
-            where: { id: { in: allTagIds } },
+            where: { OR: allTagOrConditions },
           })
         : Promise.resolve([]),
-      groupIds.length > 0
+      groupOrConditions.length > 0
         ? prisma.stashGroup.findMany({
-            where: { id: { in: groupIds } },
+            where: { OR: groupOrConditions },
           })
         : Promise.resolve([]),
-      galleryIds.length > 0
+      galleryOrConditions.length > 0
         ? prisma.stashGallery.findMany({
-            where: { id: { in: galleryIds } },
+            where: { OR: galleryOrConditions },
           })
         : Promise.resolve([]),
-      studioIds.length > 0
+      studioOrConditions.length > 0
         ? prisma.stashStudio.findMany({
-            where: { id: { in: studioIds } },
+            where: { OR: studioOrConditions },
           })
         : Promise.resolve([]),
     ]);
 
-    // Build entity lookup maps by ID
-    const performersById = new Map<string, any>();
+    // Build entity lookup maps by composite key (id:instanceId)
+    const performersByKey = new Map<string, any>();
     for (const performer of performers) {
-      performersById.set(performer.id, this.transformStashPerformer(performer));
+      const key = `${performer.id}:${performer.stashInstanceId}`;
+      performersByKey.set(key, this.transformStashPerformer(performer));
     }
 
-    const tagsById = new Map<string, any>();
+    const tagsByKey = new Map<string, any>();
     for (const tag of tags) {
-      tagsById.set(tag.id, this.transformStashTag(tag));
+      const key = `${tag.id}:${tag.stashInstanceId}`;
+      tagsByKey.set(key, this.transformStashTag(tag));
     }
 
-    const groupsById = new Map<string, any>();
+    const groupsByKey = new Map<string, any>();
     for (const group of groups) {
-      groupsById.set(group.id, this.transformStashGroup(group));
+      const key = `${group.id}:${group.stashInstanceId}`;
+      groupsByKey.set(key, this.transformStashGroup(group));
     }
 
-    const galleriesById = new Map<string, any>();
+    const galleriesByKey = new Map<string, any>();
     for (const gallery of galleries) {
-      galleriesById.set(gallery.id, this.transformStashGallery(gallery));
+      const key = `${gallery.id}:${gallery.stashInstanceId}`;
+      galleriesByKey.set(key, this.transformStashGallery(gallery));
     }
 
-    const studiosById = new Map<string, any>();
+    const studiosByKey = new Map<string, any>();
     for (const studio of studios) {
-      studiosById.set(studio.id, this.transformStashStudio(studio));
+      const key = `${studio.id}:${studio.stashInstanceId}`;
+      studiosByKey.set(key, this.transformStashStudio(studio));
     }
 
-    // Build scene-to-entities maps using junction tables
-    // (Only include entities that actually exist - handles orphaned junctions)
+    // Build scene-to-entities maps using junction tables with composite keys
+    // Key format: sceneId:sceneInstanceId -> entities[]
     const performersByScene = new Map<string, any[]>();
     for (const junction of performerJunctions) {
-      const performer = performersById.get(junction.performerId);
+      const performerKey = `${junction.performerId}:${junction.performerInstanceId}`;
+      const performer = performersByKey.get(performerKey);
       if (!performer) continue; // Skip orphaned junction records
-      const list = performersByScene.get(junction.sceneId) || [];
+      const sceneKey = `${junction.sceneId}:${junction.sceneInstanceId}`;
+      const list = performersByScene.get(sceneKey) || [];
       list.push(performer);
-      performersByScene.set(junction.sceneId, list);
+      performersByScene.set(sceneKey, list);
     }
 
     const tagsByScene = new Map<string, any[]>();
     for (const junction of tagJunctions) {
-      const tag = tagsById.get(junction.tagId);
+      const tagKey = `${junction.tagId}:${junction.tagInstanceId}`;
+      const tag = tagsByKey.get(tagKey);
       if (!tag) continue; // Skip orphaned junction records
-      const list = tagsByScene.get(junction.sceneId) || [];
+      const sceneKey = `${junction.sceneId}:${junction.sceneInstanceId}`;
+      const list = tagsByScene.get(sceneKey) || [];
       list.push(tag);
-      tagsByScene.set(junction.sceneId, list);
+      tagsByScene.set(sceneKey, list);
     }
 
     const groupsByScene = new Map<string, any[]>();
     for (const junction of groupJunctions) {
-      const group = groupsById.get(junction.groupId);
+      const groupKey = `${junction.groupId}:${junction.groupInstanceId}`;
+      const group = groupsByKey.get(groupKey);
       if (!group) continue; // Skip orphaned junction records
-      const list = groupsByScene.get(junction.sceneId) || [];
+      const sceneKey = `${junction.sceneId}:${junction.sceneInstanceId}`;
+      const list = groupsByScene.get(sceneKey) || [];
       list.push({ ...group, scene_index: junction.sceneIndex });
-      groupsByScene.set(junction.sceneId, list);
+      groupsByScene.set(sceneKey, list);
     }
 
     const galleriesByScene = new Map<string, any[]>();
     for (const junction of galleryJunctions) {
-      const gallery = galleriesById.get(junction.galleryId);
+      const galleryKey = `${junction.galleryId}:${junction.galleryInstanceId}`;
+      const gallery = galleriesByKey.get(galleryKey);
       if (!gallery) continue; // Skip orphaned junction records
-      const list = galleriesByScene.get(junction.sceneId) || [];
+      const sceneKey = `${junction.sceneId}:${junction.sceneInstanceId}`;
+      const list = galleriesByScene.get(sceneKey) || [];
       list.push(gallery);
-      galleriesByScene.set(junction.sceneId, list);
+      galleriesByScene.set(sceneKey, list);
     }
 
-    // Populate scenes
+    // Populate scenes using composite keys (use normalized instanceId)
     for (const scene of scenes) {
-      scene.performers = performersByScene.get(scene.id) || [];
-      scene.tags = tagsByScene.get(scene.id) || [];
-      scene.groups = groupsByScene.get(scene.id) || [];
-      scene.galleries = galleriesByScene.get(scene.id) || [];
+      const normalizedSceneInstanceId = normalizeInstanceId(scene.instanceId);
+      const sceneKey = `${scene.id}:${normalizedSceneInstanceId}`;
+      scene.performers = performersByScene.get(sceneKey) || [];
+      scene.tags = tagsByScene.get(sceneKey) || [];
+      scene.groups = groupsByScene.get(sceneKey) || [];
+      scene.galleries = galleriesByScene.get(sceneKey) || [];
       const sceneAny = scene as any;
       if (sceneAny.studioId) {
-        scene.studio = studiosById.get(sceneAny.studioId) || null;
+        const studioKey = `${sceneAny.studioId}:${normalizedSceneInstanceId}`;
+        scene.studio = studiosByKey.get(studioKey) || null;
       }
 
       // Hydrate inherited tags with full tag objects
+      // Inherited tags use scene's instanceId since they're from the same Stash instance
       if (sceneAny.inheritedTagIds && Array.isArray(sceneAny.inheritedTagIds) && sceneAny.inheritedTagIds.length > 0) {
         sceneAny.inheritedTags = sceneAny.inheritedTagIds
-          .map((tagId: string) => tagsById.get(tagId))
+          .map((tagId: string) => tagsByKey.get(`${tagId}:${normalizedSceneInstanceId}`))
           .filter((tag: any) => tag !== undefined);
       }
     }

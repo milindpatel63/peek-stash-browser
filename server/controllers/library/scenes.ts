@@ -12,6 +12,7 @@ import type {
   UpdateSceneRequest,
   UpdateSceneResponse,
   ApiErrorResponse,
+  AmbiguousLookupResponse,
 } from "../../types/api/index.js";
 import prisma from "../../prisma/singleton.js";
 import { stashEntityService } from "../../services/StashEntityService.js";
@@ -896,7 +897,7 @@ function getFieldValue(
  */
 export const findScenes = async (
   req: TypedAuthRequest<FindScenesRequest>,
-  res: TypedResponse<FindScenesResponse | ApiErrorResponse>
+  res: TypedResponse<FindScenesResponse | ApiErrorResponse | AmbiguousLookupResponse>
 ) => {
   const requestStart = Date.now();
   try {
@@ -936,9 +937,9 @@ export const findScenes = async (
     const mergedFilter: PeekSceneFilter = { ...scene_filter, ids: normalizedIds };
     const _requestingUser = req.user;
 
-    // NEW: Use SQL query builder if enabled
-    if (USE_SQL_QUERY_BUILDER && !searchQuery) {
-      logger.info("findScenes: using SQL query builder path");
+    // NEW: Use SQL query builder if enabled (now supports text search too)
+    if (USE_SQL_QUERY_BUILDER) {
+      logger.info("findScenes: using SQL query builder path", { hasSearchQuery: !!searchQuery });
 
       // Get user's allowed instance IDs for multi-instance filtering
       const allowedInstanceIds = await getUserAllowedInstanceIds(userId);
@@ -949,17 +950,41 @@ export const findScenes = async (
         filters.ids = { value: ids, modifier: "INCLUDES" };
       }
 
+      // Extract specific instance ID for disambiguation (from scene_filter.instance_id)
+      const specificInstanceId = (scene_filter as any)?.instance_id as string | undefined;
+
       // Execute query (applyExclusions defaults to true)
       const result = await sceneQueryBuilder.execute({
         userId,
         filters,
         allowedInstanceIds,
+        specificInstanceId,
         sort: sortField,
         sortDirection: sortDirection.toUpperCase() as "ASC" | "DESC",
         page,
         perPage,
         randomSeed: sortField === 'random' ? randomSeed : userId,
+        searchQuery: searchQuery || undefined,
       });
+
+      // Check for ambiguous results on single-ID lookups
+      // This happens when the same ID exists in multiple Stash instances
+      if (ids && ids.length === 1 && !specificInstanceId && result.scenes.length > 1) {
+        logger.warn("Ambiguous scene lookup", {
+          id: ids[0],
+          matchCount: result.scenes.length,
+          instances: result.scenes.map(s => (s as any).instanceId),
+        });
+        return res.status(400).json({
+          error: "Ambiguous lookup",
+          message: `Multiple scenes found with ID ${ids[0]}. Specify instance_id parameter.`,
+          matches: result.scenes.map(s => ({
+            id: s.id,
+            title: s.title,
+            instanceId: (s as any).instanceId,
+          })),
+        });
+      }
 
       // Add streamability info
       const scenes = addStreamabilityInfo(result.scenes);
