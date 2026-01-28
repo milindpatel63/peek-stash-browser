@@ -1,16 +1,15 @@
 name: Build and Push Docker Images
 
 on:
-  # schedule:
-  #   - cron: "30 18 * * *"   # 12:00 AM IST
   push:
-    tags: ["v*"]  # Only build on version tags (e.g., v1.0.1)
+    tags: ["v*"]  # Only build on version tags
   workflow_dispatch:
     inputs:
       tag:
         description: 'Tag to build (e.g., v3.3.0-beta.11). Leave empty to build from current branch.'
         required: false
         type: string
+
 env:
   REGISTRY: docker.io
   IMAGE_NAME: milindpatel63/peek-stash-browser
@@ -19,12 +18,24 @@ jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # Changed from 'read' to 'write' for release creation
+      contents: write
       packages: write
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 0  # Fetch all history including tags
+
+      - name: Set ref for metadata
+        id: ref
+        run: |
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            echo "ref=refs/tags/${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=${{ github.ref }}" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Log in to Docker Hub
         if: github.event_name != 'pull_request'
@@ -42,9 +53,13 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable=${{ !contains(github.ref, 'beta') && !contains(github.ref, 'alpha') }}
-            type=raw,value=beta,enable=${{ contains(github.ref, 'beta') }}
-            type=raw,value=stable,enable=${{ !contains(github.ref, 'beta') && !contains(github.ref, 'alpha') }}
+            type=raw,value=latest,enable=${{ !contains(steps.ref.outputs.ref, 'beta') && !contains(steps.ref.outputs.ref, 'alpha') }}
+            type=raw,value=beta,enable=${{ contains(steps.ref.outputs.ref, 'beta') }}
+            type=raw,value=stable,enable=${{ !contains(steps.ref.outputs.ref, 'beta') && !contains(steps.ref.outputs.ref, 'alpha') }}
+        env:
+          DOCKER_METADATA_ANNOTATIONS_LEVELS: manifest,index
+          # Override the ref that metadata-action uses
+          GITHUB_REF: ${{ steps.ref.outputs.ref }}
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -67,9 +82,10 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(steps.ref.outputs.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v1
         with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           generate_release_notes: true
           draft: false
-          prerelease: ${{ contains(github.ref, 'beta') || contains(github.ref, 'alpha') || contains(github.ref, 'rc') }}
+          prerelease: ${{ contains(steps.ref.outputs.ref, 'beta') || contains(steps.ref.outputs.ref, 'alpha') || contains(steps.ref.outputs.ref, 'rc') }}

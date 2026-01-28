@@ -39,18 +39,33 @@ jobs:
           echo "Using tag: $TAG"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
+      - name: Check if tag already exists in fork
+        id: check_tag
+        run: |
+          if git ls-remote --tags origin | grep -q "refs/tags/${{ steps.beta.outputs.tag }}"; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Tag ${{ steps.beta.outputs.tag }} already exists in fork"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "Tag ${{ steps.beta.outputs.tag }} is new"
+          fi
+
       - name: Ensure main
+        if: steps.check_tag.outputs.exists == 'false'
         run: git checkout main
 
       - name: Merge tag commit (NO history rewrite)
+        if: steps.check_tag.outputs.exists == 'false'
         run: |
           git merge --ff-only ${{ steps.beta.outputs.tag }} || \
           git merge ${{ steps.beta.outputs.tag }} --no-edit
 
       - name: Push to fork (PAT)
+        if: steps.check_tag.outputs.exists == 'false'
         env:
           SYNC_TOKEN: ${{ secrets.SYNC_TOKEN }}
         run: |
+          # Push main branch first
           git push https://x-access-token:${SYNC_TOKEN}@github.com/${{ github.repository }} main
-          # Push the tag as well
+          # Then push the tag - this will trigger the Docker build workflow
           git push https://x-access-token:${SYNC_TOKEN}@github.com/${{ github.repository }} ${{ steps.beta.outputs.tag }}
