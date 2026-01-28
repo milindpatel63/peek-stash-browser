@@ -1,10 +1,10 @@
 name: Build and Push Docker Images
 
 on:
-  schedule:
-    - cron: "30 18 * * *"   # 12:00 AM IST
+  # schedule:
+  #   - cron: "30 18 * * *"   # 12:00 AM IST
   push:
-#    tags: ["v*"]  # Only build on version tags (e.g., v1.0.1)
+    tags: ["v*"]  # Only build on version tags (e.g., v1.0.1)
   workflow_dispatch:
 
 env:
