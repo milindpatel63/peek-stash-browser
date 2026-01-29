@@ -42,8 +42,8 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=semver,pattern={{version}},value=${{ github.event.inputs.tag || github.ref_name }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ github.event.inputs.tag || github.ref_name }}
+            type=semver,pattern={{version}}${{ github.event.inputs.tag && format(',value={0}', github.event.inputs.tag) || '' }}
+            type=semver,pattern={{major}}.{{minor}}${{ github.event.inputs.tag && format(',value={0}', github.event.inputs.tag) || '' }}
             type=raw,value=latest,enable=${{ github.event_name == 'push' && !contains(github.ref, 'beta') && !contains(github.ref, 'alpha') || github.event_name == 'workflow_dispatch' && !contains(github.event.inputs.tag, 'beta') && !contains(github.event.inputs.tag, 'alpha') }}
             type=raw,value=beta,enable=${{ github.event_name == 'push' && contains(github.ref, 'beta') || github.event_name == 'workflow_dispatch' && contains(github.event.inputs.tag, 'beta') }}
             type=raw,value=stable,enable=${{ github.event_name == 'push' && !contains(github.ref, 'beta') && !contains(github.ref, 'alpha') || github.event_name == 'workflow_dispatch' && !contains(github.event.inputs.tag, 'beta') && !contains(github.event.inputs.tag, 'alpha') }}
