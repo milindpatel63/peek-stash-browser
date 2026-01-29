@@ -25,8 +25,9 @@ jobs:
         run: |
           git remote add upstream https://github.com/carrotwaxr/peek-stash-browser.git
           git fetch upstream --tags
+          git fetch upstream main
 
-      - name: Find latest tag
+      - name: Find latest upstream tag
         id: beta
         run: |
           TAG=$(git for-each-ref --sort=-creatordate --format '%(refname:short)' refs/tags | head -n 1)
@@ -50,22 +51,31 @@ jobs:
             echo "Tag ${{ steps.beta.outputs.tag }} is new"
           fi
 
-      - name: Ensure main
+      - name: Ensure main branch
         if: steps.check_tag.outputs.exists == 'false'
         run: git checkout main
 
-      - name: Merge tag commit (NO history rewrite)
+      - name: Merge upstream tag into main (with your changes)
         if: steps.check_tag.outputs.exists == 'false'
         run: |
-          git merge --ff-only ${{ steps.beta.outputs.tag }} || \
-          git merge ${{ steps.beta.outputs.tag }} --no-edit
+          # Merge the upstream tag commit into your main branch
+          git merge ${{ steps.beta.outputs.tag }} --no-edit || {
+            echo "Merge conflict occurred. Manual intervention needed."
+            exit 1
+          }
+
+      - name: Create new tag on merged commit
+        if: steps.check_tag.outputs.exists == 'false'
+        run: |
+          # Create the tag on the current commit (which now has your changes + upstream updates)
+          git tag ${{ steps.beta.outputs.tag }}
 
       - name: Push to fork (PAT)
         if: steps.check_tag.outputs.exists == 'false'
         env:
           SYNC_TOKEN: ${{ secrets.SYNC_TOKEN }}
         run: |
-          # Push main branch first
+          # Push main branch with merged changes
           git push https://x-access-token:${SYNC_TOKEN}@github.com/${{ github.repository }} main
-          # Then push the tag - this will trigger the Docker build workflow
+          # Push the new tag (now pointing to your merged commit)
           git push https://x-access-token:${SYNC_TOKEN}@github.com/${{ github.repository }} ${{ steps.beta.outputs.tag }}
