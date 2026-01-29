@@ -905,6 +905,7 @@ export const saveFilterPreset = async (
       "tag",
       "group",
       "gallery",
+      "clip",
     ];
     if (!validTypes.includes(artifactType)) {
       return res.status(400).json({ error: "Invalid artifact type" });
@@ -923,6 +924,7 @@ export const saveFilterPreset = async (
         "tag",
         "group",
         "gallery",
+        "clip",
       ];
       if (!validContexts.includes(context)) {
         return res.status(400).json({ error: "Invalid context" });
@@ -1004,6 +1006,7 @@ export const deleteFilterPreset = async (
       "tag",
       "group",
       "gallery",
+      "clip",
     ];
     if (!validTypes.includes(artifactType)) {
       return res.status(400).json({ error: "Invalid artifact type" });
