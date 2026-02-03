@@ -127,6 +127,7 @@ class StashEntityService {
     pathChaptersVtt: true,
     pathStream: true,
     pathCaption: true,
+    captions: true,
     // Explicitly NOT selecting: streams, data
     oCounter: true,
     playCount: true,
@@ -1439,6 +1440,18 @@ class StashEntityService {
     return prisma.stashClip.count();
   }
 
+  /**
+   * Get count of clips that have isGenerated=false (need preview generation)
+   */
+  async getUngeneratedClipCount(): Promise<number> {
+    return prisma.stashClip.count({
+      where: {
+        isGenerated: false,
+        deletedAt: null,
+      },
+    });
+  }
+
   // ==================== Stats/Aggregation Queries ====================
 
   /**
@@ -1453,8 +1466,9 @@ class StashEntityService {
     groups: number;
     images: number;
     clips: number;
+    ungeneratedClips: number;
   }> {
-    const [scenes, performers, studios, tags, galleries, groups, images, clips] =
+    const [scenes, performers, studios, tags, galleries, groups, images, clips, ungeneratedClips] =
       await Promise.all([
         this.getSceneCount(),
         this.getPerformerCount(),
@@ -1464,9 +1478,10 @@ class StashEntityService {
         this.getGroupCount(),
         this.getImageCount(),
         this.getClipCount(),
+        this.getUngeneratedClipCount(),
       ]);
 
-    return { scenes, performers, studios, tags, galleries, groups, images, clips };
+    return { scenes, performers, studios, tags, galleries, groups, images, clips, ungeneratedClips };
   }
 
   /**
@@ -1660,6 +1675,9 @@ class StashEntityService {
       // Generate streams on-demand (no longer stored in DB)
       sceneStreams: this.generateSceneStreams(scene.id),
 
+      // Caption metadata for multi-language subtitle support
+      captions: scene.captions ? JSON.parse(scene.captions) : [],
+
       // Stash counters (override defaults)
       o_counter: scene.oCounter ?? 0,
       play_count: scene.playCount ?? 0,
@@ -1726,6 +1744,9 @@ class StashEntityService {
 
       // Empty sceneStreams for browse - generated on demand for playback
       sceneStreams: [],
+
+      // Caption metadata for multi-language subtitle support
+      captions: scene.captions ? JSON.parse(scene.captions) : [],
 
       // Stash counters (override defaults)
       o_counter: scene.oCounter ?? 0,

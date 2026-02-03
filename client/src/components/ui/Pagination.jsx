@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState, useEffect } from "react";
 import {
   LucideArrowLeft,
   LucideArrowLeftToLine,
@@ -12,6 +12,9 @@ import { useHorizontalNavigation } from "../../hooks/useHorizontalNavigation.js"
 /**
  * Reusable pagination component
  */
+// Common per-page presets
+const PER_PAGE_PRESETS = [12, 24, 48, 96, 120];
+
 const Pagination = ({
   currentPage = 1,
   totalPages,
@@ -28,6 +31,74 @@ const Pagination = ({
   onEscapeDown,
 }) => {
   const { isTVMode } = useTVMode();
+  const [customInput, setCustomInput] = useState("");
+  const [showCustomInput, setShowCustomInput] = useState(false);
+  const [customError, setCustomError] = useState(false);
+
+  // Determine if current perPage is a preset or custom
+  const isPreset = PER_PAGE_PRESETS.includes(perPage);
+
+  // Sync custom input visibility when perPage changes externally
+  useEffect(() => {
+    if (isPreset) {
+      setShowCustomInput(false);
+      setCustomInput("");
+      setCustomError(false);
+    } else {
+      setShowCustomInput(true);
+      setCustomInput(String(perPage));
+      setCustomError(false);
+    }
+  }, [perPage, isPreset]);
+
+  const handlePresetChange = (value) => {
+    if (value === "custom") {
+      setShowCustomInput(true);
+      setCustomInput(String(perPage));
+      // Focus the input after render
+      setTimeout(() => {
+        document.getElementById("perPageCustom")?.focus();
+      }, 0);
+    } else {
+      const num = parseInt(value, 10);
+      if (!isNaN(num) && num !== perPage) {
+        onPerPageChange(num);
+      }
+      setShowCustomInput(false);
+      setCustomInput("");
+      setCustomError(false);
+    }
+  };
+
+  const handleCustomInputChange = (value) => {
+    setCustomInput(value);
+    const num = parseInt(value, 10);
+    setCustomError(isNaN(num) || num < 1 || num > 500);
+  };
+
+  const handleCustomSubmit = () => {
+    const num = parseInt(customInput, 10);
+    if (!isNaN(num) && num >= 1 && num <= 500 && num !== perPage) {
+      onPerPageChange(num);
+    } else if (isNaN(num) || num < 1 || num > 500) {
+      // Reset to current value if invalid
+      setCustomInput(String(perPage));
+      setCustomError(false);
+    }
+  };
+
+  const handleCustomKeyDown = (e) => {
+    if (e.key === "Enter") {
+      e.target.blur();
+    } else if (e.key === "Escape") {
+      // Cancel custom input, revert to preset if possible
+      if (isPreset) {
+        setShowCustomInput(false);
+        setCustomInput("");
+        setCustomError(false);
+      }
+    }
+  };
 
   // Pagination zone items: First, Prev, PageSelect, Next, Last, PerPageSelect
   const paginationItems = useMemo(() => {
@@ -52,10 +123,13 @@ const Pagination = ({
       const element = document.querySelector(`[data-tv-pagination-item="${item.id}"]`);
       if (element) {
         element.click();
-        // For dropdowns, focus them so user can interact
-        if (item.id === "page-select" || item.id === "per-page") {
+        // For inputs/dropdowns, focus them so user can interact
+        if (item.id === "page-select") {
           const select = element.querySelector("select");
           if (select) select.focus();
+        } else if (item.id === "per-page") {
+          const input = element.querySelector("input");
+          if (input) input.focus();
         }
       }
     },
@@ -64,8 +138,6 @@ const Pagination = ({
   });
   // Don't render if no pages at all
   if (!totalPages || totalPages < 1) return null;
-
-  const perPageOptions = [12, 24, 36, 48, 60, 72, 84, 96, 108, 120];
 
   // Generate array of all page numbers for dropdown
   const allPages = Array.from({ length: totalPages }, (_, i) => i + 1);
@@ -193,13 +265,14 @@ const Pagination = ({
             <div
               data-tv-pagination-item="per-page"
               ref={(el) => paginationNav.setItemRef(5, el)}
-              className={paginationNav.isFocused(5) ? "keyboard-focus" : ""}
+              className={`flex items-center gap-1 ${paginationNav.isFocused(5) ? "keyboard-focus" : ""}`}
             >
+              {/* Preset dropdown */}
               <select
                 id="perPage"
-                value={perPage}
-                onChange={(e) => onPerPageChange(parseInt(e.target.value))}
-                className="px-2 sm:px-3 py-1 rounded text-sm font-medium transition-colors"
+                value={showCustomInput ? "custom" : perPage}
+                onChange={(e) => handlePresetChange(e.target.value)}
+                className="px-2 py-1 rounded text-sm font-medium transition-colors"
                 style={{
                   backgroundColor: "var(--bg-card)",
                   color: "var(--text-primary)",
@@ -207,12 +280,35 @@ const Pagination = ({
                   height: "1.8rem",
                 }}
               >
-                {perPageOptions.map((option) => (
-                  <option key={option} value={option}>
-                    {option}
+                {PER_PAGE_PRESETS.map((preset) => (
+                  <option key={preset} value={preset}>
+                    {preset}
                   </option>
                 ))}
+                <option value="custom">Custom...</option>
               </select>
+
+              {/* Custom input (shown when custom value selected) */}
+              {showCustomInput && (
+                <input
+                  id="perPageCustom"
+                  type="text"
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                  value={customInput}
+                  onChange={(e) => handleCustomInputChange(e.target.value)}
+                  onBlur={handleCustomSubmit}
+                  onKeyDown={handleCustomKeyDown}
+                  placeholder="1-500"
+                  className="w-14 px-2 py-1 rounded text-sm font-medium transition-colors text-center"
+                  style={{
+                    backgroundColor: "var(--bg-card)",
+                    color: customError ? "var(--status-error)" : "var(--text-primary)",
+                    border: `1px solid ${customError ? "var(--status-error)" : "var(--border-color)"}`,
+                    height: "1.8rem",
+                  }}
+                />
+              )}
             </div>
           </div>
         )}
