@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import { stashInstanceManager } from "../services/StashInstanceManager.js";
 import { logger } from "../utils/logger.js";
+import { pipeResponseToClient } from "../utils/streamProxy.js";
 
 // Track active upstream stream controllers per scene to ensure
 // only one proxied stream is active at any time.
@@ -218,7 +219,7 @@ export const proxyStashStream = async (req: Request, res: Response) => {
     // Forward status code
     res.status(response.status);
 
-    // Forward relevant headers from Stash
+    // Stream response body to client with proper backpressure and cleanup
     const headersToForward = [
       'content-type',
       'content-length',
