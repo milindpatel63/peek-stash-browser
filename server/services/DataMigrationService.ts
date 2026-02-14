@@ -62,6 +62,37 @@ const migrations: Migration[] = [
       logger.info("[Migration 001] Completed user stats rebuild for all users");
     },
   },
+  {
+    name: "002_rebuild_stats_multi_instance",
+    description:
+      "Rebuild all stats after multi-instance instanceId migration to correctly separate per-instance stats",
+    run: async () => {
+      const startTime = Date.now();
+      logger.info(
+        "[Migration 002] Starting full stats rebuild after multi-instance stats migration"
+      );
+
+      try {
+        await userStatsService.rebuildAllStats();
+        const duration = Date.now() - startTime;
+        logger.info(
+          "[Migration 002] Stats rebuild completed successfully",
+          { durationMs: duration }
+        );
+      } catch (error) {
+        const duration = Date.now() - startTime;
+        logger.error(
+          "[Migration 002] Stats rebuild failed - will retry on next startup",
+          {
+            durationMs: duration,
+            error: error instanceof Error ? error.message : "Unknown error",
+            stack: error instanceof Error ? error.stack : undefined,
+          }
+        );
+        throw error;
+      }
+    },
+  },
 ];
 
 class DataMigrationService {

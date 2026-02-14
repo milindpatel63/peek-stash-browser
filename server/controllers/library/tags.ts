@@ -18,7 +18,7 @@ import { tagQueryBuilder } from "../../services/TagQueryBuilder.js";
 import { getUserAllowedInstanceIds } from "../../services/UserInstanceService.js";
 import { userStatsService } from "../../services/UserStatsService.js";
 import type { NormalizedTag, PeekTagFilter } from "../../types/index.js";
-import { disambiguateEntityNames } from "../../utils/entityInstanceId.js";
+import { disambiguateEntityNames, getEntityInstanceId } from "../../utils/entityInstanceId.js";
 import { hydrateTagRelationships } from "../../utils/hierarchyUtils.js";
 import { logger } from "../../utils/logger.js";
 import { parseRandomSort } from "../../utils/seededRandom.js";
@@ -40,7 +40,7 @@ export async function mergeTagsWithUserData(
 
   const ratingMap = new Map(
     ratings.map((r) => [
-      r.tagId,
+      `${r.tagId}\0${r.instanceId || ""}`,
       {
         rating: r.rating,
         rating100: r.rating,
@@ -51,13 +51,14 @@ export async function mergeTagsWithUserData(
 
   // Merge data
   return tags.map((tag) => {
-    const stats = tagStats.get(tag.id) || {
+    const compositeKey = `${tag.id}\0${tag.instanceId || ""}`;
+    const stats = tagStats.get(compositeKey) || {
       oCounter: 0,
       playCount: 0,
     };
     return {
       ...tag,
-      ...ratingMap.get(tag.id),
+      ...ratingMap.get(compositeKey),
       o_counter: stats.oCounter,
       play_count: stats.playCount,
     };
@@ -717,7 +718,12 @@ export const updateTag = async (
     const { id } = req.params;
     const updateData = req.body;
 
-    const stash = stashInstanceManager.getDefault();
+    const instanceId = await getEntityInstanceId('tag', id);
+    const stash = stashInstanceManager.get(instanceId);
+    if (!stash) {
+      return res.status(404).json({ error: "Stash instance not found for tag" });
+    }
+
     const updatedTag = await stash.tagUpdate({
       input: {
         id,
