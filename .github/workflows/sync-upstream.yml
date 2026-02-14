@@ -63,10 +63,11 @@ jobs:
             echo "Merge conflict occurred. Manual intervention needed."
             exit 1
           }
-
       - name: Create new tag on merged commit
         if: steps.check_tag.outputs.exists == 'false'
         run: |
+          # Delete the tag locally if it exists (from upstream fetch)
+          git tag -d ${{ steps.beta.outputs.tag }} 2>/dev/null || true
           # Create the tag on the current commit (which now has your changes + upstream updates)
           git tag ${{ steps.beta.outputs.tag }}
 
