@@ -15,7 +15,7 @@ import {
 
 const ZOOM_LEVELS = ["years", "months", "weeks", "days"];
 
-function parsePeriodToDateRange(period, zoomLevel) {
+export function parsePeriodToDateRange(period, zoomLevel) {
   if (!period) return null;
 
   try {
@@ -163,6 +163,7 @@ export function useTimelineState({ entityType, autoSelectRecent = false, initial
     return () => {
       cancelled = true;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- filterKey = JSON.stringify(filters) captures all filter property changes
   }, [entityType, zoomLevel, autoSelectRecent, filterKey]);
 
   const selectPeriod = useCallback(

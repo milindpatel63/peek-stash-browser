@@ -282,6 +282,7 @@ export function useVideoPlayer({
       performers,
       scene.paths?.screenshot || ""
     );
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- deps list all accessed scene properties individually; adding `scene` object would cause re-runs on every render
   }, [scene?.id, scene?.title, scene?.performers, scene?.paths?.screenshot, playerRef]);
 
   // ============================================================================
@@ -349,6 +350,7 @@ export function useVideoPlayer({
     // This ensures proper layout before metadata loads
     const aspectRatio = `${firstFile.width}:${firstFile.height}`;
     player.aspectRatio(aspectRatio);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- scene?.id captures scene changes; adding `scene` object would re-run aspect ratio setup on every render
   }, [scene?.id, playerRef]);
 
   // ============================================================================
@@ -452,8 +454,9 @@ export function useVideoPlayer({
         console.log("[AUTO-FALLBACK] canplay fired, restoring position");
         player.currentTime(currentTime);
         console.log("[AUTO-FALLBACK] Playback started successfully");
-        // Update quality in state (quality selector UI)
+        // Update quality in state (quality selector UI) and track for watch history
         dispatch({ type: "SET_QUALITY", payload: bestQuality });
+        updateQuality(bestQuality);
         // Clear auto-fallback flag
         isAutoFallbackRef.current = false;
       });
@@ -467,7 +470,8 @@ export function useVideoPlayer({
     return () => {
       player.off("error", handleError);
     };
-  }, [scene?.id, dispatch]); // Only re-run when scene changes
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- scene?.id captures scene changes; playerRef is a stable ref; adding `scene` object would re-initialize error handler on every render
+  }, [scene?.id, playerRef, dispatch]); // Only re-run when scene changes
 
   // ============================================================================
   // VIDEO SOURCES LOADING (using sourceSelector plugin - Stash pattern)
@@ -603,13 +607,6 @@ export function useVideoPlayer({
   // ============================================================================
   // QUALITY SWITCHING (from useVideoPlayerSources)
   // ============================================================================
-
-  // Track quality changes for watch history
-  useEffect(() => {
-    if (quality) {
-      updateQuality(quality);
-    }
-  }, [quality, updateQuality]);
 
   // ============================================================================
   // AUTOPLAY AND RESUME (Stash pattern - simple and clean)
