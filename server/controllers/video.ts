@@ -12,7 +12,8 @@ const activeStreamControllers = new Map<string, AbortController>();
  * @returns Object with baseUrl and apiKey
  */
 function getInstanceCredentials(instanceId?: string): { baseUrl: string; apiKey: string } {
-  if (instanceId) {
+  // Treat "default" the same as undefined - use the default instance
+  if (instanceId && instanceId !== "default") {
     const instance = stashInstanceManager.get(instanceId);
     if (!instance) {
       throw new Error(`Stash instance not found: ${instanceId}`);
@@ -152,7 +153,7 @@ export const proxyStashStream = async (req: Request, res: Response) => {
 
     const stashUrl = `${stashBaseUrl}/scene/${sceneId}/${fullStreamPath}${queryString ? '?' + queryString : ''}`;
 
-    logger.info(`[PROXY] Proxying stream: ${req.url} -> ${stashUrl}`);
+    logger.debug(`[PROXY] Proxying stream: ${req.url} -> ${stashUrl}`);
 
     // Abort any existing upstream request for this scene before starting a new one.
     const previousController = activeStreamControllers.get(sceneId);
@@ -182,6 +183,11 @@ export const proxyStashStream = async (req: Request, res: Response) => {
     res.on("close", abortUpstream);
 
     // Forward request to Stash using fetch
+    const headers: Record<string, string> = { 'ApiKey': apiKey };
+    if (req.headers.range) {
+      headers['Range'] = req.headers.range;
+    }
+
     const response = await fetch(stashUrl, {
       headers: {
         'ApiKey': apiKey,
