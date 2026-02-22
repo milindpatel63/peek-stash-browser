@@ -8,6 +8,7 @@ import type {
   FindGalleriesMinimalRequest,
   FindGalleriesMinimalResponse,
   ApiErrorResponse,
+  AmbiguousLookupResponse,
 } from "../../types/api/index.js";
 import prisma from "../../prisma/singleton.js";
 import { stashEntityService } from "../../services/StashEntityService.js";
@@ -206,7 +207,7 @@ export async function applyGalleryFilters(
  */
 export const findGalleries = async (
   req: TypedAuthRequest<FindGalleriesRequest>,
-  res: TypedResponse<FindGalleriesResponse | ApiErrorResponse>
+  res: TypedResponse<FindGalleriesResponse | ApiErrorResponse | AmbiguousLookupResponse>
 ) => {
   try {
     const startTime = Date.now();
@@ -235,6 +236,9 @@ export const findGalleries = async (
       ids: normalizedIds,
     };
 
+    // Extract specific instance ID for disambiguation (from gallery_filter.instance_id)
+    const specificInstanceId = gallery_filter?.instance_id as string | undefined;
+
     // Get user's allowed instance IDs for multi-instance filtering
     const allowedInstanceIds = await getUserAllowedInstanceIds(userId);
 
@@ -244,6 +248,7 @@ export const findGalleries = async (
       filters: mergedFilter,
       applyExclusions,
       allowedInstanceIds,
+      specificInstanceId,
       sort: sortField,
       sortDirection,
       page,
@@ -251,6 +256,24 @@ export const findGalleries = async (
       searchQuery,
       randomSeed,
     });
+
+    // Check for ambiguous results on single-ID lookups
+    if (ids && ids.length === 1 && !specificInstanceId && galleries.length > 1) {
+      logger.warn("Ambiguous gallery lookup", {
+        id: ids[0],
+        matchCount: galleries.length,
+        instances: galleries.map(g => g.instanceId),
+      });
+      return res.status(400).json({
+        error: "Ambiguous lookup",
+        message: `Multiple galleries found with ID ${ids[0]}. Specify instance_id parameter.`,
+        matches: galleries.map(g => ({
+          id: g.id,
+          title: g.title,
+          instanceId: g.instanceId,
+        })),
+      });
+    }
 
     // For single-entity requests (detail pages), get gallery with computed counts
     let paginatedGalleries = galleries;

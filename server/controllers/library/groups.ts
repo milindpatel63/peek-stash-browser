@@ -6,6 +6,7 @@ import type {
   FindGroupsMinimalRequest,
   FindGroupsMinimalResponse,
   ApiErrorResponse,
+  AmbiguousLookupResponse,
 } from "../../types/api/index.js";
 import prisma from "../../prisma/singleton.js";
 import { stashEntityService } from "../../services/StashEntityService.js";
@@ -34,13 +35,14 @@ async function mergeGroupsWithUserData(
 
     const ratingsMap = new Map(
       groupRatings.map((r) => [
-        r.groupId,
+        `${r.groupId}\0${r.instanceId || ""}`,
         { rating: r.rating, rating100: r.rating, favorite: r.favorite },
       ])
     );
 
     return groups.map((group) => {
-      const userRating = ratingsMap.get(group.id);
+      const compositeKey = `${group.id}\0${group.instanceId || ""}`;
+      const userRating = ratingsMap.get(compositeKey);
       return {
         ...group,
         rating: userRating?.rating ?? null,
@@ -148,7 +150,7 @@ export async function applyGroupFilters(
  */
 export const findGroups = async (
   req: TypedAuthRequest<FindGroupsRequest>,
-  res: TypedResponse<FindGroupsResponse | ApiErrorResponse>
+  res: TypedResponse<FindGroupsResponse | ApiErrorResponse | AmbiguousLookupResponse>
 ) => {
   try {
     const startTime = Date.now();
@@ -177,6 +179,9 @@ export const findGroups = async (
       ids: normalizedIds,
     };
 
+    // Extract specific instance ID for disambiguation (from group_filter.instance_id)
+    const specificInstanceId = group_filter?.instance_id as string | undefined;
+
     // Get user's allowed instance IDs for multi-instance filtering
     const allowedInstanceIds = await getUserAllowedInstanceIds(userId);
 
@@ -186,6 +191,7 @@ export const findGroups = async (
       filters: mergedFilter,
       applyExclusions,
       allowedInstanceIds,
+      specificInstanceId,
       sort: sortField,
       sortDirection,
       page,
@@ -193,6 +199,24 @@ export const findGroups = async (
       searchQuery,
       randomSeed,
     });
+
+    // Check for ambiguous results on single-ID lookups
+    if (ids && ids.length === 1 && !specificInstanceId && groups.length > 1) {
+      logger.warn("Ambiguous group lookup", {
+        id: ids[0],
+        matchCount: groups.length,
+        instances: groups.map(g => g.instanceId),
+      });
+      return res.status(400).json({
+        error: "Ambiguous lookup",
+        message: `Multiple groups found with ID ${ids[0]}. Specify instance_id parameter.`,
+        matches: groups.map(g => ({
+          id: g.id,
+          name: g.name,
+          instanceId: g.instanceId,
+        })),
+      });
+    }
 
     // For single-entity requests (detail pages), get group with computed counts
     let paginatedGroups = groups;
