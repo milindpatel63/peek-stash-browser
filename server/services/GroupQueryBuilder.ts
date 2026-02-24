@@ -694,15 +694,12 @@ class GroupQueryBuilder {
     const tagKeys = [...new Map(
       tagJunctions.map((j) => [`${j.tagId}:${j.tagInstanceId}`, { id: j.tagId, instanceId: j.tagInstanceId }])
     ).values()];
-    // Cast via `unknown` because studioId is set on the raw SQL row in transformRow()
-    // but NormalizedGroup (from GraphQL's Group type) only has `studio?: Maybe<Studio>`,
-    // not a flat studioId field.
     const studioKeys = [...new Map(
       groups
-        .filter((g) => (g as unknown as { studioId: string | null }).studioId)
+        .filter((g) => g.studioId)
         .map((g) => {
-          const studioId = (g as unknown as { studioId: string | null }).studioId;
-          return [`${studioId}:${g.instanceId}`, { id: studioId as string, instanceId: g.instanceId }];
+          const studioId = g.studioId!;
+          return [`${studioId}:${g.instanceId}`, { id: studioId, instanceId: g.instanceId }];
         })
     ).values()];
     const performerKeys = [...new Map(
@@ -837,14 +834,14 @@ class GroupQueryBuilder {
     // Populate groups using composite keys
     for (const group of groups) {
       const groupKey = `${group.id}:${group.instanceId}`;
-      group.tags = (tagsByGroup.get(groupKey) || []) as unknown as NormalizedGroup["tags"];
+      group.tags = tagsByGroup.get(groupKey) || [];
 
       // Hydrate studio with tooltip data (id, name, image_path) using composite key
       if (group.studio?.id) {
         const studioKey = `${group.studio.id}:${group.instanceId}`;
         const studioData = studiosByKey.get(studioKey);
         if (studioData) {
-          (group as unknown as { studio: typeof studioData }).studio = studioData;
+          group.studio = studioData;
         }
       }
 
@@ -859,8 +856,8 @@ class GroupQueryBuilder {
         for (const galleryKey of galleriesByScene.get(sceneKey) || []) groupGalleryKeys.add(galleryKey);
       }
 
-      (group as unknown as { performers: PerformerRef[] }).performers = [...groupPerformerKeys].map((key) => performersByKey.get(key)).filter((p): p is PerformerRef => !!p);
-      (group as unknown as { galleries: GalleryRef[] }).galleries = [...groupGalleryKeys].map((key) => galleriesByKey.get(key)).filter((g): g is GalleryRef => !!g);
+      group.performers = [...groupPerformerKeys].map((key) => performersByKey.get(key)).filter((p): p is PerformerRef => !!p);
+      group.galleries = [...groupGalleryKeys].map((key) => galleriesByKey.get(key)).filter((g): g is GalleryRef => !!g);
     }
   }
 
