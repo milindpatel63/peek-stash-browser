@@ -20,6 +20,7 @@ import { getUserAllowedInstanceIds } from "../../services/UserInstanceService.js
 import { userStatsService } from "../../services/UserStatsService.js";
 import type { NormalizedTag, PeekTagFilter } from "../../types/index.js";
 import { disambiguateEntityNames, getEntityInstanceId } from "../../utils/entityInstanceId.js";
+import { coerceEntityRefs } from "@peek/shared-types/instanceAwareId.js";
 import { hydrateTagRelationships } from "../../utils/hierarchyUtils.js";
 import { logger } from "../../utils/logger.js";
 import { parseRandomSort } from "../../utils/seededRandom.js";
@@ -90,7 +91,7 @@ export const findTags = async (
 
     // Merge root-level ids with tag_filter
     const normalizedIds = ids
-      ? { value: ids, modifier: "INCLUDES" }
+      ? { value: coerceEntityRefs(ids), modifier: "INCLUDES" }
       : tag_filter?.ids;
     const mergedFilter: PeekTagFilter = {
       ...tag_filter,
@@ -144,9 +145,10 @@ export const findTags = async (
     // For single-entity requests (detail pages), get tag with computed counts
     let resultTags = tags;
     if (ids && ids.length === 1 && resultTags.length === 1) {
-      const tagWithCounts = await stashEntityService.getTag(ids[0], resultTags[0].instanceId);
+      const firstTag = resultTags[0] as (typeof resultTags)[number];
+      const tagWithCounts = await stashEntityService.getTag(ids[0] as string, firstTag.instanceId);
       if (tagWithCounts) {
-        const existingTag = resultTags[0];
+        const existingTag = firstTag;
         resultTags = [
           {
             ...existingTag,
@@ -235,7 +237,7 @@ export async function applyTagFilters(
 
   // Filter by IDs (for detail pages)
   if (filters.ids?.value && filters.ids.value.length > 0) {
-    const idSet = new Set(filters.ids.value);
+    const idSet = new Set(filters.ids.value as string[]);
     filtered = filtered.filter((t) => idSet.has(t.id));
   }
 
@@ -446,6 +448,7 @@ export async function applyTagFilters(
       (filters.scenes_filter.id.value || []).map(String)
     );
     if (sceneIdSet.size > 0) {
+      // eslint-disable-next-line @typescript-eslint/no-deprecated -- intentional legacy fallback path when USE_SQL_QUERY_BUILDER=false
       const allScenes = await stashEntityService.getAllScenes();
       const allPerformers = await stashEntityService.getAllPerformers();
       const matchingScenes = allScenes.filter((s) =>
@@ -481,11 +484,12 @@ export async function applyTagFilters(
       (filters.scenes_filter.groups.value || []).map(String)
     );
     if (groupIdSet.size > 0) {
+      // eslint-disable-next-line @typescript-eslint/no-deprecated -- intentional legacy fallback path when USE_SQL_QUERY_BUILDER=false
       const allScenes = await stashEntityService.getAllScenes();
       const allPerformers = await stashEntityService.getAllPerformers();
       const matchingScenes = allScenes.filter((scene) => {
         if (!scene.groups) return false;
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- groups are flattened at runtime, type says SceneGroup (nested)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access -- groups are flattened at runtime, type says SceneGroup (nested)
         return scene.groups.some((g: any) => groupIdSet.has(String(g.id)));
       });
 
@@ -763,7 +767,7 @@ export const updateTag = async (
 
     res.json({ success: true, tag: updatedTag.tagUpdate as unknown as NormalizedTag });
   } catch (error) {
-    console.error("Error updating tag:", error);
+    logger.error("Error updating tag", { error: error instanceof Error ? error.message : "Unknown error" });
     res.status(500).json({ error: "Failed to update tag" });
   }
 };

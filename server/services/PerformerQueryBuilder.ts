@@ -5,12 +5,15 @@
  * Eliminates the need to load all performers into memory.
  */
 import type { PeekPerformerFilter, NormalizedPerformer, TagRef, GroupRef, GalleryRef, StudioRef } from "../types/index.js";
+import type { PerformerQueryRow } from "../types/internal/queryRows.js";
 import prisma from "../prisma/singleton.js";
 import { logger } from "../utils/logger.js";
 import { expandTagIds } from "../utils/hierarchyUtils.js";
 import { getGalleryFallbackTitle } from "../utils/titleUtils.js";
+import { parseJsonArray } from "../utils/sqlHelpers.js";
 import { KEY_SEP } from "./UserStatsService.js";
-import { buildNumericFilter, buildDateFilter, buildTextFilter, buildFavoriteFilter, buildJunctionFilter, type FilterClause } from "../utils/sqlFilterBuilders.js";
+import { buildNumericFilter, buildDateFilter, buildTextFilter, buildFavoriteFilter, buildJunctionFilter, parseCompositeFilterValues, type FilterClause } from "../utils/sqlFilterBuilders.js";
+import { coerceEntityRefs } from "@peek/shared-types/instanceAwareId.js";
 
 /** Deduplicate composite key objects by id+stashInstanceId */
 function dedupeKeys(items: { id: string; stashInstanceId: string }[]): { id: string; stashInstanceId: string }[] {
@@ -184,7 +187,9 @@ class PerformerQueryBuilder {
       return { sql: "", params: [] };
     }
 
-    let ids = filter.value;
+    // Parse composite keys ("284:instance-1" -> "284") since UI sends composite format
+    const { parsed } = parseCompositeFilterValues(filter.value);
+    let ids = parsed.map(p => p.id);
     const { modifier, depth } = filter;
 
     // Expand IDs if depth is specified and not 0
@@ -193,7 +198,7 @@ class PerformerQueryBuilder {
     }
 
     return buildJunctionFilter(
-      ids, "PerformerTag", "performerId", "performerInstanceId",
+      coerceEntityRefs(ids), "PerformerTag", "performerId", "performerInstanceId",
       "tagId", "tagInstanceId", "p", modifier || "INCLUDES"
     );
   }
@@ -209,7 +214,10 @@ class PerformerQueryBuilder {
       return { sql: "", params: [] };
     }
 
-    const { value: ids, modifier = "INCLUDES" } = filter;
+    const { modifier = "INCLUDES" } = filter;
+    // Parse composite keys ("5:instance-1" -> "5") since UI sends composite format
+    const { parsed } = parseCompositeFilterValues(filter.value);
+    const ids = parsed.map(p => p.id);
     const placeholders = ids.map(() => "?").join(", ");
 
     switch (modifier) {
@@ -807,7 +815,7 @@ class PerformerQueryBuilder {
 
     // Execute query
     const queryStart = Date.now();
-    const rows = await prisma.$queryRawUnsafe<Record<string, unknown>[]>(sql, ...params);
+    const rows = await prisma.$queryRawUnsafe<PerformerQueryRow[]>(sql, ...params);
     const queryMs = Date.now() - queryStart;
 
     // Count query
@@ -870,10 +878,8 @@ class PerformerQueryBuilder {
   /**
    * Transform a raw database row into a NormalizedPerformer
    */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- raw SQL row with dynamic columns; defining a 30+ field interface adds maintenance overhead without real safety gain
-  private transformRow(row: Record<string, any>): NormalizedPerformer {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- building partial NormalizedPerformer from DB row; Performer base type requires fields we don't populate
-    const performer: any = {
+  private transformRow(row: PerformerQueryRow): NormalizedPerformer {
+    const performer = {
       id: row.id,
       instanceId: row.stashInstanceId,
       name: row.name,
@@ -881,7 +887,7 @@ class PerformerQueryBuilder {
       gender: row.gender || null,
       birthdate: row.birthdate || null,
       details: row.details || null,
-      alias_list: this.parseJsonArray(row.aliasList),
+      alias_list: parseJsonArray(row.aliasList),
       country: row.country || null,
       ethnicity: row.ethnicity || null,
       hair_color: row.hairColor || null,
@@ -906,8 +912,8 @@ class PerformerQueryBuilder {
       group_count: row.groupCount || 0,
 
       // Timestamps
-      created_at: row.stashCreatedAt?.toISOString?.() || row.stashCreatedAt || null,
-      updated_at: row.stashUpdatedAt?.toISOString?.() || row.stashUpdatedAt || null,
+      created_at: row.stashCreatedAt || null,
+      updated_at: row.stashUpdatedAt || null,
 
       // User data - Peek user data ONLY
       rating: row.userRating ?? null,
@@ -915,11 +921,11 @@ class PerformerQueryBuilder {
       favorite: Boolean(row.userFavorite),
       o_counter: row.userOCounter ?? 0,
       play_count: row.userPlayCount ?? 0,
-      last_played_at: row.userLastPlayedAt?.toISOString?.() || row.userLastPlayedAt || null,
-      last_o_at: row.userLastOAt?.toISOString?.() || row.userLastOAt || null,
+      last_played_at: row.userLastPlayedAt || null,
+      last_o_at: row.userLastOAt || null,
 
       // Relations - populated separately
-      tags: [],
+      tags: [] as TagRef[],
     };
 
     return performer as NormalizedPerformer;
@@ -1003,11 +1009,7 @@ class PerformerQueryBuilder {
       })),
     ]);
     const studioOrConditions = dedupeKeys(scenes
-      .filter((s) => !!s.studioId)
-      .map((s) => ({
-        id: s.studioId!,
-        stashInstanceId: s.stashInstanceId,
-      })));
+      .flatMap((s) => s.studioId ? [{ id: s.studioId, stashInstanceId: s.stashInstanceId }] : []));
 
     // Load all entities in parallel using composite key lookups
     const [tags, groups, galleries, studios] = await Promise.all([
@@ -1132,20 +1134,6 @@ class PerformerQueryBuilder {
       performer.studios = [...performerStudioKeys].map((key) => studiosByKey.get(key)).filter((s): s is StudioRef => !!s);
     }
   }
-
-  /**
-   * Safely parse a JSON array string
-   */
-  private parseJsonArray(json: string | null): string[] {
-    if (!json) return [];
-    try {
-      const parsed = JSON.parse(json);
-      return Array.isArray(parsed) ? parsed : [];
-    } catch {
-      return [];
-    }
-  }
-
 
   /**
    * Transform a Stash URL/path to a proxy URL

@@ -1,0 +1,424 @@
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { showError, showSuccess, showWarning } from "../../utils/toast";
+import { apiGet, apiPost } from "../../api";
+import { ApiError } from "../../api/client";
+import { ThemedIcon } from "../icons/index";
+import Button from "./Button";
+import Paper from "./Paper";
+
+import { type ReactNode } from "react";
+
+interface Props {
+  sceneId?: string;
+  sceneIds?: string[];
+  compact?: boolean;
+  buttonText?: string;
+  icon?: ReactNode;
+  dropdownPosition?: "below" | "above";
+  onSuccess?: () => void;
+  excludePlaylistIds?: string[];
+  variant?: "primary" | "secondary" | "tertiary" | "destructive";
+  disabled?: boolean;
+}
+
+const AddToPlaylistButton = ({
+  sceneId,
+  sceneIds,
+  compact = false,
+  buttonText,
+  icon,
+  dropdownPosition: dropdownPositionProp,
+  onSuccess,
+  excludePlaylistIds = [],
+  variant = "primary",
+}: Props) => {
+  const [showMenu, setShowMenu] = useState(false);
+  interface PlaylistItem {
+    id: string;
+    name: string;
+    isShared: boolean;
+    _count?: { items?: number };
+    sceneCount?: number;
+    [key: string]: unknown;
+  }
+
+  const [playlists, setPlaylists] = useState<PlaylistItem[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [showCreateModal, setShowCreateModal] = useState(false);
+  const [newPlaylistName, setNewPlaylistName] = useState("");
+  const [newPlaylistDescription, setNewPlaylistDescription] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [computedPosition, setComputedPosition] = useState("below");
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  // Support both single sceneId and multiple sceneIds
+  const scenesToAdd = sceneIds || (sceneId ? [sceneId] : []);
+  const isMultiple = scenesToAdd.length > 1;
+
+  // Auto-detect menu position when opening
+  const dropdownPosition = dropdownPositionProp || computedPosition;
+
+  useLayoutEffect(() => {
+    if (showMenu && !dropdownPositionProp && menuRef.current) {
+      const rect = menuRef.current.getBoundingClientRect();
+      const menuHeight = 280; // approximate menu height
+      const spaceAbove = rect.top;
+      const spaceBelow = window.innerHeight - rect.bottom;
+      setComputedPosition(spaceAbove < menuHeight && spaceBelow > spaceAbove ? "below" : "above");
+    }
+  }, [showMenu, dropdownPositionProp]);
+
+  useEffect(() => {
+    if (showMenu && playlists.length === 0) {
+      loadPlaylists();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showMenu]); // Only load when menu opens, not when playlists.length changes
+
+  // Click outside to close
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
+        setShowMenu(false);
+      }
+    };
+
+    if (showMenu) {
+      document.addEventListener("mousedown", handleClickOutside);
+      return () =>
+        document.removeEventListener("mousedown", handleClickOutside);
+    }
+  }, [showMenu]);
+
+  const loadPlaylists = async () => {
+    try {
+      setLoading(true);
+      const [ownResult, sharedResult] = await Promise.allSettled([
+        apiGet("/playlists"),
+        apiGet("/playlists/shared"),
+      ]);
+      const ownData = ownResult.status === "fulfilled" ? (ownResult.value as { playlists?: Record<string, unknown>[] }).playlists || [] : [];
+      const own = ownData.map((p: Record<string, unknown>) => ({ ...p, isShared: false })) as PlaylistItem[];
+      const sharedData = sharedResult.status === "fulfilled" ? (sharedResult.value as { playlists?: Record<string, unknown>[] }).playlists || [] : [];
+      const shared = sharedData.map((p: Record<string, unknown>) => ({ ...p, isShared: true })) as PlaylistItem[];
+      setPlaylists([...own, ...shared]);
+    } catch {
+      // Error loading playlists - will show in UI
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const addToPlaylist = async (playlistId: string, skipToast = false) => {
+    try {
+      // Add scenes one by one (could be optimized with a batch endpoint later)
+      let addedCount = 0;
+      let skippedCount = 0;
+
+      for (const sceneId of scenesToAdd) {
+        try {
+          await apiPost(`/playlists/${playlistId}/items`, { sceneId });
+          addedCount++;
+        } catch (err) {
+          if (err instanceof ApiError && err.status === 400) {
+            skippedCount++; // Already in playlist
+          } else {
+            throw err; // Re-throw for outer catch
+          }
+        }
+      }
+
+      // Show appropriate message (unless skipToast is true)
+      if (!skipToast) {
+        if (addedCount > 0 && skippedCount === 0) {
+          showSuccess(
+            isMultiple
+              ? `Added ${addedCount} scenes to playlist!`
+              : "Added to playlist!"
+          );
+        } else if (addedCount > 0 && skippedCount > 0) {
+          showWarning(
+            `Added ${addedCount} scenes, ${skippedCount} already in playlist`
+          );
+        } else if (skippedCount > 0) {
+          showWarning(
+            isMultiple
+              ? "All scenes already in playlist"
+              : "Scene already in playlist"
+          );
+        }
+      }
+
+      setShowMenu(false);
+
+      // Call onSuccess callback if provided
+      if (onSuccess && addedCount > 0) {
+        onSuccess();
+      }
+
+      return { addedCount, skippedCount };
+    } catch (err) {
+      showError("Failed to add to playlist");
+      throw err;
+    }
+  };
+
+  const createPlaylistAndAdd = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newPlaylistName.trim()) return;
+
+    try {
+      setCreating(true);
+      const data = await apiPost("/playlists", {
+        name: newPlaylistName.trim(),
+        description: newPlaylistDescription.trim() || undefined,
+      });
+
+      const newPlaylistId = (data as { playlist: { id: string } }).playlist.id;
+
+      // Add scenes to the newly created playlist (skip the toast, we'll show our own)
+      const { addedCount } = await addToPlaylist(newPlaylistId, true);
+
+      showSuccess(
+        `Playlist created and ${addedCount} ${addedCount === 1 ? "scene" : "scenes"} added!`
+      );
+      setNewPlaylistName("");
+      setNewPlaylistDescription("");
+      setShowCreateModal(false);
+      setShowMenu(false);
+
+      // Reload playlists for next time
+      loadPlaylists();
+    } catch {
+      showError("Failed to create playlist");
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  return (
+    <div className="relative" ref={menuRef}>
+      <Button
+        onClick={(e) => {
+          e.stopPropagation();
+          setShowMenu(!showMenu);
+        }}
+        variant={compact ? "secondary" : variant}
+        icon={icon || null}
+        title="Add to playlist"
+      >
+        {compact ? (
+          <ThemedIcon name="list-plus" size={16} />
+        ) : (
+          buttonText || "+ Playlist"
+        )}
+      </Button>
+
+      {showMenu && (
+        <div
+          className={`absolute right-0 w-64 rounded-lg shadow-lg z-50 ${
+            dropdownPosition === "above" ? "bottom-full mb-2" : "mt-2"
+          }`}
+          style={{
+            backgroundColor: "var(--bg-card)",
+            border: "1px solid var(--border-color)",
+          }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div
+            className="p-2 border-b"
+            style={{ borderColor: "var(--border-color)" }}
+          >
+            <h3
+              className="font-semibold text-sm"
+              style={{ color: "var(--text-primary)" }}
+            >
+              {isMultiple
+                ? `Add ${scenesToAdd.length} Scenes to Playlist`
+                : "Add to Playlist"}
+            </h3>
+          </div>
+
+          <div className="max-h-64 overflow-y-auto">
+            {loading ? (
+              <div className="p-4 text-center">
+                <div className="animate-spin w-6 h-6 border-2 border-blue-500 border-t-transparent rounded-full mx-auto"></div>
+              </div>
+            ) : (
+              <div className="py-1">
+                {/* Create New Playlist Option */}
+                <Button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setShowCreateModal(true);
+                  }}
+                  variant="tertiary"
+                  fullWidth
+                  className="text-left px-4 py-2 text-sm font-medium border-b"
+                  style={{
+                    color: "var(--accent-color)",
+                    borderColor: "var(--border-color)",
+                  }}
+                  onMouseEnter={(e) => {
+                    (e.target as HTMLElement).style.backgroundColor = "var(--bg-secondary)";
+                  }}
+                  onMouseLeave={(e) => {
+                    (e.target as HTMLElement).style.backgroundColor = "transparent";
+                  }}
+                >
+                  + Create New Playlist
+                </Button>
+
+                {/* Existing Playlists */}
+                {playlists.length === 0 ? (
+                  <div className="p-4 text-center">
+                    <p
+                      className="text-sm"
+                      style={{ color: "var(--text-secondary)" }}
+                    >
+                      No playlists yet
+                    </p>
+                  </div>
+                ) : (
+                  playlists
+                    .filter((playlist) => !excludePlaylistIds.includes(playlist.id))
+                    .map((playlist) => (
+                      <Button
+                        key={`${playlist.id}-${playlist.isShared ? "shared" : "own"}`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          addToPlaylist(playlist.id);
+                        }}
+                        variant="tertiary"
+                        fullWidth
+                        className="text-left px-4 py-2 text-sm"
+                        style={{
+                          color: "var(--text-primary)",
+                        }}
+                        onMouseEnter={(e) => {
+                          (e.target as HTMLElement).style.backgroundColor = "var(--bg-secondary)";
+                        }}
+                        onMouseLeave={(e) => {
+                          (e.target as HTMLElement).style.backgroundColor = "transparent";
+                        }}
+                      >
+                        <div className="flex items-center gap-1.5">
+                          {playlist.name}
+                          {playlist.isShared && (
+                            <span
+                              className="text-[10px] px-1.5 py-0.5 rounded-full"
+                              style={{
+                                backgroundColor: "var(--accent-color)",
+                                color: "var(--bg-primary)",
+                                opacity: 0.8,
+                              }}
+                            >
+                              shared
+                            </span>
+                          )}
+                        </div>
+                        <div
+                          className="text-xs"
+                          style={{ color: "var(--text-muted)" }}
+                        >
+                          {playlist._count?.items ?? playlist.sceneCount ?? 0} videos
+                        </div>
+                      </Button>
+                    ))
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Create Playlist Modal */}
+      {showCreateModal && (
+        <div
+          className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50"
+          onClick={() => setShowCreateModal(false)}
+        >
+          <Paper
+            className="max-w-md w-full m-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <Paper.Header title="Create New Playlist" />
+            <form onSubmit={createPlaylistAndAdd}>
+              <Paper.Body>
+                <div className="space-y-4">
+                  <div>
+                    <label
+                      htmlFor="playlistName"
+                      className="block text-sm font-medium mb-2"
+                      style={{ color: "var(--text-secondary)" }}
+                    >
+                      Playlist Name *
+                    </label>
+                    <input
+                      type="text"
+                      id="playlistName"
+                      value={newPlaylistName}
+                      onChange={(e) => setNewPlaylistName(e.target.value)}
+                      className="w-full px-4 py-2 rounded-lg"
+                      style={{
+                        backgroundColor: "var(--bg-secondary)",
+                        border: "1px solid var(--border-color)",
+                        color: "var(--text-primary)",
+                      }}
+                      placeholder="Enter playlist name"
+                      required
+                      autoFocus
+                    />
+                  </div>
+                  <div>
+                    <label
+                      htmlFor="playlistDescription"
+                      className="block text-sm font-medium mb-2"
+                      style={{ color: "var(--text-secondary)" }}
+                    >
+                      Description (Optional)
+                    </label>
+                    <textarea
+                      id="playlistDescription"
+                      value={newPlaylistDescription}
+                      onChange={(e) =>
+                        setNewPlaylistDescription(e.target.value)
+                      }
+                      className="w-full px-4 py-2 rounded-lg"
+                      style={{
+                        backgroundColor: "var(--bg-secondary)",
+                        border: "1px solid var(--border-color)",
+                        color: "var(--text-primary)",
+                      }}
+                      placeholder="Enter description (optional)"
+                      rows={3}
+                    />
+                  </div>
+                  <div className="flex gap-3 justify-end">
+                    <Button
+                      type="button"
+                      onClick={() => setShowCreateModal(false)}
+                      variant="secondary"
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      type="submit"
+                      disabled={creating || !newPlaylistName.trim()}
+                      variant="primary"
+                      loading={creating}
+                    >
+                      Create & Add
+                    </Button>
+                  </div>
+                </div>
+              </Paper.Body>
+            </form>
+          </Paper>
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default AddToPlaylistButton;

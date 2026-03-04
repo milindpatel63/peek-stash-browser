@@ -1,0 +1,484 @@
+import { useCallback, useEffect, useState } from "react";
+import { Link, useParams, useSearchParams } from "react-router-dom";
+import { ArrowLeft, Play } from "lucide-react";
+import { useNavigationState } from "../../hooks/useNavigationState";
+import { usePageTitle } from "../../hooks/usePageTitle";
+import { usePaginatedLightbox } from "../../hooks/usePaginatedLightbox";
+import { useRatingHotkeys } from "../../hooks/useRatingHotkeys";
+import { useCardDisplaySettings } from "../../contexts/CardDisplaySettingsContext";
+import { useConfig } from "../../contexts/ConfigContext";
+import { libraryApi } from "../../api";
+import { makeCompositeKey } from "../../utils/compositeKey";
+import { galleryTitle } from "../../utils/gallery";
+import { getEntityPath } from "../../utils/entityLinks";
+import SceneSearch from "../scene-search/SceneSearch";
+import WallView from "../wall/WallView";
+import {
+  Button,
+  FavoriteButton,
+  Lightbox,
+  LoadingSpinner,
+  PageHeader,
+  Pagination,
+  RatingSlider,
+  TabNavigation,
+  TagChips,
+} from "../ui/index";
+import ViewInStashButton from "../ui/ViewInStashButton";
+import type { TagRef, NormalizedImage } from "@peek/shared-types";
+import type React from "react";
+
+interface EntityRef {
+  id: string;
+  name?: string;
+  instanceId?: string;
+  image_path?: string;
+  gender?: string;
+  [key: string]: unknown;
+}
+
+const PER_PAGE = 100;
+
+const GalleryDetail = () => {
+  const { galleryId } = useParams<{ galleryId: string }>();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [isLoading, setIsLoading] = useState(true);
+  const [gallery, setGallery] = useState<Record<string, unknown> | null>(null);
+  const [images, setImages] = useState<NormalizedImage[]>([]);
+  const [totalCount, setTotalCount] = useState(0);
+  const [imagesLoading, setImagesLoading] = useState(true);
+  const [rating, setRating] = useState<number | null>(null);
+  const [isFavorite, setIsFavorite] = useState(false);
+
+  // Navigation state for back button
+  const { goBack, backButtonText } = useNavigationState();
+
+  // Card display settings
+  const { getSettings } = useCardDisplaySettings();
+  const settings = getSettings("gallery");
+
+  // Get multi-instance config
+  const { hasMultipleInstances } = useConfig();
+
+  // Get instance from URL query param for multi-stash support
+  const instanceId = searchParams.get("instance");
+
+  // Compute tabs with counts for smart default selection
+  // Note: totalCount is used for images when available (more accurate than gallery.image_count during pagination)
+  const galleryImageCount = totalCount || (gallery?.image_count as number) || 0;
+  const galleryScenesCount = (gallery?.scenes as unknown[] | undefined)?.length || 0;
+  const contentTabs = [
+    { id: 'images', label: 'Images', count: galleryImageCount },
+    { id: 'scenes', label: 'Scenes', count: galleryScenesCount },
+  ];
+  const effectiveDefaultTab = contentTabs.find(t => t.count > 0)?.id || 'images';
+
+  // Get active tab from URL or default to first tab with content
+  const activeTab = searchParams.get('tab') || effectiveDefaultTab;
+
+  // URL-based page state for image pagination
+  const urlPage = parseInt(searchParams.get('page') || '1') || 1;
+
+  const handleImagePageChange = useCallback((newPage: number) => {
+    const params = new URLSearchParams(searchParams);
+    if (newPage === 1) {
+      params.delete('page');
+    } else {
+      params.set('page', String(newPage));
+    }
+    // Preserve tab param if present
+    setSearchParams(params);
+  }, [searchParams, setSearchParams]);
+
+  // Fetch function for prefetching adjacent pages
+  const fetchPage = useCallback(async (page: number) => {
+    const data = await libraryApi.getGalleryImages(galleryId!, {
+      page,
+      per_page: PER_PAGE,
+      instanceId,
+    }) as Record<string, unknown>;
+    return { images: (data.images || []) as NormalizedImage[] };
+  }, [galleryId, instanceId]);
+
+  // Paginated lightbox state and handlers
+  const lightbox = usePaginatedLightbox({
+    perPage: PER_PAGE,
+    totalCount,
+    externalPage: urlPage,
+    onExternalPageChange: handleImagePageChange,
+    fetchPage,
+  });
+
+  // Set page title to gallery name
+  usePageTitle(gallery ? (galleryTitle(gallery) as string) : "Gallery");
+
+  useEffect(() => {
+    const fetchGallery = async () => {
+      try {
+        setIsLoading(true);
+        const galleryData = await libraryApi.findGalleryById(galleryId!, instanceId) as Record<string, unknown> | null;
+        setGallery(galleryData);
+        setRating((galleryData as Record<string, unknown> | null)?.rating as number | null);
+        setIsFavorite(((galleryData as Record<string, unknown> | null)?.favorite as boolean) || false);
+      } catch (error) {
+        console.error("Error loading gallery:", error);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
+    fetchGallery();
+  }, [galleryId, instanceId]);
+
+  useEffect(() => {
+    const fetchImages = async () => {
+      try {
+        setImagesLoading(true);
+        const data = await libraryApi.getGalleryImages(galleryId!, {
+          page: lightbox.currentPage,
+          per_page: PER_PAGE,
+          instanceId,
+        }) as Record<string, unknown>;
+        setImages((data.images || []) as NormalizedImage[]);
+        setTotalCount(((data.pagination as Record<string, unknown> | undefined)?.total as number) || (data.images as unknown[] | undefined)?.length || 0);
+
+        // Handle pending lightbox navigation after page loads
+        lightbox.consumePendingLightboxIndex();
+      } catch (error) {
+        console.error("Error loading images:", error);
+      } finally {
+        setImagesLoading(false);
+      }
+    };
+
+    fetchImages();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [galleryId, instanceId, lightbox.currentPage]);
+
+  const handleRatingChange = async (newRating: number | null) => {
+    setRating(newRating);
+    try {
+      await libraryApi.updateRating("gallery", galleryId!, newRating, instanceId);
+    } catch (error) {
+      console.error("Failed to update rating:", error);
+      setRating((gallery?.rating as number | null) ?? null);
+    }
+  };
+
+  const handleFavoriteChange = async (newValue: boolean) => {
+    setIsFavorite(newValue);
+    try {
+      await libraryApi.updateFavorite("gallery", galleryId!, newValue, instanceId);
+    } catch (error) {
+      console.error("Failed to update favorite:", error);
+      setIsFavorite((gallery?.favorite as boolean) || false);
+    }
+  };
+
+  const toggleFavorite = () => {
+    handleFavoriteChange(!isFavorite);
+  };
+
+  // Rating and favorite hotkeys (r + 1-5 for ratings, r + 0 to clear, r + f to toggle favorite)
+  useRatingHotkeys({
+    enabled: !isLoading && !!gallery,
+    setRating: handleRatingChange,
+    toggleFavorite,
+  });
+
+  // No longer using sidebar - all content moved to main header area
+
+  if (isLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <LoadingSpinner />
+      </div>
+    );
+  }
+
+  if (!gallery) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="text-xl" style={{ color: "var(--text-primary)" }}>
+          Gallery not found
+        </div>
+      </div>
+    );
+  }
+
+  const performers = gallery.performers as EntityRef[] | undefined;
+  const tags = gallery.tags as TagRef[] | undefined;
+  const studioRef = gallery.studio as EntityRef | undefined;
+
+  return (
+    <div className="min-h-screen px-4 lg:px-6 xl:px-8 py-6">
+      <div className="max-w-none">
+        {/* Back Button and Play Slideshow Button */}
+        <div className="flex items-center justify-between mb-4">
+          <Button
+            onClick={goBack}
+            variant="secondary"
+            icon={<ArrowLeft size={16} className="sm:w-4 sm:h-4" />}
+            title={backButtonText}
+          >
+            <span className="hidden sm:inline">{backButtonText}</span>
+          </Button>
+
+          <Button
+            variant="primary"
+            icon={<Play size={20} />}
+            onClick={() => lightbox.openLightbox(0, true)}
+            disabled={images.length === 0}
+            title="Play Slideshow"
+          >
+            <span className="hidden sm:inline">Play Slideshow</span>
+          </Button>
+        </div>
+
+        {/* Header */}
+        <div className="mb-6">
+          <PageHeader
+            title={
+              (
+                <div className="flex flex-wrap gap-3 items-center">
+                  <span>{galleryTitle(gallery) as React.ReactNode}</span>
+                  {!!settings.showFavorite && (
+                    <FavoriteButton
+                      isFavorite={isFavorite}
+                      onChange={handleFavoriteChange}
+                      size="large"
+                    />
+                  )}
+                  <ViewInStashButton stashUrl={gallery?.stashUrl as string} size={24} />
+                </div>
+              ) as unknown as string
+            }
+            subtitle={
+              (
+                <div className="flex flex-wrap gap-3 items-center text-base mt-2">
+                  {studioRef && (
+                    <>
+                      <Link
+                        to={getEntityPath('studio', studioRef, hasMultipleInstances)}
+                        className="hover:underline"
+                        style={{ color: "var(--accent-primary)" }}
+                      >
+                        {studioRef.name}
+                      </Link>
+                      <span>•</span>
+                    </>
+                  )}
+                  {totalCount > 0 && (
+                    <span>
+                      {totalCount} image{totalCount !== 1 ? "s" : ""}
+                    </span>
+                  )}
+                  {!!gallery.date && (
+                    <>
+                      <span>•</span>
+                      <span>{new Date(gallery.date as string).toLocaleDateString()}</span>
+                    </>
+                  )}
+                  {!!gallery.photographer && (
+                    <>
+                      <span>•</span>
+                      <span>by {gallery.photographer as React.ReactNode}</span>
+                    </>
+                  )}
+                </div>
+              ) as React.ReactNode
+            }
+          />
+
+          {/* Rating Slider */}
+          {!!settings.showRating && (
+            <div className="mt-4 max-w-md">
+              <RatingSlider
+                rating={rating}
+                onChange={handleRatingChange}
+                showClearButton={true}
+              />
+            </div>
+          )}
+
+          {/* Details */}
+          {!!settings.showDescriptionOnDetail && !!gallery.details && (
+            <div className="mt-6">
+              <h3
+                className="text-sm font-medium mb-3"
+                style={{ color: "var(--text-secondary)" }}
+              >
+                Details
+              </h3>
+              <p
+                className="text-sm whitespace-pre-wrap"
+                style={{ color: "var(--text-primary)" }}
+              >
+                {gallery.details as React.ReactNode}
+              </p>
+            </div>
+          )}
+
+          {/* Performers Row (kept for at-a-glance importance) */}
+          {performers && performers.length > 0 && (
+            <div className="mt-6">
+              <h3
+                className="text-sm font-medium mb-3"
+                style={{ color: "var(--text-secondary)" }}
+              >
+                Performers
+              </h3>
+              <div
+                className="flex gap-4 overflow-x-auto pb-2 scroll-smooth"
+                style={{ scrollbarWidth: "thin" }}
+              >
+                {performers.map((performer: EntityRef) => (
+                  <Link
+                    key={performer.id}
+                    to={getEntityPath('performer', performer, hasMultipleInstances)}
+                    className="flex flex-col items-center flex-shrink-0 group w-[120px]"
+                  >
+                    <div
+                      className="aspect-[2/3] rounded-lg overflow-hidden mb-2 w-full border-2 border-transparent group-hover:border-[var(--accent-primary)] transition-all"
+                      style={{
+                        backgroundColor: "var(--border-color)",
+                      }}
+                    >
+                      {performer.image_path ? (
+                        <img
+                          src={performer.image_path}
+                          alt={performer.name}
+                          className="w-full h-full object-cover"
+                        />
+                      ) : (
+                        <div className="w-full h-full flex items-center justify-center">
+                          <span
+                            className="text-4xl"
+                            style={{ color: "var(--text-secondary)" }}
+                          >
+                            {performer.gender === "MALE" ? "♂" : "♀"}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                    <span
+                      className="text-xs font-medium text-center w-full line-clamp-2 group-hover:underline"
+                      style={{ color: "var(--text-primary)" }}
+                    >
+                      {performer.name}
+                    </span>
+                  </Link>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Tags Row */}
+          {tags && tags.length > 0 && (
+            <div className="mt-6">
+              <h3
+                className="text-sm font-medium mb-3"
+                style={{ color: "var(--text-secondary)" }}
+              >
+                Tags
+              </h3>
+              <TagChips tags={tags} />
+            </div>
+          )}
+        </div>
+
+        {/* Tabbed Content Section */}
+        <div className="mb-6">
+          {contentTabs.every(t => t.count === 0) ? (
+            <div className="py-16 text-center" style={{ color: 'var(--text-muted)' }}>
+              This gallery has no content in Peek
+            </div>
+          ) : (
+            <>
+              <TabNavigation
+                tabs={contentTabs}
+                defaultTab={effectiveDefaultTab}
+              />
+
+              {/* Images Tab */}
+              {activeTab === 'images' && (
+                <div className="mt-6">
+                  {/* Pagination - Top */}
+                  {lightbox.totalPages > 1 && (
+                    <div className="mb-4">
+                      <Pagination
+                        currentPage={lightbox.currentPage}
+                        totalPages={lightbox.totalPages}
+                        onPageChange={lightbox.setCurrentPage}
+                      />
+                    </div>
+                  )}
+
+                  <WallView
+                    items={images as unknown as Record<string, unknown>[]}
+                    entityType="image"
+                    zoomLevel="medium"
+                    onItemClick={(image: Record<string, unknown>) => {
+                      const index = images.findIndex((img) => img.id === image.id);
+                      lightbox.openLightbox(index >= 0 ? index : 0);
+                    }}
+                    loading={imagesLoading}
+                    emptyMessage="No images found in this gallery"
+                  />
+
+                  {/* Pagination - Bottom */}
+                  {lightbox.totalPages > 1 && (
+                    <div className="mt-4">
+                      <Pagination
+                        currentPage={lightbox.currentPage}
+                        totalPages={lightbox.totalPages}
+                        onPageChange={lightbox.setCurrentPage}
+                      />
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Scenes Tab */}
+              {activeTab === 'scenes' && (
+                <SceneSearch
+                  context="gallery_scenes"
+                  permanentFilters={{
+                    galleries: {
+                      value: [makeCompositeKey(galleryId!, instanceId)],
+                      modifier: "INCLUDES"
+                    }
+                  }}
+                  permanentFiltersMetadata={{
+                    galleries: [{ id: makeCompositeKey(galleryId!, instanceId), title: galleryTitle(gallery) as string }]
+                  }}
+                  title={`Scenes in ${galleryTitle(gallery) as string}`}
+                  fromPageTitle={(galleryTitle(gallery) as string) || "Gallery"}
+                />
+              )}
+            </>
+          )}
+        </div>
+      </div>
+
+      {/* Lightbox */}
+      <Lightbox
+        images={images}
+        initialIndex={lightbox.lightboxIndex}
+        isOpen={lightbox.lightboxOpen}
+        autoPlay={lightbox.lightboxAutoPlay}
+        onClose={lightbox.closeLightbox}
+        onImagesUpdate={setImages as (images: NormalizedImage[]) => void}
+        onPageBoundary={lightbox.onPageBoundary}
+        totalCount={totalCount}
+        pageOffset={lightbox.pageOffset}
+        onIndexChange={lightbox.onIndexChange}
+        isPageTransitioning={lightbox.isPageTransitioning}
+        transitionKey={lightbox.transitionKey}
+        prefetchImages={lightbox.prefetchImages}
+      />
+    </div>
+  );
+};
+
+export default GalleryDetail;

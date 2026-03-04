@@ -10,7 +10,7 @@ export default defineConfig({
   test: {
     globals: true,
     environment: 'happy-dom',
-    setupFiles: ['./tests/setup.js'],
+    setupFiles: ['./tests/setup.ts'],
     include: ['tests/**/*.{test,spec}.{js,jsx,ts,tsx}'],
     coverage: {
       provider: 'v8',
@@ -19,15 +19,22 @@ export default defineConfig({
         'node_modules/**',
         'dist/**',
         'tests/**',
-        '**/*.config.js',
-        'src/main.jsx',
+        '**/*.config.{js,ts}',
+        'src/main.{jsx,tsx}',
       ],
+      thresholds: {
+        statements: 35,
+        branches: 76,
+        functions: 42,
+        lines: 35,
+      },
     },
   },
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
       '@tests': path.resolve(__dirname, './tests'),
+      '@peek/shared-types': path.resolve(__dirname, '../shared/types'),
     },
   },
 });

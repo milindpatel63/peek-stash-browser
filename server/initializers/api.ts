@@ -40,6 +40,8 @@ import watchHistoryRoutes from "../routes/watchHistory.js";
 import userStatsRoutes from "../routes/userStats.js";
 import timelineRoutes from "../routes/timeline.js";
 import clipsRoutes from "../routes/clips.js";
+import { authenticated } from "../utils/routeHelpers.js";
+import { errorHandler } from "../middleware/errorHandler.js";
 import { logger } from "../utils/logger.js";
 
 // ES module equivalent of __dirname
@@ -87,8 +89,8 @@ export const setupAPI = () => {
 
     let version = "1.0.0";
     try {
-      const packageJson = JSON.parse(fs.readFileSync(packagePath, "utf8"));
-      version = packageJson.version;
+      const packageJson = JSON.parse(fs.readFileSync(packagePath, "utf8")) as { version?: string };
+      version = packageJson.version ?? version;
     } catch (err) {
       logger.error("Failed to read package.json version:", {
         error: err,
@@ -187,7 +189,7 @@ export const setupAPI = () => {
     "/api/scenes/:id/clips",
     authenticate,
     requireCacheReady,
-    getClipsForScene
+    authenticated(getClipsForScene)
   );
 
   // Library routes (all entities)
@@ -201,6 +203,9 @@ export const setupAPI = () => {
 
   // Video routes (playback, sessions, HLS streaming)
   app.use("/api", videoRoutes);
+
+  // Centralized error handler — MUST be registered after all routes
+  app.use(errorHandler);
 
   return app;
 };

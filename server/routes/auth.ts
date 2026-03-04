@@ -16,6 +16,7 @@ import prisma from "../prisma/singleton.js";
 import rankingComputeService from "../services/RankingComputeService.js";
 import { generateRecoveryKey } from "../utils/recoveryKey.js";
 import { validatePassword } from "../utils/passwordValidation.js";
+import { logger } from "../utils/logger.js";
 import { authenticated } from "../utils/routeHelpers.js";
 
 const router = express.Router();
@@ -23,7 +24,7 @@ const router = express.Router();
 // Login endpoint
 router.post("/login", authRateLimiter, async (req, res) => {
   try {
-    const { username, password } = req.body;
+    const { username, password } = req.body as { username: string; password: string };
 
     if (!username || !password) {
       return res
@@ -90,7 +91,7 @@ router.post("/login", authRateLimiter, async (req, res) => {
 
     // Recompute rankings asynchronously on login (fire-and-forget)
     rankingComputeService.recomputeAllRankings(user.id).catch((err) => {
-      console.error("Failed to recompute rankings on login:", err);
+      logger.error("Failed to recompute rankings on login", { error: err instanceof Error ? err.message : "Unknown error" });
     });
 
     res.json({
@@ -104,7 +105,7 @@ router.post("/login", authRateLimiter, async (req, res) => {
       },
     });
   } catch (error) {
-    console.error("Login error:", error);
+    logger.error("Login error", { error: error instanceof Error ? error.message : "Unknown error" });
     res.status(500).json({ error: "Server error" });
   }
 });
@@ -138,7 +139,7 @@ router.get(
 // Forgot password - check username and get recovery method
 router.post("/forgot-password/init", authRateLimiter, async (req, res) => {
   try {
-    const { username } = req.body;
+    const { username } = req.body as { username: string };
 
     if (!username) {
       return res.status(400).json({ error: "Username is required" });
@@ -156,7 +157,7 @@ router.post("/forgot-password/init", authRateLimiter, async (req, res) => {
 
     res.json({ hasRecoveryKey: !!user.recoveryKey });
   } catch (error) {
-    console.error("Forgot password init error:", error);
+    logger.error("Forgot password init error", { error: error instanceof Error ? error.message : "Unknown error" });
     res.status(500).json({ error: "Server error" });
   }
 });
@@ -164,7 +165,7 @@ router.post("/forgot-password/init", authRateLimiter, async (req, res) => {
 // Forgot password - verify recovery key and set new password
 router.post("/forgot-password/reset", authRateLimiter, async (req, res) => {
   try {
-    const { username, recoveryKey, newPassword } = req.body;
+    const { username, recoveryKey, newPassword } = req.body as { username: string; recoveryKey: string; newPassword: string };
 
     if (!username || !recoveryKey || !newPassword) {
       return res.status(400).json({ error: "All fields are required" });
@@ -203,7 +204,7 @@ router.post("/forgot-password/reset", authRateLimiter, async (req, res) => {
 
     res.json({ success: true });
   } catch (error) {
-    console.error("Forgot password reset error:", error);
+    logger.error("Forgot password reset error", { error: error instanceof Error ? error.message : "Unknown error" });
     res.status(500).json({ error: "Server error" });
   }
 });
@@ -224,7 +225,7 @@ router.post("/first-time-password", async (req, res) => {
       });
     }
 
-    const { username, newPassword } = req.body;
+    const { username, newPassword } = req.body as { username: string; newPassword: string };
 
     if (!username || !newPassword) {
       return res
@@ -259,7 +260,7 @@ router.post("/first-time-password", async (req, res) => {
 
     res.json({ success: true, message: "Password updated successfully" });
   } catch (error) {
-    console.error("First-time password error:", error);
+    logger.error("First-time password error", { error: error instanceof Error ? error.message : "Unknown error" });
     res.status(500).json({ error: "Server error" });
   }
 });

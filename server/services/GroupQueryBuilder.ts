@@ -5,11 +5,14 @@
  * Eliminates the need to load all groups into memory.
  */
 import type { PeekGroupFilter, NormalizedGroup, PerformerRef, TagRef, StudioRef, GalleryRef } from "../types/index.js";
+import type { GroupQueryRow } from "../types/internal/queryRows.js";
 import prisma from "../prisma/singleton.js";
 import { logger } from "../utils/logger.js";
 import { expandTagIds, expandStudioIds } from "../utils/hierarchyUtils.js";
 import { getGalleryFallbackTitle } from "../utils/titleUtils.js";
-import { buildNumericFilter, buildDateFilter, buildTextFilter, buildFavoriteFilter, buildJunctionFilter, type FilterClause } from "../utils/sqlFilterBuilders.js";
+import { parseJsonArray } from "../utils/sqlHelpers.js";
+import { buildNumericFilter, buildDateFilter, buildTextFilter, buildFavoriteFilter, buildJunctionFilter, parseCompositeFilterValues, type FilterClause } from "../utils/sqlFilterBuilders.js";
+import { coerceEntityRefs } from "@peek/shared-types/instanceAwareId.js";
 
 // Query builder options
 export interface GroupQueryOptions {
@@ -145,7 +148,9 @@ class GroupQueryBuilder {
       return { sql: "", params: [] };
     }
 
-    let ids = filter.value;
+    // Parse composite keys ("5:instance-1" -> "5") since UI sends composite format
+    const { parsed } = parseCompositeFilterValues(filter.value);
+    let ids = parsed.map(p => p.id);
     const { modifier = "INCLUDES", depth } = filter;
 
     // Expand IDs if depth is specified and not 0
@@ -298,7 +303,9 @@ class GroupQueryBuilder {
       return { sql: "", params: [] };
     }
 
-    let ids = filter.value;
+    // Parse composite keys ("284:instance-1" -> "284") since UI sends composite format
+    const { parsed } = parseCompositeFilterValues(filter.value);
+    let ids = parsed.map(p => p.id);
     const { modifier, depth } = filter;
 
     // Expand IDs if depth is specified and not 0
@@ -307,7 +314,7 @@ class GroupQueryBuilder {
     }
 
     return buildJunctionFilter(
-      ids, "GroupTag", "groupId", "groupInstanceId",
+      coerceEntityRefs(ids), "GroupTag", "groupId", "groupInstanceId",
       "tagId", "tagInstanceId", "g", modifier || "INCLUDES"
     );
   }
@@ -522,7 +529,7 @@ class GroupQueryBuilder {
 
     // Execute query
     const queryStart = Date.now();
-    const rows = await prisma.$queryRawUnsafe<Record<string, unknown>[]>(sql, ...params);
+    const rows = await prisma.$queryRawUnsafe<GroupQueryRow[]>(sql, ...params);
     const queryMs = Date.now() - queryStart;
 
     // Count query
@@ -583,27 +590,15 @@ class GroupQueryBuilder {
   /**
    * Transform a raw database row into a NormalizedGroup
    */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private transformRow(row: Record<string, any>): NormalizedGroup {
-    // Parse URLs JSON if present
-    let urls: string[] = [];
-    if (row.urls) {
-      try {
-        urls = JSON.parse(row.urls);
-      } catch {
-        urls = [];
-      }
-    }
-
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const group: any = {
+  private transformRow(row: GroupQueryRow): NormalizedGroup {
+    const group = {
       id: row.id,
       instanceId: row.stashInstanceId, // For multi-instance correctness in populateRelations
       name: row.name,
       date: row.date || null,
       director: row.director || null,
       synopsis: row.synopsis || null,
-      urls,
+      urls: parseJsonArray(row.urls),
 
       // Counts
       scene_count: row.sceneCount || 0,
@@ -615,8 +610,8 @@ class GroupQueryBuilder {
       back_image_path: this.transformUrl(row.backImagePath, row.stashInstanceId),
 
       // Timestamps
-      created_at: row.stashCreatedAt?.toISOString?.() || row.stashCreatedAt || null,
-      updated_at: row.stashUpdatedAt?.toISOString?.() || row.stashUpdatedAt || null,
+      created_at: row.stashCreatedAt || null,
+      updated_at: row.stashUpdatedAt || null,
 
       // User data - Peek user data ONLY
       rating: row.userRating ?? null,
@@ -624,10 +619,10 @@ class GroupQueryBuilder {
       favorite: Boolean(row.userFavorite),
 
       // Relations - populated separately
-      studio: row.studioId ? { id: row.studioId, name: "" } : null,
+      studio: row.studioId ? { id: row.studioId, name: "" } as StudioRef : null,
       studioId: row.studioId || null, // For multi-instance correctness in populateRelations
-      tags: [],
-      scenes: [],
+      tags: [] as TagRef[],
+      scenes: [] as { id: string }[],
     };
 
     return group as NormalizedGroup;
@@ -696,11 +691,7 @@ class GroupQueryBuilder {
     ).values()];
     const studioKeys = [...new Map(
       groups
-        .filter((g) => g.studioId)
-        .map((g) => {
-          const studioId = g.studioId!;
-          return [`${studioId}:${g.instanceId}`, { id: studioId, instanceId: g.instanceId }];
-        })
+        .flatMap((g) => g.studioId ? [[`${g.studioId}:${g.instanceId}`, { id: g.studioId, instanceId: g.instanceId }] as const] : [])
     ).values()];
     const performerKeys = [...new Map(
       scenePerformers.map((sp) => [`${sp.performerId}:${sp.performerInstanceId}`, { id: sp.performerId, instanceId: sp.performerInstanceId }])

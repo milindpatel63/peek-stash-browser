@@ -12,6 +12,7 @@ import type {
 } from "../../types/api/index.js";
 import prisma from "../../prisma/singleton.js";
 import { stashEntityService } from "../../services/StashEntityService.js";
+import { stashInstanceManager } from "../../services/StashInstanceManager.js";
 import { entityExclusionHelper } from "../../services/EntityExclusionHelper.js";
 import { galleryQueryBuilder } from "../../services/GalleryQueryBuilder.js";
 import { getUserAllowedInstanceIds } from "../../services/UserInstanceService.js";
@@ -22,6 +23,7 @@ import {
   PeekGalleryFilter,
 } from "../../types/index.js";
 import { expandStudioIds, expandTagIds } from "../../utils/hierarchyUtils.js";
+import { coerceEntityRefs } from "@peek/shared-types/instanceAwareId.js";
 import { logger } from "../../utils/logger.js";
 import { parseRandomSort } from "../../utils/seededRandom.js";
 import { buildStashEntityUrl } from "../../utils/stashUrl.js";
@@ -99,7 +101,7 @@ export async function applyGalleryFilters(
 
   // Filter by IDs
   if (filters.ids?.value && filters.ids.value.length > 0) {
-    const idSet = new Set(filters.ids.value);
+    const idSet = new Set(filters.ids.value as string[]);
     filtered = filtered.filter((g) => idSet.has(g.id));
   }
 
@@ -229,7 +231,7 @@ export const findGalleries = async (
 
     // Merge root-level ids with gallery_filter
     const normalizedIds = ids
-      ? { value: ids, modifier: "INCLUDES" }
+      ? { value: coerceEntityRefs(ids), modifier: "INCLUDES" }
       : gallery_filter?.ids;
     const mergedFilter: PeekGalleryFilter & Record<string, unknown> = {
       ...gallery_filter,
@@ -278,8 +280,8 @@ export const findGalleries = async (
     // For single-entity requests (detail pages), get gallery with computed counts
     let paginatedGalleries = galleries;
     if (ids && ids.length === 1 && paginatedGalleries.length === 1) {
-      const existingGallery = paginatedGalleries[0];
-      const galleryWithCounts = await stashEntityService.getGallery(ids[0], existingGallery.instanceId);
+      const existingGallery = paginatedGalleries[0] as (typeof paginatedGalleries)[number];
+      const galleryWithCounts = await stashEntityService.getGallery(ids[0] as string, existingGallery.instanceId);
       if (galleryWithCounts) {
         paginatedGalleries = [
           {
@@ -337,8 +339,8 @@ export const findGalleryById = async (
     const userId = req.user?.id;
     const { id } = req.params;
 
-    const galleryInstanceId = req.query.instanceId as string | undefined;
-    let gallery = await stashEntityService.getGallery(id, galleryInstanceId);
+    const galleryInstanceId = (req.query.instanceId as string | undefined) || stashInstanceManager.getDefaultConfig().id;
+    const gallery = await stashEntityService.getGallery(id, galleryInstanceId);
 
     if (!gallery) {
       return res.status(404).json({ error: "Gallery not found" });
@@ -520,7 +522,7 @@ export const getGalleryImages = async (
   try {
     const { galleryId } = req.params;
     const userId = req.user?.id;
-    const instanceId = req.query.instance;
+    const instanceId = (req.query.instance as string | undefined) || stashInstanceManager.getDefaultConfig().id;
 
     // Pagination parameters (optional - defaults to loading all for backwards compat)
     const page = parseInt(req.query.page as string) || 1;
@@ -534,10 +536,10 @@ export const getGalleryImages = async (
     // Fetch the gallery data for inheritance context (with instanceId for multi-stash support)
     const gallery = await stashEntityService.getGallery(galleryId, instanceId);
 
-    // Build query options (filter by instanceId if provided for multi-stash support)
+    // Build query options (instanceId is always resolved — required for multi-stash support)
     const whereClause = {
       deletedAt: null,
-      ...(instanceId && { stashInstanceId: instanceId }),
+      stashInstanceId: instanceId,
       galleries: {
         some: { galleryId },
       },

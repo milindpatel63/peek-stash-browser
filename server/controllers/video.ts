@@ -1,5 +1,6 @@
-import { Request, Response } from "express";
+import type { Response } from "express";
 import { stashInstanceManager } from "../services/StashInstanceManager.js";
+import type { TypedRequest } from "../types/api/express.js";
 import { logger } from "../utils/logger.js";
 import { pipeResponseToClient } from "../utils/streamProxy.js";
 
@@ -68,12 +69,12 @@ function rewriteHlsPlaylist(content: string, sceneId: string, _stashBaseUrl: str
       } else if (line.startsWith('/')) {
         // Absolute path: /scene/123/stream/segment.ts?apikey=xxx
         const [path, query] = line.split('?');
-        urlPath = path;
+        urlPath = path ?? '';
         queryParams = new URLSearchParams(query || '');
       } else {
         // Relative path: stream/segment.ts?apikey=xxx or segment.ts?apikey=xxx
         const [path, query] = line.split('?');
-        urlPath = path;
+        urlPath = path ?? '';
         queryParams = new URLSearchParams(query || '');
       }
 
@@ -91,7 +92,7 @@ function rewriteHlsPlaylist(content: string, sceneId: string, _stashBaseUrl: str
       let streamPath: string;
       const scenePathMatch = urlPath.match(/\/scene\/\d+\/(.+)/);
       if (scenePathMatch) {
-        streamPath = scenePathMatch[1];
+        streamPath = scenePathMatch[1] as string;
       } else {
         // If no scene path pattern, use the path as-is
         streamPath = urlPath.startsWith('/') ? urlPath.slice(1) : urlPath;
@@ -125,10 +126,10 @@ function rewriteHlsPlaylist(content: string, sceneId: string, _stashBaseUrl: str
  * SECURITY: For HLS playlists (.m3u8), we rewrite internal URLs to strip the Stash API key
  * and route segment requests through Peek's proxy.
  */
-export const proxyStashStream = async (req: Request, res: Response) => {
+export const proxyStashStream = async (req: TypedRequest<never, { sceneId: string; streamPath: string; subPath?: string }, { instanceId?: string }>, res: Response) => {
   try {
     const { sceneId, streamPath, subPath } = req.params;
-    const instanceId = req.query.instanceId as string | undefined;
+    const instanceId = req.query.instanceId;
 
     // Combine path segments if subPath exists (for HLS segments like stream/segment_0.ts)
     const fullStreamPath = subPath ? `${streamPath}/${subPath}` : streamPath;
@@ -308,7 +309,7 @@ export const proxyStashStream = async (req: Request, res: Response) => {
  * Stash stores captions as separate .vtt or .srt files alongside video files
  * This endpoint proxies those files and converts SRT to VTT if needed
  */
-export const getCaption = async (req: Request, res: Response) => {
+export const getCaption = async (req: TypedRequest<never, { sceneId: string }, { lang?: string; type?: string; instanceId?: string }>, res: Response) => {
   try {
     const { sceneId } = req.params;
     const { lang, type, instanceId } = req.query;
@@ -317,14 +318,18 @@ export const getCaption = async (req: Request, res: Response) => {
       return res.status(400).send("Missing lang or type parameter");
     }
 
-    logger.info(`[CAPTION] Request: scene=${sceneId}, lang=${lang}, type=${type}, instanceId=${instanceId || '(not specified)'}`);
+    const langStr = lang;
+    const typeStr = type;
+    const instanceIdStr = instanceId ?? '(not specified)';
+
+    logger.info(`[CAPTION] Request: scene=${sceneId}, lang=${langStr}, type=${typeStr}, instanceId=${instanceIdStr}`);
 
     // Get Stash instance configuration
     let stashUrl: string;
     let apiKey: string;
 
     try {
-      const creds = getInstanceCredentials(instanceId as string | undefined);
+      const creds = getInstanceCredentials(instanceId);
       stashUrl = creds.baseUrl;
       apiKey = creds.apiKey;
     } catch (error) {
@@ -333,7 +338,7 @@ export const getCaption = async (req: Request, res: Response) => {
     }
 
     // Construct Stash caption URL
-    const captionUrl = `${stashUrl}/scene/${sceneId}/caption?lang=${lang}&type=${type}`;
+    const captionUrl = `${stashUrl}/scene/${sceneId}/caption?lang=${langStr}&type=${typeStr}`;
     logger.debug(`[CAPTION] Fetching from Stash: ${captionUrl}`);
 
     // Fetch caption from Stash with API key
@@ -355,7 +360,7 @@ export const getCaption = async (req: Request, res: Response) => {
     res.setHeader("Cache-Control", "public, max-age=31536000"); // Cache for 1 year
     res.send(captionData);
 
-    logger.info(`[CAPTION] Served caption: scene=${sceneId}, lang=${lang}, size=${captionData.length} bytes`);
+    logger.info(`[CAPTION] Served caption: scene=${sceneId}, lang=${langStr}, size=${captionData.length} bytes`);
   } catch (error) {
     logger.error("[CAPTION] Error serving caption", {
       error: error instanceof Error ? error.message : String(error),

@@ -5,16 +5,34 @@
  * Admin-only for management operations, with a user-facing endpoint
  * to get their own group memberships.
  */
-import { Response } from "express";
-import { AuthenticatedRequest } from "../middleware/auth.js";
 import prisma from "../prisma/singleton.js";
+import type { TypedAuthRequest, TypedResponse } from "../types/api/express.js";
+import type { ApiErrorResponse } from "../types/api/common.js";
+import type {
+  GetAllUserGroupsResponse,
+  GetUserGroupParams,
+  GetUserGroupResponse,
+  CreateUserGroupBody,
+  CreateUserGroupResponse,
+  UpdateUserGroupParams,
+  UpdateUserGroupBody,
+  UpdateUserGroupResponse,
+  DeleteUserGroupParams,
+  DeleteUserGroupResponse,
+  AddMemberParams,
+  AddMemberBody,
+  AddMemberResponse,
+  RemoveMemberParams,
+  RemoveMemberResponse,
+  GetCurrentUserGroupsResponse,
+} from "../types/api/groups.js";
 
 /**
  * Get all groups with member counts (admin only)
  */
 export const getAllGroups = async (
-  req: AuthenticatedRequest,
-  res: Response
+  req: TypedAuthRequest,
+  res: TypedResponse<GetAllUserGroupsResponse | ApiErrorResponse>
 ) => {
   if (req.user?.role !== "ADMIN") {
     return res.status(403).json({ error: "Admin access required" });
@@ -47,7 +65,7 @@ export const getAllGroups = async (
 /**
  * Get single group with members (admin only)
  */
-export const getGroup = async (req: AuthenticatedRequest, res: Response) => {
+export const getGroup = async (req: TypedAuthRequest<never, GetUserGroupParams>, res: TypedResponse<GetUserGroupResponse | ApiErrorResponse>) => {
   if (req.user?.role !== "ADMIN") {
     return res.status(403).json({ error: "Admin access required" });
   }
@@ -90,9 +108,11 @@ export const getGroup = async (req: AuthenticatedRequest, res: Response) => {
       updatedAt: group.updatedAt,
       members: group.members.map((m) => ({
         id: m.id,
-        userId: m.userId,
-        username: m.user.username,
-        role: m.user.role,
+        user: {
+          id: m.user.id,
+          username: m.user.username,
+          role: m.user.role,
+        },
         joinedAt: m.createdAt,
       })),
     },
@@ -102,7 +122,7 @@ export const getGroup = async (req: AuthenticatedRequest, res: Response) => {
 /**
  * Create a new group (admin only)
  */
-export const createGroup = async (req: AuthenticatedRequest, res: Response) => {
+export const createGroup = async (req: TypedAuthRequest<CreateUserGroupBody>, res: TypedResponse<CreateUserGroupResponse | ApiErrorResponse>) => {
   if (req.user?.role !== "ADMIN") {
     return res.status(403).json({ error: "Admin access required" });
   }
@@ -139,7 +159,7 @@ export const createGroup = async (req: AuthenticatedRequest, res: Response) => {
 /**
  * Update a group (admin only)
  */
-export const updateGroup = async (req: AuthenticatedRequest, res: Response) => {
+export const updateGroup = async (req: TypedAuthRequest<UpdateUserGroupBody, UpdateUserGroupParams>, res: TypedResponse<UpdateUserGroupResponse | ApiErrorResponse>) => {
   if (req.user?.role !== "ADMIN") {
     return res.status(403).json({ error: "Admin access required" });
   }
@@ -203,7 +223,7 @@ export const updateGroup = async (req: AuthenticatedRequest, res: Response) => {
 /**
  * Delete a group (admin only)
  */
-export const deleteGroup = async (req: AuthenticatedRequest, res: Response) => {
+export const deleteGroup = async (req: TypedAuthRequest<never, DeleteUserGroupParams>, res: TypedResponse<DeleteUserGroupResponse | ApiErrorResponse>) => {
   if (req.user?.role !== "ADMIN") {
     return res.status(403).json({ error: "Admin access required" });
   }
@@ -231,7 +251,7 @@ export const deleteGroup = async (req: AuthenticatedRequest, res: Response) => {
 /**
  * Add a user to a group (admin only)
  */
-export const addMember = async (req: AuthenticatedRequest, res: Response) => {
+export const addMember = async (req: TypedAuthRequest<AddMemberBody, AddMemberParams>, res: TypedResponse<AddMemberResponse | ApiErrorResponse>) => {
   if (req.user?.role !== "ADMIN") {
     return res.status(403).json({ error: "Admin access required" });
   }
@@ -282,8 +302,8 @@ export const addMember = async (req: AuthenticatedRequest, res: Response) => {
  * Remove a user from a group (admin only)
  */
 export const removeMember = async (
-  req: AuthenticatedRequest,
-  res: Response
+  req: TypedAuthRequest<never, RemoveMemberParams>,
+  res: TypedResponse<RemoveMemberResponse | ApiErrorResponse>
 ) => {
   if (req.user?.role !== "ADMIN") {
     return res.status(403).json({ error: "Admin access required" });
@@ -326,8 +346,8 @@ export const removeMember = async (
  * Used for sharing UI to show which groups the user belongs to.
  */
 export const getUserGroups = async (
-  req: AuthenticatedRequest,
-  res: Response
+  req: TypedAuthRequest,
+  res: TypedResponse<GetCurrentUserGroupsResponse | ApiErrorResponse>
 ) => {
   if (!req.user?.id) {
     return res.status(401).json({ error: "User not found" });

@@ -6,6 +6,11 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 export default defineConfig({
+  resolve: {
+    alias: {
+      "@peek/shared-types": path.resolve(__dirname, "../../shared/types"),
+    },
+  },
   test: {
     globals: true,
     environment: "node",
@@ -16,5 +21,9 @@ export default defineConfig({
     hookTimeout: 60000, // 60s for setup/teardown hooks
     fileParallelism: false, // Run sequentially
     root: path.resolve(__dirname),
+    reporters: [
+      "default",
+      path.resolve(__dirname, "./helpers/summaryReporter.ts"),
+    ],
   },
 });

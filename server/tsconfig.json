@@ -9,7 +9,12 @@
     "esModuleInterop": true,
     "allowSyntheticDefaultImports": true,
     "skipLibCheck": true,
-    "forceConsistentCasingInFileNames": true
+    "forceConsistentCasingInFileNames": true,
+    "noUncheckedIndexedAccess": true,
+    "paths": {
+      "@peek/shared-types": ["../shared/dist/index.d.ts"],
+      "@peek/shared-types/*": ["../shared/dist/*"]
+    }
   },
   "include": ["**/*.ts"],
   "exclude": ["node_modules", "dist", "tests", "integration", "**/*.test.ts", "**/__tests__"]

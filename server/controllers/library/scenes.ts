@@ -13,6 +13,7 @@ import type {
   UpdateSceneResponse,
   ApiErrorResponse,
   AmbiguousLookupResponse,
+  ScoredSceneId,
 } from "../../types/api/index.js";
 import prisma from "../../prisma/singleton.js";
 import { stashEntityService } from "../../services/StashEntityService.js";
@@ -35,7 +36,9 @@ import type { NormalizedScene, PeekSceneFilter } from "../../types/index.js";
 import { OrientationEnum } from "../../graphql/generated/graphql.js";
 import { isSceneStreamable } from "../../utils/codecDetection.js";
 import { expandStudioIds, expandTagIds } from "../../utils/hierarchyUtils.js";
+import { parseCompositeFilterValues } from "../../utils/sqlFilterBuilders.js";
 import { getEntityInstanceId } from "../../utils/entityInstanceId.js";
+import { coerceEntityRefs } from "@peek/shared-types/instanceAwareId.js";
 import { logger } from "../../utils/logger.js";
 import { SeededRandom, parseRandomSort, generateDailySeed } from "../../utils/seededRandom.js";
 import { buildStashEntityUrl } from "../../utils/stashUrl.js";
@@ -90,12 +93,12 @@ export async function mergeScenesWithUserData(
   // Create lookup maps for O(1) access
   const watchMap = new Map(
     watchHistory.map((wh) => {
-      const oHistory = Array.isArray(wh.oHistory)
+      const oHistory = (Array.isArray(wh.oHistory)
         ? wh.oHistory
-        : JSON.parse((wh.oHistory as string) || "[]");
-      const playHistory = Array.isArray(wh.playHistory)
+        : JSON.parse((wh.oHistory as string) || "[]")) as NormalizedScene["o_history"];
+      const playHistory = (Array.isArray(wh.playHistory)
         ? wh.playHistory
-        : JSON.parse((wh.playHistory as string) || "[]");
+        : JSON.parse((wh.playHistory as string) || "[]")) as NormalizedScene["play_history"];
 
       return [
         `${wh.sceneId}${KEY_SEP}${wh.instanceId || ""}`,
@@ -107,8 +110,8 @@ export async function mergeScenesWithUserData(
           play_history: playHistory,
           o_history: oHistory,
           last_played_at:
-            playHistory.length > 0 ? playHistory[playHistory.length - 1] : null,
-          last_o_at: oHistory.length > 0 ? oHistory[oHistory.length - 1] : null,
+            playHistory.length > 0 ? (playHistory[playHistory.length - 1] ?? null) : null,
+          last_o_at: oHistory.length > 0 ? String(oHistory[oHistory.length - 1] ?? '') : null,
         },
       ];
     })
@@ -219,11 +222,13 @@ export async function applyQuickSceneFilters(
 
   // Filter by performers
   if (filters.performers) {
-    const { value: performerIds, modifier } = filters.performers;
-    if (!performerIds || performerIds.length === 0) return filtered;
+    const { value: rawPerformerIds, modifier } = filters.performers;
+    if (!rawPerformerIds || rawPerformerIds.length === 0) return filtered;
+    // Strip composite keys ("42:instance-1" -> "42") since UI sends composite format
+    const { parsed: parsedPerformers } = parseCompositeFilterValues(rawPerformerIds.map((id) => String(id)));
     filtered = filtered.filter((s) => {
       const scenePerformerIds = (s.performers || []).map((p) => String(p.id));
-      const filterPerformerIds = performerIds.map((id) => String(id));
+      const filterPerformerIds = parsedPerformers.map((p) => p.id);
       if (modifier === "INCLUDES") {
         return filterPerformerIds.some((id: string) =>
           scenePerformerIds.includes(id)
@@ -246,13 +251,17 @@ export async function applyQuickSceneFilters(
   // Filter by tags (squashed: scene + performers + studio tags)
   // Supports hierarchical filtering via depth parameter
   if (filters.tags) {
-    const { value: tagIds, modifier, depth } = filters.tags;
-    if (!tagIds || tagIds.length === 0) return filtered;
+    const { value: rawTagIds, modifier, depth } = filters.tags;
+    if (!rawTagIds || rawTagIds.length === 0) return filtered;
+
+    // Strip composite keys ("284:instance-1" -> "284") since UI sends composite format
+    const { parsed } = parseCompositeFilterValues(rawTagIds.map((id) => String(id)));
+    const tagIds = parsed.map(p => p.id);
 
     // Expand tag IDs to include descendants if depth is specified
     // depth: 0 or undefined = exact match, -1 = all descendants, N = N levels deep
     const expandedTagIds = await expandTagIds(
-      tagIds.map((id) => String(id)),
+      tagIds,
       depth ?? 0
     );
 
@@ -303,14 +312,18 @@ export async function applyQuickSceneFilters(
   // Filter by studios
   // Supports hierarchical filtering via depth parameter
   if (filters.studios) {
-    const { value: studioIds, modifier, depth } = filters.studios;
-    if (!studioIds || studioIds.length === 0) return filtered;
+    const { value: rawStudioIds, modifier, depth } = filters.studios;
+    if (!rawStudioIds || rawStudioIds.length === 0) return filtered;
+
+    // Strip composite keys ("5:instance-1" -> "5") since UI sends composite format
+    const { parsed: parsedStudios } = parseCompositeFilterValues(rawStudioIds.map((id) => String(id)));
+    const studioIds = parsedStudios.map(p => p.id);
 
     // Expand studio IDs to include descendants if depth is specified
     // depth: 0 or undefined = exact match, -1 = all descendants, N = N levels deep
     const expandedStudioIds = new Set(
       await expandStudioIds(
-        studioIds.map((id) => String(id)),
+        studioIds,
         depth ?? 0
       )
     );
@@ -330,15 +343,17 @@ export async function applyQuickSceneFilters(
 
   // Filter by groups
   if (filters.groups) {
-    const { value: groupIds, modifier } = filters.groups;
-    if (!groupIds || groupIds.length === 0) return filtered;
+    const { value: rawGroupIds, modifier } = filters.groups;
+    if (!rawGroupIds || rawGroupIds.length === 0) return filtered;
 
+    // Strip composite keys ("7:instance-1" -> "7") since UI sends composite format
+    const { parsed: parsedGroups } = parseCompositeFilterValues(rawGroupIds.map((id) => String(id)));
     filtered = filtered.filter((s) => {
       // After transformScene, groups are flattened: { id, name, scene_index }
       // NOT nested: { group: { id, name }, scene_index }
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- groups are flattened at runtime, type says SceneGroup (nested)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access -- groups are flattened at runtime, type says SceneGroup (nested)
       const sceneGroupIds = (s.groups || []).map((g: any) => String(g.id));
-      const filterGroupIds = groupIds.map((id) => String(id));
+      const filterGroupIds = parsedGroups.map((p) => p.id);
       if (modifier === "INCLUDES") {
         return filterGroupIds.some((id: string) => sceneGroupIds.includes(id));
       }
@@ -835,7 +850,7 @@ function getFieldValue(
     }
     // After transformScene, groups are flattened: { id, name, scene_index }
     const group = scene.groups.find(
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- groups are flattened at runtime, type says SceneGroup (nested)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access -- groups are flattened at runtime, type says SceneGroup (nested)
       (g: any) => String(g.id) === String(groupId)
     );
     return group?.scene_index ?? 999999; // Put scenes without scene_index at the end
@@ -901,7 +916,7 @@ export const findScenes = async (
 
     // Normalize ids to PeekSceneFilter format
     const normalizedIds = ids
-      ? { value: ids, modifier: "INCLUDES" }
+      ? { value: coerceEntityRefs(ids), modifier: "INCLUDES" }
       : scene_filter?.ids;
     const mergedFilter: PeekSceneFilter = { ...scene_filter, ids: normalizedIds };
     const _requestingUser = req.user;
@@ -916,7 +931,7 @@ export const findScenes = async (
       // Build filters object
       const filters: PeekSceneFilter = { ...scene_filter };
       if (ids && ids.length > 0) {
-        filters.ids = { value: ids, modifier: "INCLUDES" };
+        filters.ids = { value: coerceEntityRefs(ids), modifier: "INCLUDES" };
       }
 
       // Extract specific instance ID for disambiguation (from scene_filter.instance_id)
@@ -999,6 +1014,7 @@ export const findScenes = async (
       logger.info(`findScenes: getExcludedIds took ${Date.now() - exclusionStart}ms (${excludeIds.size} exclusions)`);
 
       const dbStart = Date.now();
+      // eslint-disable-next-line @typescript-eslint/no-deprecated -- intentional use in legacy fallback path when USE_SQL_QUERY_BUILDER=false
       const { scenes: paginatedScenes, total } = await stashEntityService.getScenesPaginated({
         page,
         perPage,
@@ -1027,13 +1043,14 @@ export const findScenes = async (
     }
 
     // STANDARD PATH: Load all scenes and filter in memory
-    // Get pre-computed scene exclusions
+    // Get pre-computed scene exclusions (instance-aware)
     const exclusionStart = Date.now();
-    const excludeIds = await entityExclusionHelper.getExcludedIds(userId, 'scene');
-    logger.info(`findScenes: getExcludedIds took ${Date.now() - exclusionStart}ms (${excludeIds.size} exclusions)`);
+    const exclusionData = await entityExclusionHelper.getExclusionData(userId, 'scene');
+    logger.info(`findScenes: getExclusionData took ${Date.now() - exclusionStart}ms (${exclusionData.globalIds.size} global, ${exclusionData.scopedKeys.size} scoped exclusions)`);
 
     // Step 1: Get all scenes from cache
     const cacheStart = Date.now();
+    // eslint-disable-next-line @typescript-eslint/no-deprecated -- intentional use in legacy fallback path when USE_SQL_QUERY_BUILDER=false
     let scenes = await stashEntityService.getAllScenes();
     logger.info(`findScenes: cache fetch took ${Date.now() - cacheStart}ms for ${scenes.length} scenes`);
 
@@ -1047,10 +1064,10 @@ export const findScenes = async (
       });
     }
 
-    // Apply pre-computed exclusions immediately (fast Set lookup)
+    // Apply pre-computed exclusions immediately (instance-aware filtering)
     const preFilterStart = Date.now();
-    scenes = scenes.filter(s => !excludeIds.has(s.id));
-    logger.info(`findScenes: applied ${excludeIds.size} exclusions in ${Date.now() - preFilterStart}ms, ${scenes.length} scenes remaining`);
+    scenes = scenes.filter(s => !entityExclusionHelper.isExcluded(s.id, s.instanceId, exclusionData));
+    logger.info(`findScenes: applied exclusions in ${Date.now() - preFilterStart}ms, ${scenes.length} scenes remaining`);
 
     // Determine if we can use optimized pipeline
     // Expensive sort fields require user data, so we must merge all scenes first
@@ -1260,9 +1277,9 @@ export const updateScene = async (
       userId
     );
 
-    res.json({ success: true, scene: sceneWithUserHistory[0] });
+    res.json({ success: true, scene: sceneWithUserHistory[0] as NormalizedScene });
   } catch (error) {
-    console.error("Error updating scene:", error);
+    logger.error("Error updating scene", { error: error instanceof Error ? error.message : "Unknown error" });
     res.status(500).json({ error: "Failed to update scene" });
   }
 };
@@ -1394,7 +1411,7 @@ export const getRecommendedScenes = async (
       sceneRatings,
       watchHistory,
       allScoringData,
-      excludedIds,
+      exclusionData,
       engagementRankings,
     ] = await Promise.all([
       prisma.performerRating.findMany({ where: { userId } }),
@@ -1403,7 +1420,7 @@ export const getRecommendedScenes = async (
       prisma.sceneRating.findMany({ where: { userId } }),
       prisma.watchHistory.findMany({ where: { userId } }),
       stashEntityService.getScenesForScoring(),
-      entityExclusionHelper.getExcludedIds(userId, 'scene'),
+      entityExclusionHelper.getExclusionData(userId, 'scene'),
       // Fetch implicit engagement signals from pre-computed rankings
       prisma.userEntityRanking.findMany({
         where: { userId, entityType: { in: ['performer', 'studio', 'tag'] } },
@@ -1479,12 +1496,12 @@ export const getRecommendedScenes = async (
     // Build watch history map
     const watchMap = new Map(
       watchHistory.map((wh) => {
-        const playHistory = Array.isArray(wh.playHistory)
+        const playHistory = (Array.isArray(wh.playHistory)
           ? wh.playHistory
-          : JSON.parse((wh.playHistory as string) || "[]");
-        const lastPlayedAt =
-          playHistory.length > 0
-            ? new Date(playHistory[playHistory.length - 1])
+          : JSON.parse((wh.playHistory as string) || "[]")) as string[];
+        const lastEntry = playHistory[playHistory.length - 1];
+        const lastPlayedAt = lastEntry != null
+            ? new Date(lastEntry)
             : null;
 
         return [
@@ -1497,8 +1514,8 @@ export const getRecommendedScenes = async (
       })
     );
 
-    // Filter excluded scenes from scoring data
-    const scoringData = allScoringData.filter((s) => !excludedIds.has(s.id));
+    // Filter excluded scenes from scoring data (instance-aware)
+    const scoringData = allScoringData.filter((s) => !entityExclusionHelper.isExcluded(s.id, s.instanceId, exclusionData));
 
     // Build derived weights from rated/favorited scenes using lightweight data
     const sceneRatingsForDerived: SceneRatingInput[] = sceneRatings.map((r) => ({
@@ -1547,12 +1564,6 @@ export const getRecommendedScenes = async (
     };
 
     // Phase 1: Score all scenes using lightweight data
-    interface ScoredSceneId {
-      id: string;
-      score: number;
-      oCounter: number;
-    }
-
     const scoredScenes: ScoredSceneId[] = [];
     const now = new Date();
 
@@ -1603,8 +1614,10 @@ export const getRecommendedScenes = async (
     // This creates variety while maintaining general quality order
     const diversifiedScenes: ScoredSceneId[] = [];
     if (scoredScenes.length > 0) {
-      const maxScore = scoredScenes[0].score;
-      const minScore = scoredScenes[scoredScenes.length - 1].score;
+      const firstScene = scoredScenes[0] as ScoredSceneId;
+      const lastScene = scoredScenes[scoredScenes.length - 1] as ScoredSceneId;
+      const maxScore = firstScene.score;
+      const minScore = lastScene.score;
       const scoreRange = maxScore - minScore;
       const tierSize = scoreRange / 10; // 10 tiers
 
@@ -1615,7 +1628,7 @@ export const getRecommendedScenes = async (
           9,
           Math.floor((maxScore - scoredScene.score) / tierSize)
         );
-        tiers[tierIndex].push(scoredScene);
+        (tiers[tierIndex] as ScoredSceneId[]).push(scoredScene);
       }
 
       // Use seeded random for consistent shuffle order per user
@@ -1628,7 +1641,7 @@ export const getRecommendedScenes = async (
         // Fisher-Yates shuffle with seeded random
         for (let i = tier.length - 1; i > 0; i--) {
           const j = rng.nextInt(i + 1);
-          [tier[i], tier[j]] = [tier[j], tier[i]];
+          [tier[i], tier[j]] = [tier[j] as ScoredSceneId, tier[i] as ScoredSceneId];
         }
         diversifiedScenes.push(...tier);
       }

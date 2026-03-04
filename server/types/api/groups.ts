@@ -1,0 +1,22 @@
+// Re-exporting stub — canonical definitions live in shared/types/api/groups.ts
+export type {
+  GroupData,
+  GroupMember,
+  GroupWithMembers,
+  GetAllUserGroupsResponse,
+  GetUserGroupParams,
+  GetUserGroupResponse,
+  CreateUserGroupBody,
+  CreateUserGroupResponse,
+  UpdateUserGroupParams,
+  UpdateUserGroupBody,
+  UpdateUserGroupResponse,
+  DeleteUserGroupParams,
+  DeleteUserGroupResponse,
+  AddMemberParams,
+  AddMemberBody,
+  AddMemberResponse,
+  RemoveMemberParams,
+  RemoveMemberResponse,
+  GetCurrentUserGroupsResponse,
+} from "@peek/shared-types/api/groups.js";

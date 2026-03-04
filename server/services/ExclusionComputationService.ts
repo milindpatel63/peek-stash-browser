@@ -14,8 +14,10 @@
 
 import type { PrismaClient } from "@prisma/client";
 import { Prisma } from "@prisma/client";
+import { parseEntityRef } from "@peek/shared-types/instanceAwareId.js";
 import prisma from "../prisma/singleton.js";
 import { logger } from "../utils/logger.js";
+import { getUserAllowedInstanceIds, buildInstanceFilterClause } from "./UserInstanceService.js";
 
 /**
  * Transaction client type for Prisma operations within transactions
@@ -54,6 +56,15 @@ interface ScopedExclusion {
 }
 
 /**
+ * Parse a composite key and normalize instanceId to empty string (not undefined)
+ * for the exclusion split logic that relies on truthiness.
+ */
+function parseCompositeKey(key: string): { id: string; instanceId: string } {
+  const { id, instanceId } = parseEntityRef(key);
+  return { id, instanceId: instanceId ?? "" };
+}
+
+/**
  * Split exclusions into global (empty instanceId → all instances) and
  * instance-scoped (non-empty instanceId → that instance only).
  */
@@ -76,6 +87,8 @@ interface RecomputeAllResult {
 class ExclusionComputationService {
   // Track pending recomputes to prevent race conditions
   private pendingRecomputes = new Map<number, Promise<void>>();
+  // Track whether another recompute is needed after the current one finishes
+  private recomputeQueued = new Set<number>();
 
   /**
    * Full recompute for a user.
@@ -83,6 +96,10 @@ class ExclusionComputationService {
    * DELETE+INSERT swap is atomic. If the write phase fails, previous
    * exclusions are preserved.
    * Prevents concurrent recomputes for the same user.
+   *
+   * Coalescing: when N callers arrive concurrently for the same user,
+   * at most 2 recomputes occur — the currently-running one plus one
+   * queued recompute that picks up all pending state changes.
    */
   async recomputeForUser(userId: number): Promise<void> {
     // If there's already a pending recompute for this user, wait for it to finish
@@ -90,8 +107,24 @@ class ExclusionComputationService {
     // (e.g., admin saved new restrictions while a sync-triggered recompute was running)
     const pending = this.pendingRecomputes.get(userId);
     if (pending) {
+      // Mark that a recompute is needed after the current one
+      this.recomputeQueued.add(userId);
       logger.info("ExclusionComputationService.recomputeForUser already pending, waiting then re-running", { userId });
       try { await pending; } catch { /* ignore - we'll recompute anyway */ }
+
+      // After the pending recompute finished, check if another caller already
+      // consumed the queued flag and started a new recompute. If so, just
+      // await that one instead of starting yet another.
+      if (!this.recomputeQueued.has(userId)) {
+        const newPending = this.pendingRecomputes.get(userId);
+        if (newPending) {
+          await newPending;
+        }
+        return;
+      }
+      // We're the one to consume the queue flag and start the recompute
+      this.recomputeQueued.delete(userId);
+      // Fall through to start the recompute
     }
 
     const recomputePromise = this.doRecomputeForUser(userId);
@@ -118,21 +151,24 @@ class ExclusionComputationService {
     logger.info("ExclusionComputationService.recomputeForUser starting", { userId });
     const t0 = Date.now();
 
+    // Fetch allowed instance IDs for this user — scopes all phases
+    const allowedInstanceIds = await getUserAllowedInstanceIds(userId);
+
     // === COMPUTATION PHASE (outside transaction — read-heavy, no write locks) ===
 
     // Phase 1: Compute direct exclusions (reads UserContentRestriction + UserHiddenEntity)
-    const directExclusions = await this.computeDirectExclusions(userId, prisma);
+    const directExclusions = await this.computeDirectExclusions(userId, prisma, allowedInstanceIds);
     const t1 = Date.now();
 
     // Phase 2: Compute cascade exclusions (reads junction tables)
-    const cascadeExclusions = await this.computeCascadeExclusions(userId, directExclusions, prisma);
+    const cascadeExclusions = await this.computeCascadeExclusions(userId, directExclusions, prisma, allowedInstanceIds);
     const t2 = Date.now();
 
     // Phase 3: Compute empty exclusions (entities with no visible children)
     // Uses json_each() for exclusion lookups — each query is self-contained
     // so there are no connection affinity or temp table issues.
     const previousExclusions = [...directExclusions, ...cascadeExclusions];
-    const emptyExclusions = await this.computeEmptyExclusions(userId, previousExclusions, prisma);
+    const emptyExclusions = await this.computeEmptyExclusions(userId, previousExclusions, prisma, allowedInstanceIds);
     const t3 = Date.now();
 
     // Combine all exclusions and deduplicate
@@ -165,7 +201,7 @@ class ExclusionComputationService {
       }
 
       // Phase 4: Update entity stats
-      await this.updateEntityStats(userId, tx);
+      await this.updateEntityStats(userId, tx, allowedInstanceIds);
     }, {
       timeout: 30000,
     });
@@ -174,6 +210,7 @@ class ExclusionComputationService {
     logger.info("ExclusionComputationService.recomputeForUser completed", {
       userId,
       totalExclusions: allExclusions.length,
+      instanceCount: allowedInstanceIds.length,
       phaseCounts: {
         direct: directExclusions.length,
         cascade: cascadeExclusions.length,
@@ -238,7 +275,8 @@ class ExclusionComputationService {
    */
   private async computeDirectExclusions(
     userId: number,
-    tx: TransactionClient
+    tx: TransactionClient,
+    allowedInstanceIds: string[]
   ): Promise<ExclusionRecord[]> {
     const exclusions: ExclusionRecord[] = [];
 
@@ -255,30 +293,47 @@ class ExclusionComputationService {
 
     // Process each restriction
     for (const restriction of restrictions) {
-      const entityIds: string[] = JSON.parse(restriction.entityIds);
+      const entityIds: string[] = JSON.parse(restriction.entityIds) as string[];
       const singularType = ENTITY_TYPE_MAP[restriction.entityType] || restriction.entityType;
 
       if (restriction.mode === "EXCLUDE") {
         // EXCLUDE mode: directly exclude these entities
-        for (const entityId of entityIds) {
+        // entityIds may be composite keys ("id:instanceId") from the frontend
+        for (const rawId of entityIds) {
+          const { id, instanceId } = parseCompositeKey(rawId);
           exclusions.push({
             userId,
             entityType: singularType,
-            entityId,
+            entityId: id,
+            instanceId,
             reason: "restricted",
           });
         }
       } else if (restriction.mode === "INCLUDE") {
         // INCLUDE mode: exclude everything NOT in the list
-        const allEntityIds = await this.getAllEntityIds(restriction.entityType, tx);
-        const includeSet = new Set(entityIds);
+        // Parse composite keys into global (bare ID) and scoped (ID + instanceId) sets
+        const parsedIncludes = entityIds.map(parseCompositeKey);
+        const globalIncludeIds = new Set<string>();
+        const scopedIncludeKeys = new Set<string>();
+        for (const p of parsedIncludes) {
+          if (p.instanceId) {
+            scopedIncludeKeys.add(`${p.id}\0${p.instanceId}`);
+          } else {
+            globalIncludeIds.add(p.id);
+          }
+        }
 
-        for (const entityId of allEntityIds) {
-          if (!includeSet.has(entityId)) {
+        const allEntities = await this.getAllEntityIdsWithInstance(restriction.entityType, tx, allowedInstanceIds);
+
+        for (const entity of allEntities) {
+          const isIncluded = globalIncludeIds.has(entity.id) ||
+            scopedIncludeKeys.has(`${entity.id}\0${entity.instanceId}`);
+          if (!isIncluded) {
             exclusions.push({
               userId,
               entityType: singularType,
-              entityId,
+              entityId: entity.id,
+              instanceId: entity.instanceId,
               reason: "restricted",
             });
           }
@@ -322,15 +377,16 @@ class ExclusionComputationService {
     targetInstanceField: string,
     targetEntityType: string,
     addCascade: (type: string, id: string, instanceId?: string) => void,
+    allowedInstanceIds: string[]
   ): Promise<void> {
     const { globalIds, scoped } = splitGlobalScoped(excluded);
 
     if (globalIds.length > 0) {
       const results = await junctionDelegate.findMany({
-        where: { [sourceIdField]: { in: globalIds } },
+        where: { [sourceIdField]: { in: globalIds }, [targetInstanceField]: { in: allowedInstanceIds } },
         select: { [targetIdField]: true },
       });
-      for (const r of results) addCascade(targetEntityType, r[targetIdField]);
+      for (const r of results) addCascade(targetEntityType, r[targetIdField] as string);
     }
     if (scoped.length > 0) {
       const results = await junctionDelegate.findMany({
@@ -339,10 +395,11 @@ class ExclusionComputationService {
             [sourceIdField]: e.entityId,
             [sourceInstanceField]: e.instanceId,
           })),
+          [targetInstanceField]: { in: allowedInstanceIds },
         },
         select: { [targetIdField]: true, [targetInstanceField]: true },
       });
-      for (const r of results) addCascade(targetEntityType, r[targetIdField], r[targetInstanceField]);
+      for (const r of results) addCascade(targetEntityType, r[targetIdField] as string, r[targetInstanceField]);
     }
   }
 
@@ -362,7 +419,8 @@ class ExclusionComputationService {
   private async computeCascadeExclusions(
     userId: number,
     directExclusions: ExclusionRecord[],
-    tx: TransactionClient
+    tx: TransactionClient,
+    allowedInstanceIds: string[]
   ): Promise<ExclusionRecord[]> {
     const cascadeExclusions: ExclusionRecord[] = [];
     const seen = new Set<string>();
@@ -418,7 +476,7 @@ class ExclusionComputationService {
         excludedPerformers, tx, tx.scenePerformer,
         "performerId", "performerInstanceId",
         "sceneId", "sceneInstanceId",
-        "scene", addCascade
+        "scene", addCascade, allowedInstanceIds
       );
     }
 
@@ -428,7 +486,7 @@ class ExclusionComputationService {
 
       if (globalIds.length > 0) {
         const scenes = await tx.stashScene.findMany({
-          where: { studioId: { in: globalIds }, deletedAt: null },
+          where: { studioId: { in: globalIds }, deletedAt: null, stashInstanceId: { in: allowedInstanceIds } },
           select: { id: true },
         });
         for (const s of scenes) addCascade("scene", s.id);
@@ -441,6 +499,7 @@ class ExclusionComputationService {
               stashInstanceId: e.instanceId,
             })),
             deletedAt: null,
+            stashInstanceId: { in: allowedInstanceIds },
           },
           select: { id: true, stashInstanceId: true },
         });
@@ -457,20 +516,23 @@ class ExclusionComputationService {
         excludedTags, tx, tx.sceneTag,
         "tagId", "tagInstanceId",
         "sceneId", "sceneInstanceId",
-        "scene", addCascade
+        "scene", addCascade, allowedInstanceIds
       );
 
       // 3b. Scenes with inherited tag (via inheritedTagIds JSON column — raw SQL required)
+      const { sql: instanceFilter, params: instanceParams } = buildInstanceFilterClause(allowedInstanceIds, "s.stashInstanceId");
       if (globalIds.length > 0) {
         const tagList = globalIds.map(t => `'${t}'`).join(",");
-        const inheritedScenes = await tx.$queryRaw`
+        const query = `
           SELECT DISTINCT s.id FROM StashScene s
           WHERE s.deletedAt IS NULL
+          AND ${instanceFilter}
           AND EXISTS (
             SELECT 1 FROM json_each(s.inheritedTagIds) je
-            WHERE je.value IN (${Prisma.raw(tagList)})
+            WHERE je.value IN (${tagList})
           )
-        ` as Array<{ id: string }>;
+        `;
+        const inheritedScenes = await tx.$queryRawUnsafe(query, ...instanceParams) as Array<{ id: string }>;
         for (const s of inheritedScenes) addCascade("scene", s.id);
       }
       if (scoped.length > 0) {
@@ -500,7 +562,7 @@ class ExclusionComputationService {
         excludedTags, tx, tx.performerTag,
         "tagId", "tagInstanceId",
         "performerId", "performerInstanceId",
-        "performer", addCascade
+        "performer", addCascade, allowedInstanceIds
       );
 
       // 3d. Studios with tag
@@ -508,7 +570,7 @@ class ExclusionComputationService {
         excludedTags, tx, tx.studioTag,
         "tagId", "tagInstanceId",
         "studioId", "studioInstanceId",
-        "studio", addCascade
+        "studio", addCascade, allowedInstanceIds
       );
 
       // 3e. Groups with tag
@@ -516,7 +578,7 @@ class ExclusionComputationService {
         excludedTags, tx, tx.groupTag,
         "tagId", "tagInstanceId",
         "groupId", "groupInstanceId",
-        "group", addCascade
+        "group", addCascade, allowedInstanceIds
       );
     }
 
@@ -526,7 +588,7 @@ class ExclusionComputationService {
         excludedGroups, tx, tx.sceneGroup,
         "groupId", "groupInstanceId",
         "sceneId", "sceneInstanceId",
-        "scene", addCascade
+        "scene", addCascade, allowedInstanceIds
       );
     }
 
@@ -537,7 +599,7 @@ class ExclusionComputationService {
         excludedGalleries, tx, tx.sceneGallery,
         "galleryId", "galleryInstanceId",
         "sceneId", "sceneInstanceId",
-        "scene", addCascade
+        "scene", addCascade, allowedInstanceIds
       );
 
       // 5b. Images in gallery
@@ -545,7 +607,7 @@ class ExclusionComputationService {
         excludedGalleries, tx, tx.imageGallery,
         "galleryId", "galleryInstanceId",
         "imageId", "imageInstanceId",
-        "image", addCascade
+        "image", addCascade, allowedInstanceIds
       );
     }
 
@@ -592,7 +654,8 @@ class ExclusionComputationService {
   private async computeEmptyExclusions(
     userId: number,
     priorExclusions: ExclusionRecord[],
-    tx: TransactionClient
+    tx: TransactionClient,
+    allowedInstanceIds: string[]
   ): Promise<ExclusionRecord[]> {
     const emptyExclusions: ExclusionRecord[] = [];
 
@@ -635,24 +698,32 @@ class ExclusionComputationService {
     const stu = this.buildExclusionJson(excludedStudios);
     const grp = this.buildExclusionJson(excludedGroups);
 
+    // Build instance filter for raw SQL queries
+    const galFilter = buildInstanceFilterClause(allowedInstanceIds, "g.stashInstanceId");
+    const perfFilter = buildInstanceFilterClause(allowedInstanceIds, "p.stashInstanceId");
+    const stuFilter = buildInstanceFilterClause(allowedInstanceIds, "st.stashInstanceId");
+    const grpFilter = buildInstanceFilterClause(allowedInstanceIds, "g.stashInstanceId");
+    const tagFilter = buildInstanceFilterClause(allowedInstanceIds, "t.stashInstanceId");
+
     // 1. Empty galleries - galleries with 0 visible images
-    const emptyGalleries = await tx.$queryRaw`
+    const emptyGalleries = await tx.$queryRawUnsafe(`
       SELECT g.id as galleryId
       FROM StashGallery g
       WHERE g.deletedAt IS NULL
+      AND ${galFilter.sql}
       AND NOT EXISTS (
         SELECT 1 FROM ImageGallery ig
         JOIN StashImage i ON ig.imageId = i.id AND ig.imageInstanceId = i.stashInstanceId
         WHERE ig.galleryId = g.id AND ig.galleryInstanceId = g.stashInstanceId
           AND i.deletedAt IS NULL
-          AND i.id NOT IN (SELECT value FROM json_each(${img.globalJson}))
+          AND i.id NOT IN (SELECT value FROM json_each(?))
           AND NOT EXISTS (
-            SELECT 1 FROM json_each(${img.scopedJson}) je
+            SELECT 1 FROM json_each(?) je
             WHERE json_extract(je.value, '$.id') = i.id
             AND json_extract(je.value, '$.iid') = i.stashInstanceId
           )
       )
-    ` as Array<{ galleryId: string }>;
+    `, ...galFilter.params, img.globalJson, img.scopedJson) as Array<{ galleryId: string }>;
 
     for (const row of emptyGalleries) {
       emptyExclusions.push({
@@ -665,13 +736,14 @@ class ExclusionComputationService {
     }
 
     // 2. Empty performers - performers with 0 visible scenes AND 0 visible images
-    const emptyPerformers = await tx.$queryRaw`
+    const emptyPerformers = await tx.$queryRawUnsafe(`
       SELECT p.id as performerId
       FROM StashPerformer p
       WHERE p.deletedAt IS NULL
-      AND p.id NOT IN (SELECT value FROM json_each(${perf.globalJson}))
+      AND ${perfFilter.sql}
+      AND p.id NOT IN (SELECT value FROM json_each(?))
       AND NOT EXISTS (
-        SELECT 1 FROM json_each(${perf.scopedJson}) je
+        SELECT 1 FROM json_each(?) je
         WHERE json_extract(je.value, '$.id') = p.id
         AND json_extract(je.value, '$.iid') = p.stashInstanceId
       )
@@ -680,9 +752,9 @@ class ExclusionComputationService {
         JOIN StashScene s ON sp.sceneId = s.id AND sp.sceneInstanceId = s.stashInstanceId
         WHERE sp.performerId = p.id AND sp.performerInstanceId = p.stashInstanceId
           AND s.deletedAt IS NULL
-          AND s.id NOT IN (SELECT value FROM json_each(${scn.globalJson}))
+          AND s.id NOT IN (SELECT value FROM json_each(?))
           AND NOT EXISTS (
-            SELECT 1 FROM json_each(${scn.scopedJson}) je
+            SELECT 1 FROM json_each(?) je
             WHERE json_extract(je.value, '$.id') = s.id
             AND json_extract(je.value, '$.iid') = s.stashInstanceId
           )
@@ -692,14 +764,14 @@ class ExclusionComputationService {
         JOIN StashImage i ON ip.imageId = i.id AND ip.imageInstanceId = i.stashInstanceId
         WHERE ip.performerId = p.id AND ip.performerInstanceId = p.stashInstanceId
           AND i.deletedAt IS NULL
-          AND i.id NOT IN (SELECT value FROM json_each(${img.globalJson}))
+          AND i.id NOT IN (SELECT value FROM json_each(?))
           AND NOT EXISTS (
-            SELECT 1 FROM json_each(${img.scopedJson}) je
+            SELECT 1 FROM json_each(?) je
             WHERE json_extract(je.value, '$.id') = i.id
             AND json_extract(je.value, '$.iid') = i.stashInstanceId
           )
       )
-    ` as Array<{ performerId: string }>;
+    `, ...perfFilter.params, perf.globalJson, perf.scopedJson, scn.globalJson, scn.scopedJson, img.globalJson, img.scopedJson) as Array<{ performerId: string }>;
 
     for (const row of emptyPerformers) {
       emptyExclusions.push({
@@ -712,13 +784,14 @@ class ExclusionComputationService {
     }
 
     // 3. Empty studios - studios with 0 visible scenes AND 0 visible images
-    const emptyStudios = await tx.$queryRaw`
+    const emptyStudios = await tx.$queryRawUnsafe(`
       SELECT st.id as studioId
       FROM StashStudio st
       WHERE st.deletedAt IS NULL
-      AND st.id NOT IN (SELECT value FROM json_each(${stu.globalJson}))
+      AND ${stuFilter.sql}
+      AND st.id NOT IN (SELECT value FROM json_each(?))
       AND NOT EXISTS (
-        SELECT 1 FROM json_each(${stu.scopedJson}) je
+        SELECT 1 FROM json_each(?) je
         WHERE json_extract(je.value, '$.id') = st.id
         AND json_extract(je.value, '$.iid') = st.stashInstanceId
       )
@@ -727,9 +800,9 @@ class ExclusionComputationService {
         WHERE s.studioId = st.id
           AND s.stashInstanceId = st.stashInstanceId
           AND s.deletedAt IS NULL
-          AND s.id NOT IN (SELECT value FROM json_each(${scn.globalJson}))
+          AND s.id NOT IN (SELECT value FROM json_each(?))
           AND NOT EXISTS (
-            SELECT 1 FROM json_each(${scn.scopedJson}) je
+            SELECT 1 FROM json_each(?) je
             WHERE json_extract(je.value, '$.id') = s.id
             AND json_extract(je.value, '$.iid') = s.stashInstanceId
           )
@@ -739,14 +812,14 @@ class ExclusionComputationService {
         WHERE i.studioId = st.id
           AND i.stashInstanceId = st.stashInstanceId
           AND i.deletedAt IS NULL
-          AND i.id NOT IN (SELECT value FROM json_each(${img.globalJson}))
+          AND i.id NOT IN (SELECT value FROM json_each(?))
           AND NOT EXISTS (
-            SELECT 1 FROM json_each(${img.scopedJson}) je
+            SELECT 1 FROM json_each(?) je
             WHERE json_extract(je.value, '$.id') = i.id
             AND json_extract(je.value, '$.iid') = i.stashInstanceId
           )
       )
-    ` as Array<{ studioId: string }>;
+    `, ...stuFilter.params, stu.globalJson, stu.scopedJson, scn.globalJson, scn.scopedJson, img.globalJson, img.scopedJson) as Array<{ studioId: string }>;
 
     for (const row of emptyStudios) {
       emptyExclusions.push({
@@ -759,13 +832,14 @@ class ExclusionComputationService {
     }
 
     // 4. Empty groups - groups with 0 visible scenes
-    const emptyGroups = await tx.$queryRaw`
+    const emptyGroups = await tx.$queryRawUnsafe(`
       SELECT g.id as groupId
       FROM StashGroup g
       WHERE g.deletedAt IS NULL
-      AND g.id NOT IN (SELECT value FROM json_each(${grp.globalJson}))
+      AND ${grpFilter.sql}
+      AND g.id NOT IN (SELECT value FROM json_each(?))
       AND NOT EXISTS (
-        SELECT 1 FROM json_each(${grp.scopedJson}) je
+        SELECT 1 FROM json_each(?) je
         WHERE json_extract(je.value, '$.id') = g.id
         AND json_extract(je.value, '$.iid') = g.stashInstanceId
       )
@@ -774,14 +848,14 @@ class ExclusionComputationService {
         JOIN StashScene s ON sg.sceneId = s.id AND sg.sceneInstanceId = s.stashInstanceId
         WHERE sg.groupId = g.id AND sg.groupInstanceId = g.stashInstanceId
           AND s.deletedAt IS NULL
-          AND s.id NOT IN (SELECT value FROM json_each(${scn.globalJson}))
+          AND s.id NOT IN (SELECT value FROM json_each(?))
           AND NOT EXISTS (
-            SELECT 1 FROM json_each(${scn.scopedJson}) je
+            SELECT 1 FROM json_each(?) je
             WHERE json_extract(je.value, '$.id') = s.id
             AND json_extract(je.value, '$.iid') = s.stashInstanceId
           )
       )
-    ` as Array<{ groupId: string }>;
+    `, ...grpFilter.params, grp.globalJson, grp.scopedJson, scn.globalJson, scn.scopedJson) as Array<{ groupId: string }>;
 
     for (const row of emptyGroups) {
       emptyExclusions.push({
@@ -795,18 +869,20 @@ class ExclusionComputationService {
 
     // 5. Empty tags - tags not attached to any visible scene, performer, studio, or group
     // BUT exclude parent/organizational tags (tags that have children) since they're used for hierarchy
-    const emptyTags = await tx.$queryRaw`
+    const childTagFilter = buildInstanceFilterClause(allowedInstanceIds, "child.stashInstanceId");
+    const emptyTags = await tx.$queryRawUnsafe(`
       SELECT t.id as tagId
       FROM StashTag t
       WHERE t.deletedAt IS NULL
+      AND ${tagFilter.sql}
       AND NOT EXISTS (
         SELECT 1 FROM SceneTag st
         JOIN StashScene s ON st.sceneId = s.id AND st.sceneInstanceId = s.stashInstanceId
         WHERE st.tagId = t.id AND st.tagInstanceId = t.stashInstanceId
           AND s.deletedAt IS NULL
-          AND s.id NOT IN (SELECT value FROM json_each(${scn.globalJson}))
+          AND s.id NOT IN (SELECT value FROM json_each(?))
           AND NOT EXISTS (
-            SELECT 1 FROM json_each(${scn.scopedJson}) je
+            SELECT 1 FROM json_each(?) je
             WHERE json_extract(je.value, '$.id') = s.id
             AND json_extract(je.value, '$.iid') = s.stashInstanceId
           )
@@ -816,9 +892,9 @@ class ExclusionComputationService {
         JOIN StashPerformer p ON pt.performerId = p.id AND pt.performerInstanceId = p.stashInstanceId
         WHERE pt.tagId = t.id AND pt.tagInstanceId = t.stashInstanceId
           AND p.deletedAt IS NULL
-          AND p.id NOT IN (SELECT value FROM json_each(${perf.globalJson}))
+          AND p.id NOT IN (SELECT value FROM json_each(?))
           AND NOT EXISTS (
-            SELECT 1 FROM json_each(${perf.scopedJson}) je
+            SELECT 1 FROM json_each(?) je
             WHERE json_extract(je.value, '$.id') = p.id
             AND json_extract(je.value, '$.iid') = p.stashInstanceId
           )
@@ -828,9 +904,9 @@ class ExclusionComputationService {
         JOIN StashStudio stu ON stt.studioId = stu.id AND stt.studioInstanceId = stu.stashInstanceId
         WHERE stt.tagId = t.id AND stt.tagInstanceId = t.stashInstanceId
           AND stu.deletedAt IS NULL
-          AND stu.id NOT IN (SELECT value FROM json_each(${stu.globalJson}))
+          AND stu.id NOT IN (SELECT value FROM json_each(?))
           AND NOT EXISTS (
-            SELECT 1 FROM json_each(${stu.scopedJson}) je
+            SELECT 1 FROM json_each(?) je
             WHERE json_extract(je.value, '$.id') = stu.id
             AND json_extract(je.value, '$.iid') = stu.stashInstanceId
           )
@@ -840,9 +916,9 @@ class ExclusionComputationService {
         JOIN StashGroup g ON gt.groupId = g.id AND gt.groupInstanceId = g.stashInstanceId
         WHERE gt.tagId = t.id AND gt.tagInstanceId = t.stashInstanceId
           AND g.deletedAt IS NULL
-          AND g.id NOT IN (SELECT value FROM json_each(${grp.globalJson}))
+          AND g.id NOT IN (SELECT value FROM json_each(?))
           AND NOT EXISTS (
-            SELECT 1 FROM json_each(${grp.scopedJson}) je
+            SELECT 1 FROM json_each(?) je
             WHERE json_extract(je.value, '$.id') = g.id
             AND json_extract(je.value, '$.iid') = g.stashInstanceId
           )
@@ -850,9 +926,10 @@ class ExclusionComputationService {
       AND NOT EXISTS (
         SELECT 1 FROM StashTag child
         WHERE child.deletedAt IS NULL
+          AND ${childTagFilter.sql}
           AND child.parentIds LIKE '%"' || t.id || '"%'
       )
-    ` as Array<{ tagId: string }>;
+    `, ...tagFilter.params, scn.globalJson, scn.scopedJson, perf.globalJson, perf.scopedJson, stu.globalJson, stu.scopedJson, grp.globalJson, grp.scopedJson, ...childTagFilter.params) as Array<{ tagId: string }>;
 
     for (const row of emptyTags) {
       emptyExclusions.push({
@@ -873,12 +950,13 @@ class ExclusionComputationService {
    */
   private async updateEntityStats(
     userId: number,
-    tx: TransactionClient
+    tx: TransactionClient,
+    allowedInstanceIds: string[]
   ): Promise<void> {
     const entityTypes = ["scene", "performer", "studio", "tag", "group", "gallery", "image", "clip"];
 
     for (const entityType of entityTypes) {
-      const total = await this.getEntityCount(entityType, tx);
+      const total = await this.getEntityCount(entityType, tx, allowedInstanceIds);
       const excluded = await tx.userExcludedEntity.count({
         where: { userId, entityType },
       });
@@ -898,25 +976,27 @@ class ExclusionComputationService {
    */
   private async getEntityCount(
     entityType: string,
-    tx: TransactionClient
+    tx: TransactionClient,
+    allowedInstanceIds: string[]
   ): Promise<number> {
+    const where = { deletedAt: null, stashInstanceId: { in: allowedInstanceIds } };
     switch (entityType) {
       case "scene":
-        return tx.stashScene.count({ where: { deletedAt: null } });
+        return tx.stashScene.count({ where });
       case "performer":
-        return tx.stashPerformer.count({ where: { deletedAt: null } });
+        return tx.stashPerformer.count({ where });
       case "studio":
-        return tx.stashStudio.count({ where: { deletedAt: null } });
+        return tx.stashStudio.count({ where });
       case "tag":
-        return tx.stashTag.count({ where: { deletedAt: null } });
+        return tx.stashTag.count({ where });
       case "group":
-        return tx.stashGroup.count({ where: { deletedAt: null } });
+        return tx.stashGroup.count({ where });
       case "gallery":
-        return tx.stashGallery.count({ where: { deletedAt: null } });
+        return tx.stashGallery.count({ where });
       case "image":
-        return tx.stashImage.count({ where: { deletedAt: null } });
+        return tx.stashImage.count({ where });
       case "clip":
-        return tx.stashClip.count({ where: { deletedAt: null } });
+        return tx.stashClip.count({ where });
       default:
         return 0;
     }
@@ -928,39 +1008,70 @@ class ExclusionComputationService {
    */
   private async getAllEntityIds(
     entityType: string,
-    tx: TransactionClient
+    tx: TransactionClient,
+    allowedInstanceIds: string[]
   ): Promise<string[]> {
+    const where = { deletedAt: null, stashInstanceId: { in: allowedInstanceIds } };
     switch (entityType) {
       case "tags": {
-        const tags = await tx.stashTag.findMany({
-          where: { deletedAt: null },
-          select: { id: true },
-        });
+        const tags = await tx.stashTag.findMany({ where, select: { id: true } });
         return tags.map((t) => t.id);
       }
       case "studios": {
-        const studios = await tx.stashStudio.findMany({
-          where: { deletedAt: null },
-          select: { id: true },
-        });
+        const studios = await tx.stashStudio.findMany({ where, select: { id: true } });
         return studios.map((s) => s.id);
       }
       case "groups": {
-        const groups = await tx.stashGroup.findMany({
-          where: { deletedAt: null },
-          select: { id: true },
-        });
+        const groups = await tx.stashGroup.findMany({ where, select: { id: true } });
         return groups.map((g) => g.id);
       }
       case "galleries": {
-        const galleries = await tx.stashGallery.findMany({
-          where: { deletedAt: null },
-          select: { id: true },
-        });
+        const galleries = await tx.stashGallery.findMany({ where, select: { id: true } });
         return galleries.map((g) => g.id);
       }
       default:
         logger.warn("Unknown entity type for getAllEntityIds", { entityType });
+        return [];
+    }
+  }
+
+  /**
+   * Get all entity IDs with their instance IDs for a given entity type.
+   * Used for INCLUDE mode inversion with multi-instance awareness.
+   * Unlike getAllEntityIds, returns {id, instanceId} pairs so that
+   * entities with the same bare ID from different instances are distinguishable.
+   */
+  private async getAllEntityIdsWithInstance(
+    entityType: string,
+    tx: TransactionClient,
+    allowedInstanceIds: string[]
+  ): Promise<Array<{ id: string; instanceId: string }>> {
+    const selectFields = { id: true, stashInstanceId: true } as const;
+    const where = { deletedAt: null, stashInstanceId: { in: allowedInstanceIds } } as const;
+    const mapRow = (r: { id: string; stashInstanceId: string }) => ({
+      id: r.id,
+      instanceId: r.stashInstanceId,
+    });
+
+    switch (entityType) {
+      case "tags": {
+        const rows = await tx.stashTag.findMany({ where, select: selectFields });
+        return rows.map(mapRow);
+      }
+      case "studios": {
+        const rows = await tx.stashStudio.findMany({ where, select: selectFields });
+        return rows.map(mapRow);
+      }
+      case "groups": {
+        const rows = await tx.stashGroup.findMany({ where, select: selectFields });
+        return rows.map(mapRow);
+      }
+      case "galleries": {
+        const rows = await tx.stashGallery.findMany({ where, select: selectFields });
+        return rows.map(mapRow);
+      }
+      default:
+        logger.warn("Unknown entity type for getAllEntityIdsWithInstance", { entityType });
         return [];
     }
   }
@@ -1246,12 +1357,12 @@ class ExclusionComputationService {
    * Handle user unhiding an entity.
    * Queues async recompute since cascades need recalculation.
    */
-  async removeHiddenEntity(
+  removeHiddenEntity(
     userId: number,
     entityType: string,
     entityId: string,
     instanceId: string = ""
-  ): Promise<void> {
+  ): void {
     logger.info("ExclusionComputationService.removeHiddenEntity", {
       userId,
       entityType,

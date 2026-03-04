@@ -1,5 +1,6 @@
 import prisma from "../prisma/singleton.js";
 import { stashEntityService } from "./StashEntityService.js";
+import { stashInstanceManager } from "./StashInstanceManager.js";
 import { exclusionComputationService } from "./ExclusionComputationService.js";
 import type { NormalizedScene, NormalizedPerformer, NormalizedStudio, NormalizedTag, NormalizedGroup, NormalizedGallery, NormalizedImage } from "../types/index.js";
 
@@ -90,7 +91,7 @@ class UserHiddenEntityService {
     this.hiddenIdsCache.delete(userId);
 
     // Update pre-computed exclusions (async recompute)
-    await exclusionComputationService.removeHiddenEntity(userId, entityType, entityId, instanceId);
+    exclusionComputationService.removeHiddenEntity(userId, entityType, entityId, instanceId);
   }
 
   /**
@@ -146,7 +147,7 @@ class UserHiddenEntityService {
       hiddenEntities.map(async (hidden) => {
         let entity = null;
 
-        const instId = hidden.instanceId || undefined;
+        const instId = hidden.instanceId || stashInstanceManager.getDefaultConfig().id;
         switch (hidden.entityType) {
           case "scene":
             entity = await stashEntityService.getScene(hidden.entityId, instId);

@@ -5,11 +5,13 @@
  * Eliminates the need to load all studios into memory.
  */
 import type { PeekStudioFilter, NormalizedStudio, TagRef, PerformerRef, GroupRef, GalleryRef } from "../types/index.js";
+import type { StudioQueryRow } from "../types/internal/queryRows.js";
 import prisma from "../prisma/singleton.js";
 import { logger } from "../utils/logger.js";
 import { expandTagIds } from "../utils/hierarchyUtils.js";
 import { getGalleryFallbackTitle } from "../utils/titleUtils.js";
-import { buildNumericFilter, buildDateFilter, buildTextFilter, buildFavoriteFilter, buildJunctionFilter, type FilterClause } from "../utils/sqlFilterBuilders.js";
+import { buildNumericFilter, buildDateFilter, buildTextFilter, buildFavoriteFilter, buildJunctionFilter, parseCompositeFilterValues, type FilterClause } from "../utils/sqlFilterBuilders.js";
+import { coerceEntityRefs } from "@peek/shared-types/instanceAwareId.js";
 
 // Query builder options
 export interface StudioQueryOptions {
@@ -146,7 +148,9 @@ class StudioQueryBuilder {
       return { sql: "", params: [] };
     }
 
-    let ids = filter.value;
+    // Parse composite keys ("284:instance-1" -> "284") since UI sends composite format
+    const { parsed } = parseCompositeFilterValues(filter.value);
+    let ids = parsed.map(p => p.id);
     const { modifier, depth } = filter;
 
     // Expand IDs if depth is specified and not 0
@@ -155,7 +159,7 @@ class StudioQueryBuilder {
     }
 
     return buildJunctionFilter(
-      ids, "StudioTag", "studioId", "studioInstanceId",
+      coerceEntityRefs(ids), "StudioTag", "studioId", "studioInstanceId",
       "tagId", "tagInstanceId", "s", modifier || "INCLUDES"
     );
   }
@@ -360,7 +364,7 @@ class StudioQueryBuilder {
 
     // Execute query
     const queryStart = Date.now();
-    const rows = await prisma.$queryRawUnsafe<Record<string, unknown>[]>(sql, ...params);
+    const rows = await prisma.$queryRawUnsafe<StudioQueryRow[]>(sql, ...params);
     const queryMs = Date.now() - queryStart;
 
     // Count query
@@ -423,10 +427,8 @@ class StudioQueryBuilder {
   /**
    * Transform a raw database row into a NormalizedStudio
    */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private transformRow(row: Record<string, any>): NormalizedStudio {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const studio: any = {
+  private transformRow(row: StudioQueryRow): NormalizedStudio {
+    const studio = {
       id: row.id,
       instanceId: row.stashInstanceId,
       name: row.name,
@@ -445,8 +447,8 @@ class StudioQueryBuilder {
       group_count: row.groupCount || 0,
 
       // Timestamps
-      created_at: row.stashCreatedAt?.toISOString?.() || row.stashCreatedAt || null,
-      updated_at: row.stashUpdatedAt?.toISOString?.() || row.stashUpdatedAt || null,
+      created_at: row.stashCreatedAt || null,
+      updated_at: row.stashUpdatedAt || null,
 
       // User data - Peek user data ONLY
       rating: row.userRating ?? null,
@@ -456,8 +458,8 @@ class StudioQueryBuilder {
       play_count: row.userPlayCount ?? 0,
 
       // Relations - populated separately
-      tags: [],
-      child_studios: [],
+      tags: [] as TagRef[],
+      child_studios: [] as NormalizedStudio[],
     };
 
     return studio as NormalizedStudio;

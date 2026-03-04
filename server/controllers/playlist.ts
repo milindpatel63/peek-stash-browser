@@ -33,7 +33,12 @@ import type {
   UpdatePlaylistSharesResponse,
   DuplicatePlaylistResponse,
 } from "../types/api/index.js";
+import { logger } from "../utils/logger.js";
 import { transformScene } from "../utils/stashUrlProxy.js";
+import { groupIdsByInstance } from "../utils/instanceUtils.js";
+import { stashInstanceManager } from "../services/StashInstanceManager.js";
+
+const KEY_SEP = "\0";
 
 /**
  * Default user fields for scenes (when no user data is merged yet).
@@ -95,11 +100,18 @@ export const getUserPlaylists = async (
           return playlist;
         }
 
-        const sceneIds = playlist.items.map((item) => item.sceneId);
-
         try {
-          // 1. Fetch scenes from cache with relations
-          const scenes = await stashEntityService.getScenesByIdsWithRelations(sceneIds);
+          // 1. Fetch scenes from cache with relations, grouped by instance
+          const scenesByInstance = groupIdsByInstance(
+            playlist.items,
+            (item) => item.instanceId,
+            (item) => item.sceneId,
+            stashInstanceManager.getDefaultConfig().id
+          );
+          const scenes: NormalizedScene[] = [];
+          for (const [instId, ids] of scenesByInstance) {
+            scenes.push(...await stashEntityService.getScenesByIdsWithRelations(ids, instId));
+          }
 
           // 2. Apply user exclusions (filter out hidden/restricted scenes)
           const visibleScenes = await entityExclusionHelper.filterExcluded(
@@ -113,15 +125,15 @@ export const getUserPlaylists = async (
             transformScene(s)
           );
 
-          // Create a map of scene ID to scene data
+          // Create a map of composite key to scene data (avoids cross-instance ID collisions)
           const sceneMap = new Map(
-            transformedScenes.map((s) => [s.id, s])
+            transformedScenes.map((s) => [`${s.id}${KEY_SEP}${s.instanceId}`, s])
           );
 
           // Attach scene data to each playlist item (only paths.screenshot needed for preview)
           const itemsWithScenes = playlist.items.map((item) => ({
             ...item,
-            scene: sceneMap.get(item.sceneId) || null,
+            scene: sceneMap.get(`${item.sceneId}${KEY_SEP}${item.instanceId || ""}`) || null,
           }));
 
           return {
@@ -129,10 +141,7 @@ export const getUserPlaylists = async (
             items: itemsWithScenes,
           };
         } catch (cacheError) {
-          console.error(
-            `Error fetching scenes for playlist ${playlist.id}:`,
-            cacheError
-          );
+          logger.error(`Error fetching scenes for playlist ${playlist.id}`, { error: cacheError instanceof Error ? cacheError.message : "Unknown error" });
           // Return playlist without scene details if cache fails
           return playlist;
         }
@@ -141,7 +150,7 @@ export const getUserPlaylists = async (
 
     res.json({ playlists: playlistsWithScenes });
   } catch (error) {
-    console.error("Error getting playlists:", error);
+    logger.error("Error getting playlists", { error: error instanceof Error ? error.message : "Unknown error" });
     res.status(500).json({ error: "Failed to get playlists" });
   }
 };
@@ -212,11 +221,18 @@ export const getSharedPlaylists = async (
         let itemsWithScenes: Array<{ instanceId: string | null; sceneId: string; scene: NormalizedScene | null }> = [];
 
         if (p.items.length > 0) {
-          const sceneIds = p.items.map((item) => item.sceneId);
-
           try {
-            // Fetch scenes from cache with relations
-            const scenes = await stashEntityService.getScenesByIdsWithRelations(sceneIds);
+            // Fetch scenes from cache with relations, grouped by instance
+            const scenesByInstance = groupIdsByInstance(
+              p.items,
+              (item) => item.instanceId,
+              (item) => item.sceneId,
+              stashInstanceManager.getDefaultConfig().id
+            );
+            const scenes: NormalizedScene[] = [];
+            for (const [instId, ids] of scenesByInstance) {
+              scenes.push(...await stashEntityService.getScenesByIdsWithRelations(ids, instId));
+            }
 
             // Apply user exclusions (filter out hidden/restricted scenes)
             const visibleScenes = await entityExclusionHelper.filterExcluded(
@@ -230,22 +246,19 @@ export const getSharedPlaylists = async (
               transformScene(s)
             );
 
-            // Create a map of scene ID to scene data
+            // Create a map of composite key to scene data (avoids cross-instance ID collisions)
             const sceneMap = new Map(
-              transformedScenes.map((s) => [s.id, s])
+              transformedScenes.map((s) => [`${s.id}${KEY_SEP}${s.instanceId}`, s])
             );
 
             // Attach scene data to each playlist item
             itemsWithScenes = p.items.map((item) => ({
               instanceId: item.instanceId,
               sceneId: item.sceneId,
-              scene: sceneMap.get(item.sceneId) || null,
+              scene: sceneMap.get(`${item.sceneId}${KEY_SEP}${item.instanceId || ""}`) || null,
             }));
           } catch (cacheError) {
-            console.error(
-              `Error fetching scenes for shared playlist ${p.id}:`,
-              cacheError
-            );
+            logger.error(`Error fetching scenes for shared playlist ${p.id}`, { error: cacheError instanceof Error ? cacheError.message : "Unknown error" });
           }
         }
 
@@ -259,7 +272,7 @@ export const getSharedPlaylists = async (
           sharedAt: p.shares.length > 0
             ? p.shares.reduce((earliest, s) =>
                 s.sharedAt < earliest ? s.sharedAt : earliest,
-              p.shares[0].sharedAt).toISOString()
+              (p.shares[0] as (typeof p.shares)[number]).sharedAt).toISOString()
             : new Date().toISOString(),
           items: itemsWithScenes,
         };
@@ -268,7 +281,7 @@ export const getSharedPlaylists = async (
 
     res.json({ playlists: playlistsWithScenes });
   } catch (error) {
-    console.error("Error getting shared playlists:", error);
+    logger.error("Error getting shared playlists", { error: error instanceof Error ? error.message : "Unknown error" });
     res.status(500).json({ error: "Failed to get shared playlists" });
   }
 };
@@ -315,11 +328,18 @@ export const getPlaylist = async (
 
     // Fetch scene details from cache for all items
     if (playlist.items.length > 0) {
-      const sceneIds = playlist.items.map((item) => item.sceneId);
-
       try {
-        // 1. Fetch scenes from cache with relations
-        const scenes = await stashEntityService.getScenesByIdsWithRelations(sceneIds);
+        // 1. Fetch scenes from cache with relations, grouped by instance
+        const scenesByInstance = groupIdsByInstance(
+          playlist.items,
+          (item) => item.instanceId,
+          (item) => item.sceneId,
+          stashInstanceManager.getDefaultConfig().id
+        );
+        const scenes: NormalizedScene[] = [];
+        for (const [instId, ids] of scenesByInstance) {
+          scenes.push(...await stashEntityService.getScenesByIdsWithRelations(ids, instId));
+        }
 
         // 2. Apply user exclusions (filter out hidden/restricted scenes)
         const visibleScenes = await entityExclusionHelper.filterExcluded(
@@ -348,16 +368,16 @@ export const getPlaylist = async (
           transformScene(s)
         );
 
-        // Create a map of scene ID to scene data
+        // Create a map of composite key to scene data (avoids cross-instance ID collisions)
         const sceneMap = new Map(
-          transformedScenes.map((s) => [s.id, s])
+          transformedScenes.map((s) => [`${s.id}${KEY_SEP}${s.instanceId}`, s])
         );
 
         // Attach scene data to each playlist item
         // Note: Items with restricted/hidden scenes will have scene: null
         const itemsWithScenes = playlist.items.map((item) => ({
           ...item,
-          scene: sceneMap.get(item.sceneId) || null,
+          scene: sceneMap.get(`${item.sceneId}${KEY_SEP}${item.instanceId || ""}`) || null,
         }));
 
         res.json({
@@ -370,7 +390,7 @@ export const getPlaylist = async (
           sharedViaGroups: access.level === "shared" ? access.groups : undefined,
         });
       } catch (cacheError) {
-        console.error("Error fetching scenes from cache:", cacheError);
+        logger.error("Error fetching scenes from cache", { error: cacheError instanceof Error ? cacheError.message : "Unknown error" });
         // Return playlist without scene details if cache fails
         res.json({
           playlist,
@@ -388,7 +408,7 @@ export const getPlaylist = async (
       });
     }
   } catch (error) {
-    console.error("Error getting playlist:", error);
+    logger.error("Error getting playlist", { error: error instanceof Error ? error.message : "Unknown error" });
     res.status(500).json({ error: "Failed to get playlist" });
   }
 };
@@ -429,7 +449,7 @@ export const createPlaylist = async (
 
     res.status(201).json({ playlist });
   } catch (error) {
-    console.error("Error creating playlist:", error);
+    logger.error("Error creating playlist", { error: error instanceof Error ? error.message : "Unknown error" });
     res.status(500).json({ error: "Failed to create playlist" });
   }
 };
@@ -487,7 +507,7 @@ export const updatePlaylist = async (
 
     res.json({ playlist });
   } catch (error) {
-    console.error("Error updating playlist:", error);
+    logger.error("Error updating playlist", { error: error instanceof Error ? error.message : "Unknown error" });
     res.status(500).json({ error: "Failed to update playlist" });
   }
 };
@@ -530,7 +550,7 @@ export const deletePlaylist = async (
 
     res.json({ success: true, message: "Playlist deleted" });
   } catch (error) {
-    console.error("Error deleting playlist:", error);
+    logger.error("Error deleting playlist", { error: error instanceof Error ? error.message : "Unknown error" });
     res.status(500).json({ error: "Failed to delete playlist" });
   }
 };
@@ -560,12 +580,15 @@ export const addSceneToPlaylist = async (
       return res.status(400).json({ error: "Scene ID is required" });
     }
 
-    // Check ownership
-    const playlist = await prisma.playlist.findFirst({
-      where: {
-        id: playlistId,
-        userId,
-      },
+    // Check access — owners and shared users can add scenes
+    // Note: remove/reorder/rename remain owner-only (intentional asymmetry)
+    const access = await getPlaylistAccess(playlistId, userId);
+    if (access.level === "none") {
+      return res.status(404).json({ error: "Playlist not found" });
+    }
+
+    const playlist = await prisma.playlist.findUnique({
+      where: { id: playlistId },
       include: {
         items: {
           orderBy: {
@@ -600,7 +623,7 @@ export const addSceneToPlaylist = async (
 
     // Calculate next position
     const nextPosition =
-      playlist.items.length > 0 ? playlist.items[0].position + 1 : 0;
+      playlist.items.length > 0 ? (playlist.items[0] as (typeof playlist.items)[number]).position + 1 : 0;
 
     const item = await prisma.playlistItem.create({
       data: {
@@ -613,7 +636,7 @@ export const addSceneToPlaylist = async (
 
     res.status(201).json({ item });
   } catch (error) {
-    console.error("Error adding scene to playlist:", error);
+    logger.error("Error adding scene to playlist", { error: error instanceof Error ? error.message : "Unknown error" });
     res.status(500).json({ error: "Failed to add scene to playlist" });
   }
 };
@@ -666,7 +689,7 @@ export const removeSceneFromPlaylist = async (
 
     res.json({ success: true, message: "Scene removed from playlist" });
   } catch (error) {
-    console.error("Error removing scene from playlist:", error);
+    logger.error("Error removing scene from playlist", { error: error instanceof Error ? error.message : "Unknown error" });
     res.status(500).json({ error: "Failed to remove scene from playlist" });
   }
 };
@@ -736,7 +759,7 @@ export const reorderPlaylist = async (
 
     res.json({ success: true, message: "Playlist reordered" });
   } catch (error) {
-    console.error("Error reordering playlist:", error);
+    logger.error("Error reordering playlist", { error: error instanceof Error ? error.message : "Unknown error" });
     res.status(500).json({ error: "Failed to reorder playlist" });
   }
 };
@@ -787,7 +810,7 @@ export const getPlaylistShares = async (
       })),
     });
   } catch (error) {
-    console.error("Error getting playlist shares:", error);
+    logger.error("Error getting playlist shares", { error: error instanceof Error ? error.message : "Unknown error" });
     res.status(500).json({ error: "Failed to get playlist shares" });
   }
 };
@@ -873,7 +896,7 @@ export const updatePlaylistShares = async (
       })),
     });
   } catch (error) {
-    console.error("Error updating playlist shares:", error);
+    logger.error("Error updating playlist shares", { error: error instanceof Error ? error.message : "Unknown error" });
     res.status(500).json({ error: "Failed to update playlist shares" });
   }
 };
@@ -943,7 +966,7 @@ export const duplicatePlaylist = async (
 
     res.status(201).json({ playlist: duplicate });
   } catch (error) {
-    console.error("Error duplicating playlist:", error);
+    logger.error("Error duplicating playlist", { error: error instanceof Error ? error.message : "Unknown error" });
     res.status(500).json({ error: "Failed to duplicate playlist" });
   }
 };

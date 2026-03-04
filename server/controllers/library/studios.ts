@@ -20,6 +20,7 @@ import { getUserAllowedInstanceIds } from "../../services/UserInstanceService.js
 import { userStatsService } from "../../services/UserStatsService.js";
 import type { NormalizedStudio, PeekStudioFilter } from "../../types/index.js";
 import { disambiguateEntityNames, getEntityInstanceId } from "../../utils/entityInstanceId.js";
+import { coerceEntityRefs } from "@peek/shared-types/instanceAwareId.js";
 import { hydrateStudioRelationships } from "../../utils/hierarchyUtils.js";
 import { logger } from "../../utils/logger.js";
 import { parseRandomSort } from "../../utils/seededRandom.js";
@@ -90,7 +91,7 @@ export const findStudios = async (
 
     // Merge root-level ids with studio_filter
     const normalizedIds = ids
-      ? { value: ids, modifier: "INCLUDES" }
+      ? { value: coerceEntityRefs(ids), modifier: "INCLUDES" }
       : studio_filter?.ids;
     const mergedFilter: PeekStudioFilter = {
       ...studio_filter,
@@ -142,10 +143,11 @@ export const findStudios = async (
     let resultStudios = studios;
     if (ids && ids.length === 1 && resultStudios.length === 1) {
       // Get studio with computed counts from junction tables
-      const studioWithCounts = await stashEntityService.getStudio(ids[0], resultStudios[0].instanceId);
+      const firstStudio = resultStudios[0] as (typeof resultStudios)[number];
+      const studioWithCounts = await stashEntityService.getStudio(ids[0] as string, firstStudio.instanceId);
       if (studioWithCounts) {
         // Merge with the studio data (which has user ratings/stats)
-        const existingStudio = resultStudios[0];
+        const existingStudio = firstStudio;
         resultStudios = [
           {
             ...existingStudio,
@@ -244,7 +246,7 @@ export function applyStudioFilters(
 
   // Filter by IDs (for detail pages)
   if (filters.ids?.value && filters.ids.value.length > 0) {
-    const idSet = new Set(filters.ids.value);
+    const idSet = new Set(filters.ids.value as string[]);
     filtered = filtered.filter((s) => idSet.has(s.id));
   }
 
@@ -553,7 +555,7 @@ export const updateStudio = async (
 
     res.json({ success: true, studio: updatedStudio.studioUpdate as unknown as NormalizedStudio });
   } catch (error) {
-    console.error("Error updating studio:", error);
+    logger.error("Error updating studio", { error: error instanceof Error ? error.message : "Unknown error" });
     res.status(500).json({ error: "Failed to update studio" });
   }
 };

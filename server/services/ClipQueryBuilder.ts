@@ -12,6 +12,7 @@ import {
   buildJunctionFilter,
   buildDirectFilter,
 } from "../utils/sqlFilterBuilders.js";
+import { coerceEntityRefs } from "@peek/shared-types/instanceAwareId.js";
 
 // Query builder options
 export interface ClipQueryOptions {
@@ -183,7 +184,7 @@ class ClipQueryBuilder {
 
     // ClipTag junction filter (instance-aware)
     const junctionFilter = buildJunctionFilter(
-      tagIds, "ClipTag", "clipId", "clipInstanceId",
+      coerceEntityRefs(tagIds), "ClipTag", "clipId", "clipInstanceId",
       "tagId", "tagInstanceId", "c", "INCLUDES"
     );
 
@@ -319,7 +320,7 @@ class ClipQueryBuilder {
     if (!studioId) {
       return { sql: "", params: [] };
     }
-    return buildDirectFilter([studioId], "s.studioId", "s.stashInstanceId", "INCLUDES");
+    return buildDirectFilter(coerceEntityRefs([studioId]), "s.studioId", "s.stashInstanceId", "INCLUDES");
   }
 
   /**
@@ -596,10 +597,11 @@ class ClipQueryBuilder {
       }
 
       // Fetch tags for this clip
-      const clipIds = [{ id: rows[0].id, instanceId: rows[0].stashInstanceId }];
+      const firstRow = rows[0] as (typeof rows)[number];
+      const clipIds = [{ id: firstRow.id, instanceId: firstRow.stashInstanceId }];
       const tagMap = await this.fetchClipTags(clipIds);
 
-      return this.transformRows(rows, tagMap)[0];
+      return this.transformRows(rows, tagMap)[0] ?? null;
     } catch (error) {
       logger.error("ClipQueryBuilder.getClipById failed", { error, clipId, userId });
       throw error;

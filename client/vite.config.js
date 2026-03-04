@@ -1,6 +1,10 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { visualizer } from "rollup-plugin-visualizer";
+import path from "path";
+import { fileURLToPath } from "url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // https://vite.dev/config/
 export default defineConfig({
@@ -36,6 +40,7 @@ export default defineConfig({
         manualChunks: {
           // Separate vendor chunks for better caching
           "react-vendor": ["react", "react-dom", "react-router-dom"],
+          "query-vendor": ["@tanstack/react-query"],
           "video-vendor": ["video.js"],
           "ui-vendor": ["lucide-react", "react-hot-toast"],
         },
@@ -64,9 +69,18 @@ export default defineConfig({
     },
     proxy: {
       "/api": {
-        target: "http://peek-server:8000",
+        target:
+          globalThis.process?.env?.VITE_API_PROXY_TARGET ||
+          "http://peek-server:8000",
         changeOrigin: true,
       },
+    },
+  },
+  resolve: {
+    alias: {
+      "@": path.resolve(__dirname, "./src"),
+      "@tests": path.resolve(__dirname, "./tests"),
+      "@peek/shared-types": path.resolve(__dirname, "../shared/types"),
     },
   },
   preview: {

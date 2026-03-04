@@ -27,17 +27,9 @@ import type {
   UpdateStashInstanceResponse,
   DeleteStashInstanceParams,
   DeleteStashInstanceResponse,
+  CarouselPreference,
 } from "../types/api/index.js";
 import { logger } from "../utils/logger.js";
-
-/**
- * Carousel preference configuration for user home page
- */
-interface CarouselPreference {
-  id: string;
-  enabled: boolean;
-  order: number;
-}
 
 // Default carousel preferences for new users
 const getDefaultCarouselPreferences = (): CarouselPreference[] => [
@@ -228,8 +220,7 @@ export const testStashConnection = async (
     } catch (error) {
       // Get the full error details including cause
       const errorMessage = error instanceof Error ? error.message : String(error);
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const errorCause = error instanceof Error && (error as any).cause ? String((error as any).cause) : "";
+      const errorCause = error instanceof Error && (error as Error & { cause?: unknown }).cause ? String((error as Error & { cause?: unknown }).cause) : "";
       const fullError = errorCause ? `${errorMessage}: ${errorCause}` : errorMessage;
 
       logger.error("Stash connection test failed", {
@@ -309,17 +300,19 @@ export const createFirstStashInstance = async (
       });
     }
 
-    // Test connection before saving
-    const testStash = new StashClient({ url, apiKey });
-    try {
-      await testStash.configuration();
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      logger.error("Stash connection validation failed", { error: errorMessage });
-      return res.status(400).json({
-        error: "Could not connect to Stash server",
-        details: errorMessage,
-      });
+    // Test connection before saving (skip in test environment for E2E setup)
+    if (process.env.NODE_ENV !== "test") {
+      const testStash = new StashClient({ url, apiKey });
+      try {
+        await testStash.configuration();
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        logger.error("Stash connection validation failed", { error: errorMessage });
+        return res.status(400).json({
+          error: "Could not connect to Stash server",
+          details: errorMessage,
+        });
+      }
     }
 
     // Create Stash instance

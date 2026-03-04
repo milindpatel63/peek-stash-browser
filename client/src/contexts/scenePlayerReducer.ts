@@ -1,0 +1,539 @@
+import type { NormalizedScene } from "@peek/shared-types";
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+/**
+ * Quality presets in descending order of resolution
+ * Must match the presets defined in TranscodingManager.ts and useVideoPlayer.js
+ */
+const QUALITY_PRESETS = [
+  { height: 2160, quality: "2160p" },
+  { height: 1080, quality: "1080p" },
+  { height: 720, quality: "720p" },
+  { height: 480, quality: "480p" },
+  { height: 360, quality: "360p" },
+];
+
+/**
+ * Get the best transcode quality for a given source resolution
+ * Returns the highest quality preset that is <= source height
+ */
+function getBestTranscodeQuality(sourceHeight: number) {
+  for (const preset of QUALITY_PRESETS) {
+    if (preset.height <= sourceHeight) {
+      return preset.quality;
+    }
+  }
+  return "360p";
+}
+
+// ============================================================================
+// TYPES
+// ============================================================================
+
+interface PlaylistData {
+  scenes?: Array<Record<string, unknown>>;
+  [key: string]: unknown;
+}
+
+export interface ScenePlayerReducerState {
+  scene: NormalizedScene | null;
+  sceneLoading: boolean;
+  sceneError: unknown;
+  video: Record<string, unknown> | null;
+  videoLoading: boolean;
+  videoError: unknown;
+  sessionId: string | null;
+  quality: string;
+  isInitializing: boolean;
+  isAutoFallback: boolean;
+  isSwitchingMode: boolean;
+  ready: boolean;
+  shouldAutoplay: boolean;
+  playlist: PlaylistData | null;
+  currentIndex: number;
+  autoplayNext: boolean;
+  shuffle: boolean;
+  repeat: string;
+  shuffleHistory: number[];
+  compatibility: Record<string, unknown> | null;
+  oCounter: number;
+}
+
+interface ScenePlayerAction {
+  type: string;
+  payload?: unknown;
+}
+
+// ============================================================================
+// INITIAL STATE
+// ============================================================================
+
+export const initialState: ScenePlayerReducerState = {
+  // Scene data (from Stash API)
+  scene: null,
+  sceneLoading: false,
+  sceneError: null,
+
+  // Video playback data (from Peek API)
+  video: null,
+  videoLoading: false,
+  videoError: null,
+  sessionId: null,
+  quality: "direct",
+
+  // Player internal state
+  isInitializing: false,
+  isAutoFallback: false,
+  isSwitchingMode: false,
+  ready: false, // Player ready to play (metadata loaded)
+  shouldAutoplay: false, // Should trigger autoplay when ready
+
+  // Playlist
+  playlist: null,
+  currentIndex: 0,
+
+  // Playlist controls
+  autoplayNext: true, // Auto-advance to next scene when current ends
+  shuffle: false, // Play scenes in random order
+  repeat: "none", // "none" | "all" | "one"
+  shuffleHistory: [], // Track played scenes to avoid immediate repeats
+
+  // Compatibility (codec support)
+  compatibility: null,
+
+  // O Counter
+  oCounter: 0,
+};
+
+// ============================================================================
+// REDUCER
+// ============================================================================
+
+export function scenePlayerReducer(state: ScenePlayerReducerState, action: ScenePlayerAction) {
+  switch (action.type) {
+    // Scene loading
+    case "LOAD_SCENE_START":
+      return {
+        ...state,
+        sceneLoading: true,
+        sceneError: null,
+      };
+
+    case "LOAD_SCENE_SUCCESS": {
+      const payload = action.payload as { scene: NormalizedScene; oCounter?: number };
+      const scene = payload.scene;
+
+      // Smart default quality selection based on codec detection (Phase 3)
+      // If scene has streamability info and quality is still at default "direct",
+      // automatically choose the best quality
+      let autoSelectedQuality = state.quality;
+
+      if (state.quality === "direct" && scene.isStreamable !== undefined) {
+        if (scene.isStreamable) {
+          // Scene is browser-compatible - keep direct play
+          autoSelectedQuality = "direct";
+        } else {
+          // Scene needs transcoding - choose highest quality <= source resolution
+          const sourceHeight = scene.files?.[0]?.height || 1080;
+          autoSelectedQuality = getBestTranscodeQuality(sourceHeight);
+        }
+      }
+
+      return {
+        ...state,
+        scene: scene,
+        oCounter: payload.oCounter || 0,
+        quality: autoSelectedQuality,
+        sceneLoading: false,
+        sceneError: null,
+      };
+    }
+
+    case "LOAD_SCENE_ERROR":
+      return {
+        ...state,
+        sceneLoading: false,
+        sceneError: action.payload,
+      };
+
+    // Video loading
+    case "LOAD_VIDEO_START":
+      return {
+        ...state,
+        videoLoading: true,
+        videoError: null,
+      };
+
+    case "LOAD_VIDEO_SUCCESS": {
+      const payload = action.payload as { video: Record<string, unknown>; sessionId: string | null };
+      return {
+        ...state,
+        video: payload.video,
+        sessionId: payload.sessionId,
+        videoLoading: false,
+        videoError: null,
+        isInitializing: false,
+      };
+    }
+
+    case "LOAD_VIDEO_ERROR":
+      return {
+        ...state,
+        videoLoading: false,
+        videoError: action.payload,
+        isInitializing: false,
+      };
+
+    // Quality management
+    case "SET_QUALITY":
+      return {
+        ...state,
+        quality: action.payload as string,
+      };
+
+    case "SET_VIDEO":
+      return {
+        ...state,
+        video: action.payload as Record<string, unknown> | null,
+      };
+
+    case "SET_SESSION_ID":
+      return {
+        ...state,
+        sessionId: action.payload as string | null,
+      };
+
+    case "CLEAR_VIDEO":
+      return {
+        ...state,
+        video: null,
+        sessionId: null,
+        videoLoading: false,
+        videoError: null,
+      };
+
+    // Playlist navigation
+    case "NEXT_SCENE": {
+      if (!state.playlist || !state.playlist.scenes) {
+        return state;
+      }
+
+      let nextIndex = null;
+      const totalScenes = state.playlist.scenes.length;
+
+      if (state.shuffle) {
+        // Shuffle mode: pick random unplayed scene
+        const unplayedScenes = [];
+
+        for (let i = 0; i < totalScenes; i++) {
+          if (
+            i !== state.currentIndex &&
+            !state.shuffleHistory.includes(i)
+          ) {
+            unplayedScenes.push(i);
+          }
+        }
+
+        if (unplayedScenes.length > 0) {
+          // Pick random from unplayed
+          nextIndex =
+            unplayedScenes[Math.floor(Math.random() * unplayedScenes.length)];
+        } else if (state.repeat === "all") {
+          // All scenes played, reset shuffle history and start over
+          const candidates = Array.from({ length: totalScenes }, (_, i) =>
+            i
+          ).filter((i) => i !== state.currentIndex);
+          nextIndex = candidates[Math.floor(Math.random() * candidates.length)];
+
+          // Also return updated shuffle history
+          return {
+            ...state,
+            currentIndex: nextIndex,
+            shuffleHistory: [state.currentIndex], // Start new history
+            playlist: {
+              ...state.playlist,
+              shuffleHistory: [state.currentIndex],
+            },
+            video: null,
+            sessionId: null,
+            isInitializing: false,
+            ready: false,
+          };
+        }
+        // else: no more scenes and repeat is not "all", stay on current
+      } else {
+        // Sequential mode
+        if (state.currentIndex < totalScenes - 1) {
+          nextIndex = state.currentIndex + 1;
+        } else if (state.repeat === "all") {
+          nextIndex = 0; // Loop back to start
+        }
+        // else: last scene and repeat is not "all", stay on current
+      }
+
+      if (nextIndex === null) {
+        return state; // Can't advance
+      }
+
+      // Update shuffle history if in shuffle mode
+      const newHistory = state.shuffle
+        ? [...state.shuffleHistory, state.currentIndex]
+        : state.shuffleHistory;
+
+      return {
+        ...state,
+        currentIndex: nextIndex,
+        shuffleHistory: newHistory,
+        playlist: state.playlist
+          ? { ...state.playlist, shuffleHistory: newHistory }
+          : null,
+        video: null,
+        sessionId: null,
+        isInitializing: false,
+        ready: false,
+        // Reset quality to "direct" for new scene - will be auto-selected based on codec
+        quality: "direct",
+        // Reset O counter immediately - will be set correctly when new scene loads
+        oCounter: 0,
+      };
+    }
+
+    case "PREV_SCENE": {
+      if (!state.playlist || !state.playlist.scenes) {
+        return state;
+      }
+
+      let prevIndex = null;
+      const totalScenes = state.playlist.scenes.length;
+
+      if (state.shuffle) {
+        // In shuffle mode, go back to last played scene (from history)
+        if (state.shuffleHistory.length > 0) {
+          prevIndex = state.shuffleHistory[state.shuffleHistory.length - 1];
+
+          // Remove last item from history
+          const newHistory = state.shuffleHistory.slice(0, -1);
+
+          return {
+            ...state,
+            currentIndex: prevIndex,
+            shuffleHistory: newHistory,
+            playlist: state.playlist
+              ? { ...state.playlist, shuffleHistory: newHistory }
+              : null,
+            video: null,
+            sessionId: null,
+            isInitializing: false,
+            ready: false,
+            // Reset quality to "direct" for new scene - will be auto-selected based on codec
+            quality: "direct",
+            // Reset O counter immediately - will be set correctly when new scene loads
+            oCounter: 0,
+          };
+        } else {
+          // No history - pick a random scene (excluding current)
+          if (state.repeat === "all" || totalScenes > 1) {
+            const candidates = Array.from({ length: totalScenes }, (_, i) => i)
+              .filter((i) => i !== state.currentIndex);
+            prevIndex = candidates[Math.floor(Math.random() * candidates.length)];
+          }
+          // else: only 1 scene in playlist, can't go anywhere
+        }
+      } else {
+        // Sequential mode
+        if (state.currentIndex > 0) {
+          prevIndex = state.currentIndex - 1;
+        } else if (state.repeat === "all") {
+          prevIndex = totalScenes - 1; // Loop to end
+        }
+        // else: first scene and repeat is not "all", stay on current
+      }
+
+      if (prevIndex === null) {
+        return state; // Can't go back
+      }
+
+      return {
+        ...state,
+        currentIndex: prevIndex,
+        video: null,
+        sessionId: null,
+        isInitializing: false,
+        ready: false,
+        // Reset quality to "direct" for new scene - will be auto-selected based on codec
+        quality: "direct",
+        // Reset O counter immediately - will be set correctly when new scene loads
+        oCounter: 0,
+      };
+    }
+
+    case "GOTO_SCENE_INDEX": {
+      const gotoPayload = action.payload as { index?: number; shouldAutoplay?: boolean } | number;
+      const index = typeof gotoPayload === 'object' && gotoPayload !== null ? (gotoPayload.index ?? 0) : (gotoPayload as number);
+      const shouldAutoplay = typeof gotoPayload === 'object' && gotoPayload !== null ? (gotoPayload.shouldAutoplay ?? false) : false;
+
+      if (
+        !state.playlist ||
+        !state.playlist.scenes ||
+        index < 0 ||
+        index >= state.playlist.scenes.length
+      ) {
+        return state;
+      }
+
+      return {
+        ...state,
+        currentIndex: index,
+        // Clear video data - will be fetched for new scene
+        video: null,
+        sessionId: null,
+        isInitializing: false,
+        ready: false, // Reset ready state for new scene
+        // Set shouldAutoplay based on payload
+        shouldAutoplay: shouldAutoplay,
+        // Reset quality to "direct" for new scene - will be auto-selected based on codec
+        quality: "direct",
+        // Reset O counter immediately - will be set correctly when new scene loads
+        oCounter: 0,
+      };
+    }
+
+    case "SET_CURRENT_INDEX": {
+      return {
+        ...state,
+        currentIndex: action.payload as number,
+      };
+    }
+
+    // Player state
+    case "SET_INITIALIZING":
+      return {
+        ...state,
+        isInitializing: action.payload as boolean,
+      };
+
+    case "SET_AUTO_FALLBACK":
+      return {
+        ...state,
+        isAutoFallback: action.payload as boolean,
+      };
+
+    case "SET_SWITCHING_MODE":
+      return {
+        ...state,
+        isSwitchingMode: action.payload as boolean,
+      };
+
+    case "SET_READY":
+      return {
+        ...state,
+        ready: action.payload as boolean,
+      };
+
+    case "SET_SHOULD_AUTOPLAY":
+      return {
+        ...state,
+        shouldAutoplay: action.payload as boolean,
+      };
+
+    // O Counter
+    case "SET_O_COUNTER":
+      return {
+        ...state,
+        oCounter: action.payload as number,
+      };
+
+    // Playlist controls
+    case "TOGGLE_AUTOPLAY_NEXT":
+      return {
+        ...state,
+        autoplayNext: !state.autoplayNext,
+        // Update playlist object as well
+        playlist: state.playlist
+          ? { ...state.playlist, autoplayNext: !state.autoplayNext }
+          : null,
+      };
+
+    case "TOGGLE_SHUFFLE": {
+      const newShuffle = !state.shuffle;
+      return {
+        ...state,
+        shuffle: newShuffle,
+        // Reset shuffle history when toggling
+        shuffleHistory: newShuffle ? [] : state.shuffleHistory,
+        // Update playlist object as well
+        playlist: state.playlist
+          ? {
+              ...state.playlist,
+              shuffle: newShuffle,
+              shuffleHistory: newShuffle ? [] : state.shuffleHistory,
+            }
+          : null,
+      };
+    }
+
+    case "TOGGLE_REPEAT": {
+      // Cycle through: none → all → one → none
+      const repeatModes = ["none", "all", "one"];
+      const currentIdx = repeatModes.indexOf(state.repeat);
+      const nextRepeat = repeatModes[(currentIdx + 1) % repeatModes.length];
+      return {
+        ...state,
+        repeat: nextRepeat,
+        // Update playlist object as well
+        playlist: state.playlist
+          ? { ...state.playlist, repeat: nextRepeat }
+          : null,
+      };
+    }
+
+    case "SET_SHUFFLE_HISTORY": {
+      const newShuffleHistory = action.payload as number[];
+      return {
+        ...state,
+        shuffleHistory: newShuffleHistory,
+        // Update playlist object as well
+        playlist: state.playlist
+          ? { ...state.playlist, shuffleHistory: newShuffleHistory }
+          : null,
+      };
+    }
+
+    // Initialize from props
+    case "INITIALIZE": {
+      const initPayload = action.payload as {
+        playlist?: PlaylistData | null;
+        currentIndex?: number;
+        compatibility?: Record<string, unknown> | null;
+        initialQuality?: string;
+        initialShouldAutoplay?: boolean;
+      };
+      const playlist = initPayload.playlist;
+
+      // Get shouldAutoplay from props (passed via location.state)
+      // Preserve existing value if already set (for re-initialization)
+      const shouldAutoplay = initPayload.initialShouldAutoplay || state.shouldAutoplay || false;
+
+      return {
+        ...state,
+        playlist: playlist || null,
+        currentIndex: initPayload.currentIndex || 0,
+        compatibility: initPayload.compatibility || null,
+        quality: initPayload.initialQuality || "direct",
+        // Initialize playlist controls from playlist object
+        autoplayNext: (playlist?.autoplayNext as boolean | undefined) ?? true,
+        shuffle: (playlist?.shuffle as boolean | undefined) ?? false,
+        repeat: (playlist?.repeat as string | undefined) ?? "none",
+        shuffleHistory: (playlist?.shuffleHistory as number[] | undefined) ?? [],
+        // Use the determined shouldAutoplay value
+        shouldAutoplay: shouldAutoplay,
+      };
+    }
+
+    default:
+      return state;
+  }
+}

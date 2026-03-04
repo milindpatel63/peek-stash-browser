@@ -8,6 +8,12 @@
 # ===========================
 FROM node:22-slim AS frontend-build
 
+WORKDIR /app
+
+# Copy shared types package (needed for file: dependency and vite alias)
+COPY shared/package.json shared/tsconfig.json ./shared/
+COPY shared/types ./shared/types
+
 WORKDIR /app/client
 
 # Copy package files first for better layer caching
@@ -24,6 +30,13 @@ RUN npm run build && rm -f dist/stats.html
 # Stage 2: Backend Build
 # ===========================
 FROM node:22-slim AS backend-build
+
+# Build shared type declarations first
+WORKDIR /app/shared
+COPY shared/package*.json ./
+RUN npm ci --no-audit --prefer-offline
+COPY shared/ ./
+RUN rm -f tsconfig.tsbuildinfo && npm run build
 
 WORKDIR /app/server
 
@@ -78,6 +91,10 @@ COPY server/package*.json ./
 
 # Copy pruned node_modules from build stage (already has prisma client generated)
 COPY --from=backend-build /app/server/node_modules ./node_modules
+
+# Replace file: symlink with actual shared-types package
+# (npm ci creates a symlink to ../../../shared which resolves differently between stages)
+COPY --from=backend-build /app/shared ./node_modules/@peek/shared-types
 
 # Copy Prisma schema and migrations (for runtime migrations)
 COPY server/prisma/schema.prisma ./prisma/
