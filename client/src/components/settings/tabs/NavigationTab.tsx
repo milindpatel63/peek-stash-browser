@@ -1,8 +1,13 @@
-import { useEffect, useState } from "react";
-import { apiGet, apiPut } from "../../../api";
+import { useMemo } from "react";
+import { getErrorMessage } from "../../../api";
+import {
+  useUpdateUserSettings,
+  useUserSettings,
+} from "../../../api/hooks/useUserSettings";
 import { migrateCarouselPreferences } from "../../../constants/carousels";
 import { migrateNavPreferences } from "../../../constants/navigation";
 import { showError, showSuccess } from "../../../utils/toast";
+import { StatusMessage } from "../../ui/index";
 import CarouselSettings from "../CarouselSettings";
 import LandingPageSettings from "../LandingPageSettings";
 import NavigationSettings from "../NavigationSettings";
@@ -25,83 +30,67 @@ interface LandingPagePreference {
 }
 
 const NavigationTab = () => {
-  const [loading, setLoading] = useState(true);
-  const [carouselPreferences, setCarouselPreferences] = useState<CarouselPreference[]>([]);
-  const [navPreferences, setNavPreferences] = useState<NavPreference[]>([]);
-  const [landingPagePreference, setLandingPagePreference] = useState<LandingPagePreference | null>(null);
+  // The settings query: a save updates it, and every reader with it (the
+  // logo's landing page). After a failed load the editors would show
+  // defaults, and saving them would replace the stored preferences: show
+  // Retry instead
+  const { data, isPending, error, refetch } = useUserSettings();
+  const save = useUpdateUserSettings();
+  const settings = data?.settings;
 
-  // Load settings on mount
-  useEffect(() => {
-    const loadSettings = async () => {
-      try {
-        setLoading(true);
-        const data = await apiGet<{ settings: Record<string, unknown> }>("/user/settings");
-        const { settings } = data;
+  // Each editor resets from its prop when the prop changes, so derive each
+  // from its own stored field: a save of one leaves the others' edits alone
+  const storedCarousels = settings?.carouselPreferences;
+  const carouselPreferences = useMemo(
+    () =>
+      migrateCarouselPreferences(storedCarousels ?? []) as CarouselPreference[],
+    [storedCarousels]
+  );
+  const storedNav = settings?.navPreferences;
+  const navPreferences = useMemo(
+    () => migrateNavPreferences(storedNav ?? []) as NavPreference[],
+    [storedNav]
+  );
+  const landingPagePreference = settings?.landingPagePreference ?? null;
 
-        const migratedCarouselPrefs = migrateCarouselPreferences(
-          settings.carouselPreferences as CarouselPreference[]
-        ) as CarouselPreference[];
-        setCarouselPreferences(migratedCarouselPrefs);
-
-        const migratedNavPrefs = migrateNavPreferences(settings.navPreferences as NavPreference[]);
-        setNavPreferences(migratedNavPrefs as NavPreference[]);
-
-        setLandingPagePreference(
-          (settings.landingPagePreference as LandingPagePreference) || { pages: ["home"], randomize: false }
-        );
-      } catch {
-        showError("Failed to load navigation settings");
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    loadSettings();
-  }, []);
-
-  const saveCarouselPreferences = async (newPreferences: CarouselPreference[]) => {
+  // Each save reports a failure here and rethrows it, so the editor keeps
+  // its changes marked unsaved
+  const saveCarouselPreferences = async (
+    newPreferences: CarouselPreference[]
+  ) => {
     try {
-      await apiPut("/user/settings", {
-        carouselPreferences: newPreferences,
-      });
-
-      setCarouselPreferences(newPreferences);
+      await save.mutateAsync({ carouselPreferences: newPreferences });
       showSuccess("Carousel preferences saved successfully!");
     } catch (err) {
-      showError((err as Error).message || "Failed to save carousel preferences");
+      showError(getErrorMessage(err, "Failed to save carousel preferences"));
+      throw err;
     }
   };
 
   const saveNavPreferences = async (newPreferences: NavPreference[]) => {
     try {
-      await apiPut("/user/settings", {
-        navPreferences: newPreferences,
-      });
-
-      setNavPreferences(newPreferences);
+      await save.mutateAsync({ navPreferences: newPreferences });
+      // The sidebar reads the settings query: it already shows the new order
       showSuccess("Navigation preferences saved successfully!");
-
-      // Reload the page to apply nav changes immediately
-      window.location.reload();
     } catch (err) {
-      showError((err as Error).message || "Failed to save navigation preferences");
+      showError(getErrorMessage(err, "Failed to save navigation preferences"));
+      throw err;
     }
   };
 
-  const saveLandingPagePreference = async (newPreference: LandingPagePreference) => {
+  const saveLandingPagePreference = async (
+    newPreference: LandingPagePreference
+  ) => {
     try {
-      await apiPut("/user/settings", {
-        landingPagePreference: newPreference,
-      });
-
-      setLandingPagePreference(newPreference);
+      await save.mutateAsync({ landingPagePreference: newPreference });
       showSuccess("Landing page preference saved successfully!");
     } catch (err) {
-      showError((err as Error).message || "Failed to save landing page preference");
+      showError(getErrorMessage(err, "Failed to save landing page preference"));
+      throw err;
     }
   };
 
-  if (loading) {
+  if (isPending) {
     return (
       <div
         className="flex items-center justify-center p-12"
@@ -109,6 +98,17 @@ const NavigationTab = () => {
       >
         <div className="animate-spin w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full"></div>
       </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <StatusMessage
+        variant="error"
+        title="Failed to load navigation settings"
+        message={getErrorMessage(error)}
+        onRetry={() => void refetch()}
+      />
     );
   }
 

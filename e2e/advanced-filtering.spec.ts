@@ -1,63 +1,44 @@
-import { test, expect } from "@playwright/test";
+import { expect, test } from "@playwright/test";
+import { ListPage } from "./pages/ListPage";
+import { sentCriterion } from "./support/sentFilter";
 
 /**
- * E2E tests for advanced filtering and combined search+filter behavior.
- *
- * Covers filter panel interactions, URL state management when combining
- * search with sort/view mode, and clearing search across different pages.
+ * E2E tests for "+ Filter" and the chip editors, and for combining search
+ * with sort and view mode in the URL.
  */
 
 test.describe("Advanced Filtering", () => {
-  test("filter panel opens with filter sections", async ({ page }) => {
-    await page.goto("/scenes");
-    await expect(page.getByPlaceholder("Search...")).toBeVisible({
-      timeout: 10_000,
-    });
+  test("+ Filter opens, lists the page's fields, closes on Escape with focus back", async ({
+    page,
+  }) => {
+    const list = new ListPage(page);
+    await list.goto("/scenes");
 
-    // Open filters
-    const filtersButton = page.locator(
-      '[data-tv-search-item="filters-button"]'
-    );
-    await filtersButton.click();
+    await list.addFilterButton.click();
+    await expect(
+      page.getByRole("combobox", { name: "Find a filter" })
+    ).toBeFocused();
+    const fields = page.getByRole("listbox", { name: "Filters" });
+    // A new account's pinned fields lead the list; the rest keep their sections
+    await expect(
+      fields
+        .getByRole("group", { name: "Pinned" })
+        .getByRole("option", { name: "Tags", exact: true })
+    ).toBeVisible();
+    await expect(
+      fields
+        .getByRole("group", { name: "Common Filters" })
+        .getByRole("option", { name: "Studios", exact: true })
+    ).toBeVisible();
 
-    // Filter panel should have some content (look for "Clear All" or filter labels)
-    const filterPanel = page.locator(
-      '[class*="filter"], [class*="Filter"]'
-    );
-    await filterPanel
-      .first()
-      .isVisible({ timeout: 3_000 })
-      .catch(() => false);
-
-    // Either the filter panel opened or the button toggled — button should remain visible
-    await expect(filtersButton).toBeVisible();
-  });
-
-  test("filter button toggles state", async ({ page }) => {
-    await page.goto("/scenes");
-    await expect(page.getByPlaceholder("Search...")).toBeVisible({
-      timeout: 10_000,
-    });
-
-    const filtersButton = page.locator(
-      '[data-tv-search-item="filters-button"]'
-    );
-
-    // Click to open
-    await filtersButton.click();
-    // Click again to close
-    await filtersButton.click();
-
-    // Button should still be visible after toggling
-    await expect(filtersButton).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(fields).toHaveCount(0);
+    await expect(list.addFilterButton).toBeFocused();
   });
 
   test("search and filter combined maintain URL state", async ({ page }) => {
-    // Set both search and sort in URL
-    await page.goto("/scenes?q=test&sort=title&dir=asc");
-    await expect(page.getByPlaceholder("Search...")).toBeVisible({
-      timeout: 10_000,
-    });
+    const list = new ListPage(page);
+    await list.goto("/scenes?q=test&sort=title&dir=asc");
 
     // Both should be preserved
     expect(page.url()).toContain("q=test");
@@ -65,97 +46,109 @@ test.describe("Advanced Filtering", () => {
     expect(page.url()).toContain("dir=asc");
 
     // Search input should show the query
-    await expect(page.getByPlaceholder("Search...")).toHaveValue("test");
+    await expect(list.searchInput).toHaveValue("test");
   });
 
   test("changing sort preserves search query", async ({ page }) => {
-    await page.goto("/scenes?q=filter-test");
-    await expect(page.getByPlaceholder("Search...")).toBeVisible({
-      timeout: 10_000,
-    });
+    const list = new ListPage(page);
+    await list.goto("/scenes?q=filter-test");
 
-    // Toggle sort direction
-    const sortDirection = page.locator(
-      '[data-tv-search-item="sort-direction"]'
-    );
-    if (await sortDirection.isVisible().catch(() => false)) {
-      await sortDirection.click();
-
-      // URL should still have the search query
-      await expect(page).toHaveURL(/q=filter-test/, { timeout: 5_000 });
-    }
+    // The page does not write the URL on load, so dir= appears only once the
+    // click has been applied
+    await list.toggleSortDirection();
+    await expect(page).toHaveURL(/[?&]dir=/);
+    expect(new URL(page.url()).searchParams.get("q")).toBe("filter-test");
   });
 
-  test("performer page filter panel works", async ({ page }) => {
-    await page.goto("/performers");
-    await expect(page.getByPlaceholder("Search...")).toBeVisible({
-      timeout: 10_000,
-    });
+  test("+ Filter lists performer fields", async ({ page }) => {
+    const list = new ListPage(page);
+    await list.goto("/performers");
 
-    const filtersButton = page.locator(
-      '[data-tv-search-item="filters-button"]'
-    );
-    if (await filtersButton.isVisible().catch(() => false)) {
-      await filtersButton.click();
-      // Should open without crashing
-      await expect(filtersButton).toBeVisible();
-    }
+    await list.addFilterButton.click();
+    await expect(
+      page
+        .getByRole("listbox", { name: "Filters" })
+        .getByRole("option", { name: "Gender", exact: true })
+    ).toBeVisible();
   });
 
-  test("tags page filter panel works", async ({ page }) => {
-    await page.goto("/tags");
-    await expect(page.getByPlaceholder("Search...")).toBeVisible({
-      timeout: 10_000,
-    });
+  test("Performers: a penis length range shows performers or the empty state, never an error", async ({
+    page,
+  }) => {
+    const list = new ListPage(page);
+    await list.goto("/performers");
+    await list.waitForResults("Performer");
 
-    const filtersButton = page.locator(
-      '[data-tv-search-item="filters-button"]'
+    const range = await list.addFilter("Penis Length");
+    // The list request that carries the whole range, not the ones before it:
+    // typing applies once it pauses
+    const filtered = page.waitForResponse(
+      (r) =>
+        new URL(r.url()).pathname === "/api/library/performers" &&
+        r.request().method() === "POST" &&
+        sentCriterion<{ value?: number; value2?: number }>(
+          r.request().postDataJSON(),
+          "penis_length"
+        )?.value2 !== undefined
     );
-    if (await filtersButton.isVisible().catch(() => false)) {
-      await filtersButton.click();
-      await expect(filtersButton).toBeVisible();
-    }
+    await range.getByPlaceholder("Min").fill("10");
+    await range.getByPlaceholder("Max").fill("20");
+    const response = await filtered;
+    expect(response.status()).toBe(200);
+    const { findPerformers } = (await response.json()) as {
+      findPerformers: { performers: unknown[] };
+    };
+
+    // The page shows what the range matched. The replay's performers have no
+    // length, so there the grid stays empty (it has no empty-state text).
+    await expect(
+      page.getByRole("button", { name: /^Remove filter:/ })
+    ).toHaveCount(1);
+    await expect(list.cards("Performer")).toHaveCount(
+      findPerformers.performers.length
+    );
+    await expect(page.getByText("Failed to find performers")).toHaveCount(0);
+  });
+
+  test("+ Filter lists tag fields", async ({ page }) => {
+    const list = new ListPage(page);
+    await list.goto("/tags");
+
+    await list.addFilterButton.click();
+    // A tag filter the scene list does not have
+    await expect(
+      page
+        .getByRole("listbox", { name: "Filters" })
+        .getByRole("option", { name: "Description Search", exact: true })
+    ).toBeVisible();
   });
 
   test("view mode persists in URL across filter changes", async ({ page }) => {
-    await page.goto("/scenes?view=table");
-    await expect(page.getByPlaceholder("Search...")).toBeVisible({
-      timeout: 10_000,
-    });
+    const list = new ListPage(page);
+    await list.goto("/scenes?view=table");
 
-    // View mode should be in URL
-    expect(page.url()).toContain("view=table");
+    await list.searchInput.fill("preserve-view");
 
-    // Add a search query
-    await page.getByPlaceholder("Search...").fill("preserve-view");
-
-    // URL should have both view and search
-    await expect(page).toHaveURL(/view=table/, { timeout: 5_000 });
-    await expect(page).toHaveURL(/q=preserve/, { timeout: 5_000 });
+    await expect(page).toHaveURL(/[?&]q=preserve-view(&|$)/);
+    expect(new URL(page.url()).searchParams.get("view")).toBe("table");
+    await expect(
+      page.locator('button[aria-label="View mode: Table view"]')
+    ).toBeVisible();
   });
 
-  test("clearing search on gallery page works", async ({ page }) => {
-    await page.goto("/galleries?q=clear-test");
-    await expect(page.getByPlaceholder("Search...")).toBeVisible({
-      timeout: 10_000,
+  test("clearing the search on the galleries page removes it from the URL", async ({
+    page,
+  }) => {
+    const list = new ListPage(page);
+    await list.goto("/galleries?q=clear-test");
+    await expect(list.searchInput).toHaveValue("clear-test");
+
+    await list.clearSearch();
+
+    // After the debounce, the URL has no q
+    await page.waitForURL((url) => !url.searchParams.has("q"), {
+      timeout: 5_000,
     });
-
-    // Search should show the query
-    await expect(page.getByPlaceholder("Search...")).toHaveValue("clear-test");
-
-    // Clear the search
-    await page.getByPlaceholder("Search...").clear();
-
-    // After debounce, URL should no longer have q param
-    // Use a soft check since debounce timing varies
-    await page
-      .waitForURL(
-        (url) =>
-          !url.searchParams.has("q") || url.searchParams.get("q") === "",
-        { timeout: 5_000 }
-      )
-      .catch(() => {
-        // It's OK if the URL doesn't clear immediately in CI
-      });
+    await expect(list.searchInput).toHaveValue("");
   });
 });

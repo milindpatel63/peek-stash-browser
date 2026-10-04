@@ -1,65 +1,137 @@
-import { useState, useEffect, useCallback } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import * as LucideIcons from "lucide-react";
-import type { LucideIcon } from "lucide-react";
-import {
-  ArrowLeft,
-  Save,
-  Eye,
-  Plus,
-  Trash2,
-  AlertCircle,
-  Loader2,
-} from "lucide-react";
-import { Button } from "../ui/index";
-import IconPickerButton from "./IconPickerButton";
-import RuleEditor from "./RuleEditor";
-import CarouselPreview from "./CarouselPreview";
+import { type PreviewCarouselResponse, isWhereGroup } from "@peek/shared-types";
+import { AlertCircle, ArrowLeft, Eye, Loader2, Save } from "lucide-react";
 import { libraryApi } from "../../api";
+import { useSaveCarousel } from "../../api/hooks/useCarousels";
+import { useConfirmDialog } from "../../hooks/useConfirmDialog";
 import {
-  SCENE_SORT_OPTIONS,
-  CAROUSEL_FILTER_DEFINITIONS,
-  buildSceneFilter,
-  carouselRulesToFilterState,
+  CAROUSEL_FIELDS,
+  carouselBody,
+  carouselEditTree,
 } from "../../utils/filterConfig";
+import {
+  type EditTree,
+  type PanelTable,
+  countRows,
+  overLimit,
+  panelTableOf,
+  panelTreeOf,
+  stateOf,
+} from "../../utils/filterFields";
+import { sortOptionsFor } from "../../utils/listQuery";
+import FilterRowsEditor from "../filter-rows/FilterRowsEditor";
+import { Button, StatusMessage } from "../ui/index";
+import CarouselPreview from "./CarouselPreview";
+import IconPickerButton from "./IconPickerButton";
+import { getCarouselIcon } from "./carouselIcons";
 
-// Simple ID generator for rule keys (doesn't need to be cryptographically secure)
-let ruleIdCounter = 0;
-const generateRuleId = () => `rule-${++ruleIdCounter}`;
+/** Why a sort the rules no longer allow is replaced, by the sort's value */
+const SORT_NEEDS: Readonly<Record<string, string>> = {
+  playlist_position: "Playlist order needs one playlist rule",
+  scene_index: "Scene Number needs a collection rule",
+};
 
-interface CarouselRule {
-  id: string;
-  filterKey: string;
-  value: unknown;
-  modifier?: string;
-  depth?: number;
+/** The scene rows a carousel offers */
+const CAROUSEL_TABLE: PanelTable = {
+  ...panelTableOf("scene"),
+  rows: CAROUSEL_FIELDS,
+};
+
+/** Why a locked carousel's rules show read-only */
+const LOCKED_NOTE =
+  "These rules were saved by an older version and pick fixed scenes; they can't be edited here";
+
+/** Where the builder goes back to: the carousel list, under Settings, User Preferences, Navigation */
+const SETTINGS = "/settings?section=user&tab=navigation";
+
+/** What a save sends, as compared for unsaved changes */
+interface Draft {
+  readonly title: string;
+  readonly icon: string;
+  readonly rules: string;
+  readonly sort: string;
+  readonly direction: string;
 }
+
+const NEW_CAROUSEL = {
+  title: "",
+  icon: "Film",
+  sort: "random",
+  direction: "DESC",
+} as const;
 
 /**
  * CarouselBuilder Component
- * Full-page editor for creating and editing custom carousels.
- * Supports adding filter rules, previewing results, and saving.
+ * Full-page editor for creating and editing custom carousels: rules in the
+ * row editor (root rows and "Match any" or "Match all" groups, stored as a
+ * where tree), a preview, and a save.
  */
 const CarouselBuilder = () => {
   const navigate = useNavigate();
   const { id } = useParams();
   const isEditing = Boolean(id);
+  const saveCarousel = useSaveCarousel();
+  const { confirm, dialog } = useConfirmDialog();
 
   // Form state
-  const [title, setTitle] = useState("");
-  const [icon, setIcon] = useState("Film");
-  const [rules, setRules] = useState<CarouselRule[]>([]); // Array of rule objects
-  const [sort, setSort] = useState("random");
-  const [direction, setDirection] = useState("DESC");
+  const [title, setTitle] = useState<string>(NEW_CAROUSEL.title);
+  const [icon, setIcon] = useState<string>(NEW_CAROUSEL.icon);
+  // The rules as an editing tree, with the stored leaves no row can edit as
+  // kept rows in their containers
+  const [tree, setTree] = useState<EditTree>(() =>
+    carouselEditTree({ rules: { match: "all", rules: [] } })
+  );
+  const [sort, setSort] = useState<string>(NEW_CAROUSEL.sort);
+  const [direction, setDirection] = useState<string>(NEW_CAROUSEL.direction);
+  // The stored rules pick fixed scenes no row can hold: they show read-only,
+  // a save sends none (the server keeps them) and needs no preview
+  const [rulesLocked, setRulesLocked] = useState(false);
 
   // UI state
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [previewing, setPreviewing] = useState(false);
-  const [previewScenes, setPreviewScenes] = useState<Record<string, unknown>[] | null>(null);
+  const [previewScenes, setPreviewScenes] = useState<
+    PreviewCarouselResponse["scenes"] | null
+  >(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [previewValid, setPreviewValid] = useState(false);
+
+  // The rules a preview and a save send
+  const body = carouselBody(tree);
+  const ruleCount = countRows(tree, "scene");
+  // Over the limits, as the Advanced view refuses them: the editor's rows
+  // (a container past 20 would lose rows silently) and the groups sent
+  const refused = overLimit(ruleCount, body.rules.filter(isWhereGroup).length);
+
+  // A sort the rules do not offer (its rule was removed, or it sits in a
+  // group or under "Match any") reads as Random
+  const sortOptions = sortOptionsFor(
+    "scene",
+    stateOf("scene", panelTreeOf(tree).tree)
+  );
+  const effectiveSort = sortOptions.some((option) => option.value === sort)
+    ? sort
+    : "random";
+
+  // What the carousel was when loaded (or a new one), for unsaved changes
+  const draft: Draft = {
+    title: title.trim(),
+    icon,
+    rules: JSON.stringify(body),
+    sort: effectiveSort,
+    direction,
+  };
+  const [base, setBase] = useState<Draft | null>(() =>
+    isEditing ? null : draft
+  );
+  const dirty =
+    base !== null &&
+    (Object.keys(draft) as (keyof Draft)[]).some(
+      (key) => draft[key] !== base[key]
+    );
 
   // Load existing carousel if editing
   useEffect(() => {
@@ -68,17 +140,26 @@ const CarouselBuilder = () => {
     const loadCarousel = async () => {
       setLoading(true);
       try {
-        const result = await libraryApi.getCarousel(id) as Record<string, unknown>;
-        const carousel = result.carousel as Record<string, unknown>;
-        setTitle(carousel.title as string);
-        setIcon(carousel.icon as string);
-        setSort(carousel.sort as string);
-        setDirection(carousel.direction as string);
-
-        // Convert stored rules back to editable format
-        const filterState = carouselRulesToFilterState(carousel.rules as Record<string, unknown>[]);
-        const ruleList = convertFilterStateToRules(filterState);
-        setRules(ruleList);
+        const { carousel } = await libraryApi.getCarousel(id);
+        const loaded = carouselEditTree(carousel);
+        setTitle(carousel.title);
+        setIcon(carousel.icon);
+        setSort(carousel.sort);
+        setDirection(carousel.direction);
+        setTree(loaded);
+        setRulesLocked(carousel.rulesLocked);
+        // The stored sort as the rules offer it, as the draft reads it
+        const offered = sortOptionsFor(
+          "scene",
+          stateOf("scene", panelTreeOf(loaded).tree)
+        ).some((option) => option.value === carousel.sort);
+        setBase({
+          title: carousel.title.trim(),
+          icon: carousel.icon,
+          rules: JSON.stringify(carouselBody(loaded)),
+          sort: offered ? carousel.sort : "random",
+          direction: carousel.direction,
+        });
       } catch (err) {
         setError((err as Error).message || "Failed to load carousel");
       } finally {
@@ -86,214 +167,41 @@ const CarouselBuilder = () => {
       }
     };
 
-    loadCarousel();
+    void loadCarousel();
   }, [id, isEditing]);
 
-  /**
-   * Convert filter state (flat object) to rule array for the editor
-   */
-  const convertFilterStateToRules = (filterState: Record<string, unknown>): CarouselRule[] => {
-    const ruleList: CarouselRule[] = [];
-
-    // Entity selection rules
-    if ((filterState.performerIds as unknown[] | undefined)?.length) {
-      ruleList.push({
-        id: generateRuleId(),
-        filterKey: "performerIds",
-        value: filterState.performerIds,
-        modifier: (filterState.performerIdsModifier as string) || "INCLUDES",
-      });
-    }
-
-    if (filterState.studioId) {
-      ruleList.push({
-        id: generateRuleId(),
-        filterKey: "studioId",
-        value: filterState.studioId,
-        depth: filterState.studioIdDepth as number | undefined,
-      });
-    }
-
-    if ((filterState.tagIds as unknown[] | undefined)?.length) {
-      ruleList.push({
-        id: generateRuleId(),
-        filterKey: "tagIds",
-        value: filterState.tagIds,
-        modifier: (filterState.tagIdsModifier as string) || "INCLUDES_ALL",
-        depth: filterState.tagIdsDepth as number | undefined,
-      });
-    }
-
-    if ((filterState.groupIds as unknown[] | undefined)?.length) {
-      ruleList.push({
-        id: generateRuleId(),
-        filterKey: "groupIds",
-        value: filterState.groupIds,
-        modifier: (filterState.groupIdsModifier as string) || "INCLUDES",
-      });
-    }
-
-    // Range rules
-    ["rating", "oCount", "duration", "playCount", "playDuration", "performerCount", "performerAge", "bitrate"].forEach(
-      (key) => {
-        const val = filterState[key] as Record<string, unknown> | undefined;
-        if (val?.min !== undefined || val?.max !== undefined) {
-          ruleList.push({
-            id: generateRuleId(),
-            filterKey: key,
-            value: filterState[key],
-          });
-        }
-      }
-    );
-
-    // Boolean rules
-    ["favorite", "performerFavorite", "studioFavorite", "tagFavorite"].forEach((key) => {
-      if (filterState[key] === true) {
-        ruleList.push({
-          id: generateRuleId(),
-          filterKey: key,
-          value: true,
-        });
-      }
-    });
-
-    // Resolution
-    if (filterState.resolution) {
-      ruleList.push({
-        id: generateRuleId(),
-        filterKey: "resolution",
-        value: filterState.resolution,
-        modifier: (filterState.resolutionModifier as string) || "EQUALS",
-      });
-    }
-
-    // Text rules
-    ["title", "details"].forEach((key) => {
-      if (filterState[key]) {
-        ruleList.push({
-          id: generateRuleId(),
-          filterKey: key,
-          value: filterState[key],
-        });
-      }
-    });
-
-    // Date range rules
-    ["date", "createdAt", "lastPlayedAt"].forEach((key) => {
-      const val = filterState[key] as Record<string, unknown> | undefined;
-      if (val?.min || val?.max) {
-        ruleList.push({
-          id: generateRuleId(),
-          filterKey: key,
-          value: filterState[key],
-        });
-      }
-    });
-
-    return ruleList;
-  };
-
-  /**
-   * Convert rule array back to filter state for buildSceneFilter
-   */
-  const convertRulesToFilterState = useCallback(() => {
-    const filterState: Record<string, unknown> = {};
-
-    rules.forEach((rule) => {
-      const def = CAROUSEL_FILTER_DEFINITIONS.find((d) => d.key === rule.filterKey);
-      if (!def) return;
-
-      switch (def.type) {
-        case "searchable-select":
-          if (def.multi) {
-            filterState[rule.filterKey] = rule.value || [];
-            if (def.modifierOptions && rule.modifier) {
-              filterState[`${rule.filterKey}Modifier`] = rule.modifier;
-            }
-          } else {
-            filterState[rule.filterKey] = rule.value || "";
-          }
-          if (def.supportsHierarchy && rule.depth !== undefined) {
-            filterState[`${rule.filterKey}Depth`] = rule.depth;
-          }
-          break;
-
-        case "range":
-          filterState[rule.filterKey] = rule.value || {};
-          break;
-
-        case "checkbox":
-          filterState[rule.filterKey] = rule.value === true;
-          break;
-
-        case "select":
-          filterState[rule.filterKey] = rule.value || "";
-          if (def.modifierOptions && rule.modifier) {
-            filterState[`${rule.filterKey}Modifier`] = rule.modifier;
-          }
-          break;
-
-        case "text":
-          filterState[rule.filterKey] = rule.value || "";
-          break;
-
-        case "date-range":
-          filterState[rule.filterKey] = rule.value || {};
-          break;
-      }
-    });
-
-    return filterState;
-  }, [rules]);
-
-  /**
-   * Add a new rule
-   */
-  const addRule = () => {
-    const usedKeys = new Set(rules.map((r) => r.filterKey));
-    const availableFilter = CAROUSEL_FILTER_DEFINITIONS.find((f) => !usedKeys.has(f.key));
-
-    if (!availableFilter) {
-      return; // All filters already used
-    }
-
-    const newRule = {
-      id: generateRuleId(),
-      filterKey: availableFilter.key,
-      value: availableFilter.type === "checkbox" ? true : availableFilter.multi ? [] : "",
-      modifier: availableFilter.defaultModifier,
-    };
-
-    setRules([...rules, newRule]);
+  /** A rule changed: the preview is stale */
+  const changeTree = (next: EditTree) => {
+    setTree(next);
     setPreviewValid(false);
     setPreviewScenes(null);
   };
 
-  /**
-   * Update a rule
-   */
-  const updateRule = (ruleId: string, updates: Partial<CarouselRule>) => {
-    setRules(rules.map((r) => (r.id === ruleId ? { ...r, ...updates } : r)));
-    setPreviewValid(false);
-    setPreviewScenes(null);
-  };
-
-  /**
-   * Remove a rule
-   */
-  const removeRule = (ruleId: string) => {
-    setRules(rules.filter((r) => r.id !== ruleId));
-    setPreviewValid(false);
-    setPreviewScenes(null);
+  /** Back to Settings; with unsaved changes, only once the user agrees */
+  const handleBack = async () => {
+    if (dirty) {
+      const discard = await confirm({
+        title: "Discard changes?",
+        message: "Your changes to this carousel are not saved.",
+        confirmText: "Discard",
+        cancelText: "Keep editing",
+        confirmStyle: "danger",
+      });
+      if (!discard) return;
+    }
+    void navigate(SETTINGS);
   };
 
   /**
    * Preview the carousel results
    */
   const handlePreview = async () => {
-    if (rules.length === 0) {
+    if (ruleCount === 0) {
       setPreviewError("Add at least one rule to preview");
+      return;
+    }
+    if (refused !== null) {
+      setPreviewError(refused);
       return;
     }
 
@@ -301,16 +209,13 @@ const CarouselBuilder = () => {
     setPreviewError(null);
 
     try {
-      const filterState = convertRulesToFilterState();
-      const apiRules = buildSceneFilter(filterState);
-
       const result = await libraryApi.previewCarousel({
-        rules: apiRules,
-        sort,
+        rules: body,
+        sort: effectiveSort,
         direction,
-      }) as Record<string, unknown>;
+      });
 
-      setPreviewScenes(result.scenes as Record<string, unknown>[]);
+      setPreviewScenes(result.scenes);
       setPreviewValid(true);
       setPreviewError(null);
     } catch (err) {
@@ -330,12 +235,17 @@ const CarouselBuilder = () => {
       return;
     }
 
-    if (rules.length === 0) {
+    if (!rulesLocked && ruleCount === 0) {
       setError("Add at least one rule");
       return;
     }
 
-    if (!previewValid) {
+    if (!rulesLocked && refused !== null) {
+      setError(refused);
+      return;
+    }
+
+    if (!rulesLocked && !previewValid) {
       setError("Preview must succeed before saving");
       return;
     }
@@ -344,24 +254,24 @@ const CarouselBuilder = () => {
     setError(null);
 
     try {
-      const filterState = convertRulesToFilterState();
-      const apiRules = buildSceneFilter(filterState);
-
-      const carouselData = {
+      const parts = {
         title: title.trim(),
         icon,
-        rules: apiRules,
-        sort,
+        sort: effectiveSort,
         direction,
       };
 
-      if (isEditing) {
-        await libraryApi.updateCarousel(id!, carouselData);
-      } else {
-        await libraryApi.createCarousel(carouselData);
-      }
+      // Home's list and every carousel's scenes are asked for again. A
+      // locked carousel sends no rules: the server keeps the stored ones
+      await saveCarousel.mutateAsync(
+        id
+          ? { id, data: rulesLocked ? parts : { ...parts, rules: body } }
+          : { data: { ...parts, rules: body } }
+      );
 
-      navigate("/settings?section=user&tab=customization");
+      // Saved: nothing is unsaved any more
+      setBase(draft);
+      void navigate(SETTINGS);
     } catch (err) {
       setError((err as Error).message || "Failed to save carousel");
     } finally {
@@ -369,21 +279,27 @@ const CarouselBuilder = () => {
     }
   };
 
-  const IconComponent = (LucideIcons as unknown as Record<string, LucideIcon>)[icon] || LucideIcons.Film;
-  const canSave = title.trim() && rules.length > 0 && previewValid;
-  const usedFilterKeys = new Set(rules.map((r) => r.filterKey));
-  const hasMoreFilters = CAROUSEL_FILTER_DEFINITIONS.some((f) => !usedFilterKeys.has(f.key));
+  const IconComponent = getCarouselIcon(icon);
+  const canSave =
+    title.trim() &&
+    (rulesLocked || (ruleCount > 0 && refused === null && previewValid));
 
   if (loading) {
     return (
       <div className="flex items-center justify-center min-h-screen">
-        <Loader2 className="w-8 h-8 animate-spin" style={{ color: "var(--accent-primary)" }} />
+        <Loader2
+          className="w-8 h-8 animate-spin"
+          style={{ color: "var(--accent-primary)" }}
+        />
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen" style={{ backgroundColor: "var(--bg-primary)" }}>
+    <div
+      className="min-h-screen"
+      style={{ backgroundColor: "var(--bg-primary)" }}
+    >
       {/* Header */}
       <div
         className="sticky top-0 z-10 border-b px-4 py-3"
@@ -394,28 +310,49 @@ const CarouselBuilder = () => {
       >
         <div className="max-w-4xl mx-auto flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <Button variant="secondary" onClick={() => navigate("/settings?section=user&tab=customization")} icon={<ArrowLeft className="w-4 h-4" />}>
+            <Button
+              variant="secondary"
+              onClick={() => void handleBack()}
+              icon={<ArrowLeft className="w-4 h-4" />}
+            >
               Back
             </Button>
-            <h1 className="text-lg font-semibold" style={{ color: "var(--text-primary)" }}>
+            <h1
+              className="text-lg font-semibold"
+              style={{ color: "var(--text-primary)" }}
+            >
               {isEditing ? "Edit Carousel" : "Create Carousel"}
             </h1>
           </div>
 
           <div className="flex items-center gap-2">
-            <Button
-              variant="secondary"
-              onClick={handlePreview}
-              disabled={previewing || rules.length === 0}
-              icon={previewing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Eye className="w-4 h-4" />}
-            >
-              Preview
-            </Button>
+            {!rulesLocked && (
+              <Button
+                variant="secondary"
+                onClick={() => void handlePreview()}
+                disabled={previewing || ruleCount === 0 || refused !== null}
+                icon={
+                  previewing ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Eye className="w-4 h-4" />
+                  )
+                }
+              >
+                Preview
+              </Button>
+            )}
             <Button
               variant="primary"
-              onClick={handleSave}
+              onClick={() => void handleSave()}
               disabled={!canSave || saving}
-              icon={saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+              icon={
+                saving ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Save className="w-4 h-4" />
+                )
+              }
             >
               {isEditing ? "Update" : "Save"}
             </Button>
@@ -448,7 +385,10 @@ const CarouselBuilder = () => {
             borderColor: "var(--border-color)",
           }}
         >
-          <h2 className="text-sm font-semibold" style={{ color: "var(--text-secondary)" }}>
+          <h2
+            className="text-sm font-semibold"
+            style={{ color: "var(--text-secondary)" }}
+          >
             Carousel Details
           </h2>
 
@@ -458,12 +398,18 @@ const CarouselBuilder = () => {
               className="flex-shrink-0 w-14 h-14 rounded-lg flex items-center justify-center"
               style={{ backgroundColor: "var(--bg-secondary)" }}
             >
-              <IconComponent className="w-7 h-7" style={{ color: "var(--accent-primary)" }} />
+              <IconComponent
+                className="w-7 h-7"
+                style={{ color: "var(--accent-primary)" }}
+              />
             </div>
 
             {/* Title Input */}
             <div className="flex-1 space-y-2">
-              <label className="block text-sm font-medium" style={{ color: "var(--text-primary)" }}>
+              <label
+                className="block text-sm font-medium"
+                style={{ color: "var(--text-primary)" }}
+              >
                 Title
               </label>
               <input
@@ -493,46 +439,34 @@ const CarouselBuilder = () => {
             borderColor: "var(--border-color)",
           }}
         >
-          <div className="flex items-center justify-between">
-            <h2 className="text-sm font-semibold" style={{ color: "var(--text-secondary)" }}>
-              Filter Rules (ALL must match)
-            </h2>
-            <span className="text-xs" style={{ color: "var(--text-muted)" }}>
-              {rules.length} rule{rules.length !== 1 ? "s" : ""}
-            </span>
-          </div>
-
-          {/* Rule List */}
-          <div className="space-y-3">
-            {rules.map((rule) => (
-              <RuleEditor
-                key={rule.id}
-                rule={rule}
-                usedFilterKeys={usedFilterKeys}
-                onChange={(updates) => updateRule(rule.id, updates)}
-                onRemove={() => removeRule(rule.id)}
-              />
-            ))}
-
-            {rules.length === 0 && (
-              <div
-                className="text-center py-8 text-sm"
-                style={{ color: "var(--text-secondary)" }}
-              >
-                No rules added yet. Click &quot;Add Rule&quot; to get started.
-              </div>
-            )}
-          </div>
-
-          {/* Add Rule Button */}
-          <Button
-            variant="secondary"
-            onClick={addRule}
-            disabled={!hasMoreFilters}
-            icon={<Plus className="w-4 h-4" />}
+          <h2
+            className="text-sm font-semibold"
+            style={{ color: "var(--text-secondary)" }}
           >
-            Add Rule
-          </Button>
+            Filter Rules
+          </h2>
+
+          {rulesLocked && (
+            <StatusMessage variant="info" title={null} message={LOCKED_NOTE} />
+          )}
+
+          <fieldset
+            disabled={rulesLocked}
+            inert={rulesLocked}
+            className="m-0 p-0 border-0 min-w-0"
+          >
+            <FilterRowsEditor
+              kind="scene"
+              table={CAROUSEL_TABLE}
+              tree={tree}
+              onChange={rulesLocked ? () => undefined : changeTree}
+              allowGroups
+              pickFromAll
+            />
+          </fieldset>
+          {!rulesLocked && refused !== null && (
+            <StatusMessage variant="info" title={null} message={refused} />
+          )}
         </div>
 
         {/* Sort Options */}
@@ -543,17 +477,25 @@ const CarouselBuilder = () => {
             borderColor: "var(--border-color)",
           }}
         >
-          <h2 className="text-sm font-semibold" style={{ color: "var(--text-secondary)" }}>
+          <h2
+            className="text-sm font-semibold"
+            style={{ color: "var(--text-secondary)" }}
+          >
             Sort Order
           </h2>
 
           <div className="flex flex-wrap gap-4">
             <div className="space-y-1">
-              <label className="block text-xs" style={{ color: "var(--text-muted)" }}>
+              <label
+                htmlFor="carousel-sort"
+                className="block text-xs"
+                style={{ color: "var(--text-muted)" }}
+              >
                 Sort By
               </label>
               <select
-                value={sort}
+                id="carousel-sort"
+                value={effectiveSort}
                 onChange={(e) => {
                   setSort(e.target.value);
                   setPreviewValid(false);
@@ -566,7 +508,7 @@ const CarouselBuilder = () => {
                   color: "var(--text-primary)",
                 }}
               >
-                {SCENE_SORT_OPTIONS.map((opt) => (
+                {sortOptions.map((opt) => (
                   <option key={opt.value} value={opt.value}>
                     {opt.label}
                   </option>
@@ -575,7 +517,10 @@ const CarouselBuilder = () => {
             </div>
 
             <div className="space-y-1">
-              <label className="block text-xs" style={{ color: "var(--text-muted)" }}>
+              <label
+                className="block text-xs"
+                style={{ color: "var(--text-muted)" }}
+              >
                 Direction
               </label>
               <select
@@ -597,23 +542,38 @@ const CarouselBuilder = () => {
               </select>
             </div>
           </div>
+
+          {effectiveSort !== sort && (
+            <StatusMessage
+              variant="info"
+              title={null}
+              message={`${SORT_NEEDS[sort] ?? "That sort is not available with these rules"}; sorted by Random`}
+            />
+          )}
         </div>
 
-        {/* Preview Section */}
-        <CarouselPreview
-          scenes={previewScenes as React.ComponentProps<typeof CarouselPreview>["scenes"]}
-          error={previewError}
-          loading={previewing}
-          onPreview={handlePreview}
-        />
+        {/* Preview Section: a locked carousel's rules cannot be sent to preview */}
+        {!rulesLocked && (
+          <CarouselPreview
+            scenes={previewScenes}
+            error={previewError}
+            loading={previewing}
+            onPreview={() => void handlePreview()}
+          />
+        )}
 
         {/* Save Hint */}
-        {!previewValid && rules.length > 0 && (
-          <p className="text-center text-sm" style={{ color: "var(--text-muted)" }}>
+        {!rulesLocked && !previewValid && ruleCount > 0 && (
+          <p
+            className="text-center text-sm"
+            style={{ color: "var(--text-muted)" }}
+          >
             Preview your carousel to enable saving
           </p>
         )}
       </div>
+
+      {dialog}
     </div>
   );
 };

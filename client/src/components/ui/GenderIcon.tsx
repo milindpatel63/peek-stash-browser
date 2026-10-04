@@ -69,6 +69,8 @@ const GenderIcon = ({ gender, size = 24, className = "" }: Props) => {
           color: "#FFF430", // Yellow from non-binary flag
           label: "Non-Binary",
         };
+      case null:
+      case undefined:
       default:
         // Fallback for unknown or null gender
         return {
@@ -85,12 +87,12 @@ const GenderIcon = ({ gender, size = 24, className = "" }: Props) => {
   // Custom icons (IntersexIcon, NonBinaryIcon) don't accept aria-label/title
   // Wrap all icons uniformly to avoid type narrowing issues
   return (
-    <span aria-label={config.label} title={config.label} className="inline-flex">
-      <Icon
-        size={size}
-        color={config.color}
-        className={className}
-      />
+    <span
+      aria-label={config.label}
+      title={config.label}
+      className="inline-flex"
+    >
+      <Icon size={size} color={config.color} className={className} />
     </span>
   );
 };

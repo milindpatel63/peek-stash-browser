@@ -1,6 +1,12 @@
-import { describe, it, expect, beforeAll } from "vitest";
-import { adminClient } from "../helpers/testClient.js";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { TEST_ADMIN } from "../fixtures/testEntities.js";
+import {
+  adminClient,
+  findTestInstanceId,
+  readInstanceSelection,
+  restoreInstanceSelection,
+  setInstanceSelection,
+} from "../helpers/testClient.js";
 
 interface UserSettings {
   settings: {
@@ -10,7 +16,8 @@ interface UserSettings {
     carouselPreferences: unknown[];
     navPreferences: unknown[];
     tableColumnDefaults: Record<string, unknown>;
-    cardDisplaySettings: Record<string, CardDisplayEntitySettings>;
+    /** The API answers null when nothing is stored */
+    cardDisplaySettings: Record<string, CardDisplayEntitySettings> | null;
   };
 }
 
@@ -24,13 +31,29 @@ interface CardDisplayEntitySettings {
 }
 
 describe("User Settings API - cardDisplaySettings", () => {
+  /** The shared admin's card settings before this file, put back after it */
+  let savedCardDisplaySettings:
+    | UserSettings["settings"]["cardDisplaySettings"]
+    | null = null;
+
   beforeAll(async () => {
     await adminClient.login(TEST_ADMIN.username, TEST_ADMIN.password);
+    const current = await adminClient.get<UserSettings>("/api/user/settings");
+    expect(current.ok).toBe(true);
+    savedCardDisplaySettings = current.data.settings.cardDisplaySettings;
+  });
+
+  afterAll(async () => {
+    const restored = await adminClient.put("/api/user/settings", {
+      cardDisplaySettings: savedCardDisplaySettings,
+    });
+    expect(restored.ok).toBe(true);
   });
 
   describe("GET /api/user/settings", () => {
     it("should return cardDisplaySettings in response", async () => {
-      const response = await adminClient.get<UserSettings>("/api/user/settings");
+      const response =
+        await adminClient.get<UserSettings>("/api/user/settings");
 
       expect(response.ok).toBe(true);
       expect(response.status).toBe(200);
@@ -63,7 +86,7 @@ describe("User Settings API - cardDisplaySettings", () => {
       expect(response.ok).toBe(true);
       expect(response.status).toBe(200);
       expect(response.data.settings.cardDisplaySettings).toBeDefined();
-      expect(response.data.settings.cardDisplaySettings.scene).toEqual(
+      expect(response.data.settings.cardDisplaySettings?.scene).toEqual(
         newSettings.cardDisplaySettings.scene
       );
     });
@@ -96,10 +119,10 @@ describe("User Settings API - cardDisplaySettings", () => {
 
       expect(response.ok).toBe(true);
       expect(response.status).toBe(200);
-      expect(response.data.settings.cardDisplaySettings.scene).toEqual(
+      expect(response.data.settings.cardDisplaySettings?.scene).toEqual(
         newSettings.cardDisplaySettings.scene
       );
-      expect(response.data.settings.cardDisplaySettings.performer).toEqual(
+      expect(response.data.settings.cardDisplaySettings?.performer).toEqual(
         newSettings.cardDisplaySettings.performer
       );
     });
@@ -129,7 +152,10 @@ describe("User Settings API - cardDisplaySettings", () => {
           },
         },
       };
-      await adminClient.put<UserSettings>("/api/user/settings", initialSettings);
+      await adminClient.put<UserSettings>(
+        "/api/user/settings",
+        initialSettings
+      );
 
       // Simulating client behavior: send complete merged settings
       // (as the client would after updating only performer)
@@ -159,11 +185,11 @@ describe("User Settings API - cardDisplaySettings", () => {
 
       expect(response.ok).toBe(true);
       // Scene settings should be preserved (sent by client)
-      expect(response.data.settings.cardDisplaySettings.scene).toEqual(
+      expect(response.data.settings.cardDisplaySettings?.scene).toEqual(
         updatedSettings.cardDisplaySettings.scene
       );
       // Performer settings should be updated
-      expect(response.data.settings.cardDisplaySettings.performer).toEqual(
+      expect(response.data.settings.cardDisplaySettings?.performer).toEqual(
         updatedSettings.cardDisplaySettings.performer
       );
     });
@@ -198,7 +224,10 @@ describe("User Settings API - cardDisplaySettings", () => {
           },
         },
       };
-      await adminClient.put<UserSettings>("/api/user/settings", initialSettings);
+      await adminClient.put<UserSettings>(
+        "/api/user/settings",
+        initialSettings
+      );
 
       // Clear settings by setting to null
       const clearSettings = {
@@ -230,9 +259,78 @@ describe("User Settings API - cardDisplaySettings", () => {
       // Either is acceptable - defaults are applied client-side
       expect(
         response.data.settings.cardDisplaySettings === null ||
-        (typeof response.data.settings.cardDisplaySettings === "object" &&
-          Object.keys(response.data.settings.cardDisplaySettings).length === 0)
+          (typeof response.data.settings.cardDisplaySettings === "object" &&
+            Object.keys(response.data.settings.cardDisplaySettings).length ===
+              0)
       ).toBe(true);
     });
+  });
+});
+
+describe("User Settings API - tableColumnDefaults", () => {
+  /** The shared admin's table columns before this file, put back after it */
+  let savedTableColumns:
+    | UserSettings["settings"]["tableColumnDefaults"]
+    | null = null;
+
+  beforeAll(async () => {
+    await adminClient.login(TEST_ADMIN.username, TEST_ADMIN.password);
+    const current = await adminClient.get<UserSettings>("/api/user/settings");
+    expect(current.ok).toBe(true);
+    savedTableColumns = current.data.settings.tableColumnDefaults;
+  });
+
+  afterAll(async () => {
+    const restored = await adminClient.put("/api/user/settings", {
+      tableColumnDefaults: savedTableColumns,
+    });
+    expect(restored.ok).toBe(true);
+  });
+
+  it("a clip table columns save round-trips and keeps the scene entry", async () => {
+    const scene = { visible: ["title", "date"], order: ["date", "title"] };
+    const clip = { visible: ["title", "scene"], order: ["scene", "title"] };
+
+    const saved = await adminClient.put<UserSettings>("/api/user/settings", {
+      tableColumnDefaults: { scene, clip },
+    });
+
+    expect(saved.status).toBe(200);
+    const read = await adminClient.get<UserSettings>("/api/user/settings");
+    expect(read.data.settings.tableColumnDefaults).toEqual({ scene, clip });
+  });
+});
+
+describe("User Settings API - PUT /api/user/stash-instances", () => {
+  let instanceId: string;
+
+  beforeAll(async () => {
+    await adminClient.login(TEST_ADMIN.username, TEST_ADMIN.password);
+    instanceId = await findTestInstanceId();
+    await setInstanceSelection([instanceId]);
+  });
+
+  afterAll(restoreInstanceSelection);
+
+  it("a duplicated id saves each id once and answers 200", async () => {
+    const response = await adminClient.put<{
+      success: boolean;
+      selectedInstanceIds: string[];
+    }>("/api/user/stash-instances", { instanceIds: [instanceId, instanceId] });
+
+    expect(response.status).toBe(200);
+    expect(response.data.selectedInstanceIds).toEqual([instanceId]);
+    expect(await readInstanceSelection()).toEqual([instanceId]);
+  });
+
+  it("a non-string id answers 400 naming instanceIds and keeps the selection", async () => {
+    const response = await adminClient.put<{
+      error: string;
+      issues?: Array<{ path: string; message: string }>;
+    }>("/api/user/stash-instances", { instanceIds: [instanceId, 7] });
+
+    expect(response.status).toBe(400);
+    expect(response.data.issues?.[0]?.path).toMatch(/^instanceIds/);
+    expect(await readInstanceSelection()).toEqual([instanceId]);
   });
 });

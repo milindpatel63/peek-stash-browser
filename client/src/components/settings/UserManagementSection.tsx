@@ -1,12 +1,21 @@
 import { useEffect, useState } from "react";
-import { Users, Edit2, Trash2, Shield, Download, Share2, Plus } from "lucide-react";
-import { apiPut, getGroups, deleteGroup } from "../../api";
+import {
+  Download,
+  Edit2,
+  Plus,
+  Share2,
+  Shield,
+  Trash2,
+  Users,
+} from "lucide-react";
+import { apiPut, deleteGroup, getGroups } from "../../api";
+import { useConfirmDialog } from "../../hooks/useConfirmDialog";
 import { formatDate } from "../../utils/date";
+import { Button, Paper } from "../ui/index";
 import CreateUserModal from "./CreateUserModal";
 import GroupModal from "./GroupModal";
 import SyncFromStashModal from "./SyncFromStashModal";
 import UserEditModal from "./UserEditModal";
-import { Button, Paper } from "../ui/index";
 
 interface UserItem {
   id: number;
@@ -49,6 +58,7 @@ const UserManagementSection = ({
   const [showGroupModal, setShowGroupModal] = useState(false);
   const [editingGroup, setEditingGroup] = useState<GroupItem | null>(null);
   const [editingUser, setEditingUser] = useState<UserItem | null>(null);
+  const { confirm, dialog: confirmDialog } = useConfirmDialog();
 
   // Load groups on mount
   const loadGroups = async () => {
@@ -61,7 +71,7 @@ const UserManagementSection = ({
   };
 
   useEffect(() => {
-    loadGroups();
+    void loadGroups();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -77,30 +87,43 @@ const UserManagementSection = ({
   };
 
   const handleDeleteGroup = async (group: { id: number; name: string }) => {
-    if (!confirm(`Are you sure you want to delete the group "${group.name}"?\n\nThis will remove the group from all members but will not delete any users.`)) {
+    if (
+      !(await confirm({
+        title: "Delete group?",
+        message: `Delete the group "${group.name}"? Its members lose what it grants, but no user is deleted.`,
+        confirmText: "Delete group",
+      }))
+    ) {
       return;
     }
 
     try {
       await deleteGroup(String(group.id));
       onMessage(`Group "${group.name}" deleted successfully`);
-      loadGroups();
+      void loadGroups();
       onUsersChanged(); // Refresh users to update their group badges
     } catch (err) {
       onError((err as Error).message || "Failed to delete group");
     }
   };
 
-  const handleGroupModalClose = () => {
+  // Member edits save at once, so a Cancel after one still reloads
+  const handleGroupModalClose = (wrote: boolean) => {
     setShowGroupModal(false);
     setEditingGroup(null);
+    if (wrote) {
+      void loadGroups();
+      onUsersChanged(); // Refresh users to update their group badges
+    }
   };
 
   const handleGroupModalSave = () => {
     setShowGroupModal(false);
     setEditingGroup(null);
-    onMessage(editingGroup ? "Group updated successfully" : "Group created successfully");
-    loadGroups();
+    onMessage(
+      editingGroup ? "Group updated successfully" : "Group created successfully"
+    );
+    void loadGroups();
     onUsersChanged(); // Refresh users to update their group badges
   };
 
@@ -113,8 +136,8 @@ const UserManagementSection = ({
           key="share"
           className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs"
           style={{
-            backgroundColor: "rgba(59, 130, 246, 0.1)",
-            color: "rgb(59, 130, 246)",
+            backgroundColor: "var(--status-info-bg)",
+            color: "var(--status-info)",
           }}
         >
           <Share2 size={12} />
@@ -129,8 +152,8 @@ const UserManagementSection = ({
           key="download-files"
           className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs"
           style={{
-            backgroundColor: "rgba(34, 197, 94, 0.1)",
-            color: "rgb(34, 197, 94)",
+            backgroundColor: "var(--status-success-bg)",
+            color: "var(--status-success)",
           }}
         >
           <Download size={12} />
@@ -157,10 +180,7 @@ const UserManagementSection = ({
 
     if (badges.length === 0) {
       return (
-        <span
-          className="text-xs"
-          style={{ color: "var(--text-secondary)" }}
-        >
+        <span className="text-xs" style={{ color: "var(--text-secondary)" }}>
           No permissions
         </span>
       );
@@ -169,7 +189,11 @@ const UserManagementSection = ({
     return <div className="flex flex-wrap gap-1">{badges}</div>;
   };
 
-  const toggleSyncToStash = async (userId: number, username: string, currentSyncToStash: boolean | undefined) => {
+  const toggleSyncToStash = async (
+    userId: number,
+    username: string,
+    currentSyncToStash: boolean | undefined
+  ) => {
     const newSyncToStash = !currentSyncToStash;
 
     try {
@@ -224,7 +248,8 @@ const UserManagementSection = ({
                 className="text-sm mb-3"
                 style={{ color: "var(--text-secondary)" }}
               >
-                No groups yet. Create a group to organize users and manage permissions together.
+                No groups yet. Create a group to organize users and manage
+                permissions together.
               </p>
               <Button
                 variant="primary"
@@ -300,7 +325,10 @@ const UserManagementSection = ({
                         style={{ color: "var(--text-primary)" }}
                       >
                         <span className="inline-flex items-center gap-1">
-                          <Users size={14} style={{ color: "var(--text-secondary)" }} />
+                          <Users
+                            size={14}
+                            style={{ color: "var(--text-secondary)" }}
+                          />
                           {group.memberCount ?? 0}
                         </span>
                       </td>
@@ -321,7 +349,7 @@ const UserManagementSection = ({
                             variant="destructive"
                             size="sm"
                             icon={<Trash2 size={14} />}
-                            onClick={() => handleDeleteGroup(group)}
+                            onClick={() => void handleDeleteGroup(group)}
                           >
                             Delete
                           </Button>
@@ -456,8 +484,8 @@ const UserManagementSection = ({
                           <span
                             className="text-xs px-2 py-0.5 rounded"
                             style={{
-                              backgroundColor: "rgba(59, 130, 246, 0.1)",
-                              color: "rgb(59, 130, 246)",
+                              backgroundColor: "var(--status-info-bg)",
+                              color: "var(--status-info)",
                             }}
                           >
                             You
@@ -487,7 +515,7 @@ const UserManagementSection = ({
                         type="checkbox"
                         checked={user.syncToStash || false}
                         onChange={() =>
-                          toggleSyncToStash(
+                          void toggleSyncToStash(
                             user.id,
                             user.username,
                             user.syncToStash
@@ -512,8 +540,8 @@ const UserManagementSection = ({
                               key={group.id}
                               className="text-xs px-2 py-0.5 rounded"
                               style={{
-                                backgroundColor: "rgba(59, 130, 246, 0.1)",
-                                color: "rgb(59, 130, 246)",
+                                backgroundColor: "var(--status-info-bg)",
+                                color: "var(--status-info)",
                               }}
                             >
                               {group.name}
@@ -565,6 +593,8 @@ const UserManagementSection = ({
       </Paper>
 
       {/* Modals */}
+      {confirmDialog}
+
       {showCreateModal && (
         <CreateUserModal
           onClose={() => setShowCreateModal(false)}
@@ -582,8 +612,12 @@ const UserManagementSection = ({
             setShowSyncModal(false);
             setSyncTargetUser(null);
           }}
-          onSyncComplete={(username) => {
-            onMessage(`Successfully synced data from Stash for ${username}!`);
+          onSyncComplete={(username, { partial, failedInstances }) => {
+            onMessage(
+              partial
+                ? `Synced from Stash for ${username}, except: ${failedInstances.join(", ")}`
+                : `Synced from Stash for ${username}`
+            );
           }}
         />
       )}
@@ -604,11 +638,15 @@ const UserManagementSection = ({
           groups={groups}
           currentUser={currentUser}
           onClose={() => setEditingUser(null)}
-          onSave={() => {
-            setEditingUser(null);
-            onMessage(`User "${editingUser.username}" updated successfully`);
+          onChanged={() => {
+            // Each change was saved as it was made: reload the badges and counts
             onUsersChanged();
-            loadGroups();
+            void loadGroups();
+          }}
+          onDeleted={(username) => {
+            onMessage(`User "${username}" deleted`);
+            onUsersChanged();
+            void loadGroups();
           }}
           onMessage={onMessage}
           onError={onError}

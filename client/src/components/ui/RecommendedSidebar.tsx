@@ -1,63 +1,55 @@
-import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { apiGet } from "../../api";
-import { getSceneTitle } from "../../utils/format";
-import { useConfig } from "../../contexts/ConfigContext";
-import { getEntityPath } from "../../utils/entityLinks";
-import { useLazyLoad } from "./CardComponents";
 import type { NormalizedScene } from "@peek/shared-types";
+import { isLibraryInitializing } from "../../api/hooks/useLibraryReady";
+import { useSimilarScenes } from "../../api/hooks/useScenes";
+import { useConfig } from "../../contexts/ConfigContext";
+import { formatDate } from "../../utils/date";
+import { getEntityPath } from "../../utils/entityLinks";
+import { formatDuration, getSceneTitle } from "../../utils/format";
+import { useLazyLoad } from "./CardComponents";
 
 /**
  * RecommendedSidebar - Compact vertical list of recommended scenes for sidebar
- * Shows 12 scenes in a scrollable vertical layout
+ * Shows the first 12 of the scene's similar scenes (page 1, the same query
+ * the Similar Scenes tab reads) in a scrollable vertical layout.
  * @param {string} sceneId - Current scene ID for fetching similar scenes
+ * @param {string} instanceId - The scene's instance
  * @param {number} maxHeight - Maximum height in pixels to match left column
  */
 interface Props {
   sceneId: string;
+  instanceId: string;
   maxHeight?: number;
 }
 
-const RecommendedSidebar = ({ sceneId, maxHeight }: Props) => {
+const RecommendedSidebar = ({ sceneId, instanceId, maxHeight }: Props) => {
   const navigate = useNavigate();
   const { hasMultipleInstances } = useConfig();
-  const [scenes, setScenes] = useState<NormalizedScene[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    const fetchRecommendedScenes = async () => {
-      try {
-        setLoading(true);
-        setError(null);
-
-        const data = await apiGet(
-          `/library/scenes/${sceneId}/similar?page=1`,
-        ) as { scenes: NormalizedScene[] };
-
-        // Only take first 12 scenes for sidebar
-        setScenes(data.scenes.slice(0, 12));
-      } catch (err) {
-        console.error("Error fetching recommended scenes:", err);
-        setError((err as Error).message || "Failed to load recommendations");
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    if (sceneId) {
-      fetchRecommendedScenes();
-    }
-  }, [sceneId]);
+  const { data, error, isPending, isError } = useSimilarScenes(
+    sceneId,
+    instanceId,
+    1
+  );
+  // Only take first 12 scenes for sidebar
+  const scenes = data?.scenes.slice(0, 12) ?? [];
+  // The library's first sync is running: loading, not failed
+  const loading = isPending || isLibraryInitializing(error);
 
   const handleSceneClick = (scene: NormalizedScene) => {
     // Navigate to scene - this will trigger auto-playlist generation from similar scenes
-    navigate(getEntityPath('scene', scene as unknown as Parameters<typeof getEntityPath>[1], hasMultipleInstances), {
-      state: {
-        scene,
-        fromPageTitle: "Recommended",
-      },
-    });
+    void navigate(
+      getEntityPath(
+        "scene",
+        scene as unknown as Parameters<typeof getEntityPath>[1],
+        hasMultipleInstances
+      ),
+      {
+        state: {
+          scene,
+          fromPageTitle: "Recommended",
+        },
+      }
+    );
     return true; // Prevent fallback navigation in SceneCard
   };
 
@@ -72,7 +64,7 @@ const RecommendedSidebar = ({ sceneId, maxHeight }: Props) => {
           Recommended
         </h3>
         <div className="space-y-3">
-          {[...Array(6)].map((_, i) => (
+          {Array.from({ length: 6 }).map((_, i) => (
             <div
               key={i}
               className="animate-pulse"
@@ -89,7 +81,7 @@ const RecommendedSidebar = ({ sceneId, maxHeight }: Props) => {
   }
 
   // Error or no results - don't show anything
-  if (error || scenes.length === 0) {
+  if (isError || scenes.length === 0) {
     return null;
   }
 
@@ -157,7 +149,7 @@ const RecommendedSidebar = ({ sceneId, maxHeight }: Props) => {
                       className="text-xs mt-0.5"
                       style={{ color: "var(--text-muted)" }}
                     >
-                      {new Date(scene.date).toLocaleDateString()}
+                      {formatDate(scene.date)}
                     </p>
                   )}
                 </div>
@@ -171,23 +163,6 @@ const RecommendedSidebar = ({ sceneId, maxHeight }: Props) => {
 };
 
 /**
- * Format duration in seconds to HH:MM:SS or MM:SS
- */
-const formatDuration = (seconds: number) => {
-  if (!seconds) return "?:??";
-  const hours = Math.floor(seconds / 3600);
-  const minutes = Math.floor((seconds % 3600) / 60);
-  const secs = Math.floor(seconds % 60);
-
-  if (hours > 0) {
-    return `${hours}:${minutes.toString().padStart(2, "0")}:${secs
-      .toString()
-      .padStart(2, "0")}`;
-  }
-  return `${minutes}:${secs.toString().padStart(2, "0")}`;
-};
-
-/**
  * SidebarThumbnail - Lazy-loaded thumbnail for sidebar items
  */
 interface SidebarThumbnailProps {
@@ -196,8 +171,15 @@ interface SidebarThumbnailProps {
   duration: number | null | undefined;
 }
 
-const SidebarThumbnail = ({ thumbnail, alt, duration }: SidebarThumbnailProps) => {
-  const [ref, shouldLoad] = useLazyLoad() as [React.RefObject<HTMLDivElement>, boolean];
+const SidebarThumbnail = ({
+  thumbnail,
+  alt,
+  duration,
+}: SidebarThumbnailProps) => {
+  const [ref, shouldLoad] = useLazyLoad() as [
+    React.RefObject<HTMLDivElement>,
+    boolean,
+  ];
 
   return (
     <div
@@ -210,17 +192,10 @@ const SidebarThumbnail = ({ thumbnail, alt, duration }: SidebarThumbnailProps) =
       }}
     >
       {shouldLoad && thumbnail ? (
-        <img
-          src={thumbnail}
-          alt={alt}
-          className="w-full h-full object-cover"
-        />
+        <img src={thumbnail} alt={alt} className="w-full h-full object-cover" />
       ) : (
         <div className="w-full h-full flex items-center justify-center">
-          <span
-            className="text-2xl"
-            style={{ color: "var(--text-secondary)" }}
-          >
+          <span className="text-2xl" style={{ color: "var(--text-secondary)" }}>
             🎬
           </span>
         </div>
@@ -235,7 +210,7 @@ const SidebarThumbnail = ({ thumbnail, alt, duration }: SidebarThumbnailProps) =
             color: "white",
           }}
         >
-          {formatDuration(duration)}
+          {duration ? formatDuration(duration) : "?:??"}
         </div>
       )}
     </div>

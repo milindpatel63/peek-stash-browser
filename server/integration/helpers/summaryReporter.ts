@@ -1,7 +1,8 @@
-import type { Reporter, File, Task } from "vitest";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import type { RunnerTask, RunnerTestFile } from "vitest";
+import type { Reporter } from "vitest/reporters";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -24,8 +25,18 @@ interface TestSummary {
   failures: FailureDetail[];
 }
 
-function collectTests(task: Task): { passed: number; failed: number; skipped: number; failures: FailureDetail[] } {
-  const result = { passed: 0, failed: 0, skipped: 0, failures: [] as FailureDetail[] };
+function collectTests(task: RunnerTask): {
+  passed: number;
+  failed: number;
+  skipped: number;
+  failures: FailureDetail[];
+} {
+  const result = {
+    passed: 0,
+    failed: 0,
+    skipped: 0,
+    failures: [] as FailureDetail[],
+  };
 
   if (task.type === "suite") {
     for (const child of task.tasks) {
@@ -35,7 +46,7 @@ function collectTests(task: Task): { passed: number; failed: number; skipped: nu
       result.skipped += childResult.skipped;
       result.failures.push(...childResult.failures);
     }
-  } else if (task.type === "test") {
+  } else {
     const state = task.result?.state;
     if (state === "pass") {
       result.passed++;
@@ -43,7 +54,7 @@ function collectTests(task: Task): { passed: number; failed: number; skipped: nu
       result.failed++;
       const errorMessage = task.result?.errors?.[0]?.message ?? "Unknown error";
       result.failures.push({
-        file: task.file?.name ?? "unknown",
+        file: task.file.name,
         test: task.name,
         error: errorMessage.slice(0, 500),
       });
@@ -62,7 +73,7 @@ export default class SummaryReporter implements Reporter {
     this.startTime = Date.now();
   }
 
-  onFinished(files?: File[]) {
+  onFinished(files?: RunnerTestFile[]) {
     const duration_ms = Date.now() - this.startTime;
     let passed = 0;
     let failed = 0;

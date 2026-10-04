@@ -1,417 +1,387 @@
+import { PLAYLIST_REPEAT_MODES } from "@peek/shared-types/api/playlist.js";
+import { PER_PAGE_MAX } from "@peek/shared-types/filters/index.js";
 import prisma from "../prisma/singleton.js";
-import { stashEntityService } from "../services/StashEntityService.js";
-import { getEntityInstanceId, getEntityInstanceIds } from "../utils/entityInstanceId.js";
-import { entityExclusionHelper } from "../services/EntityExclusionHelper.js";
-import { getPlaylistAccess, getUserGroups } from "../services/PlaylistAccessService.js";
 import { resolveUserPermissions } from "../services/PermissionService.js";
-import type { NormalizedScene } from "../types/index.js";
+import {
+  getPlaylistAccess,
+  getUserGroups,
+} from "../services/PlaylistAccessService.js";
+import {
+  appendItems,
+  countUnavailableItems,
+  duplicateVisibleItems,
+  loadPlaylistItems,
+  loadPlaylistPreviews,
+  loadPlaylistQueue,
+  moveItem,
+  playlistsHoldingScene,
+  removeUnavailableItems,
+  sortPlaylistItems,
+} from "../services/PlaylistQueryService.js";
 import type {
-  TypedAuthRequest,
-  TypedResponse,
-  ApiErrorResponse,
-  GetUserPlaylistsResponse,
-  GetPlaylistParams,
-  GetPlaylistResponse,
-  CreatePlaylistRequest,
-  CreatePlaylistResponse,
-  UpdatePlaylistParams,
-  UpdatePlaylistRequest,
-  UpdatePlaylistResponse,
-  DeletePlaylistParams,
-  DeletePlaylistResponse,
   AddSceneToPlaylistParams,
   AddSceneToPlaylistRequest,
   AddSceneToPlaylistResponse,
-  RemoveSceneFromPlaylistParams,
-  RemoveSceneFromPlaylistResponse,
-  ReorderPlaylistParams,
-  ReorderPlaylistRequest,
-  ReorderPlaylistResponse,
-  GetSharedPlaylistsResponse,
+  AddScenesToPlaylistRequest,
+  AddScenesToPlaylistResponse,
+  ApiErrorResponse,
+  CreatePlaylistRequest,
+  CreatePlaylistResponse,
+  DeletePlaylistParams,
+  DeletePlaylistResponse,
+  DuplicatePlaylistResponse,
+  GetPlaylistParams,
+  GetPlaylistQuery,
+  GetPlaylistQueueQuery,
+  GetPlaylistQueueResponse,
+  GetPlaylistResponse,
   GetPlaylistSharesResponse,
+  GetSharedPlaylistsResponse,
+  GetUserPlaylistsQuery,
+  GetUserPlaylistsResponse,
+  MovePlaylistItemParams,
+  MovePlaylistItemRequest,
+  MovePlaylistItemResponse,
+  RemovePlaylistItemsRequest,
+  RemovePlaylistItemsResponse,
+  RemoveSceneFromPlaylistParams,
+  RemoveSceneFromPlaylistQuery,
+  RemoveSceneFromPlaylistResponse,
+  RemoveUnavailableItemsResponse,
+  SortPlaylistRequest,
+  SortPlaylistResponse,
+  TypedAuthRequest,
+  TypedLibraryRequest,
+  TypedResponse,
+  UpdatePlaylistParams,
+  UpdatePlaylistRequest,
+  UpdatePlaylistResponse,
   UpdatePlaylistSharesRequest,
   UpdatePlaylistSharesResponse,
-  DuplicatePlaylistResponse,
 } from "../types/api/index.js";
-import { logger } from "../utils/logger.js";
-import { transformScene } from "../utils/stashUrlProxy.js";
-import { groupIdsByInstance } from "../utils/instanceUtils.js";
-import { stashInstanceManager } from "../services/StashInstanceManager.js";
-
-const KEY_SEP = "\0";
+import { dbWrite, dbWriteBatch, dbWriteTransaction } from "../utils/dbWrite.js";
+import type { EntityRef } from "../utils/entityRef.js";
+import {
+  parsePlaylistItemsRequest,
+  parsePlaylistQueueRequest,
+  parsePlaylistsQuery,
+  parseSortPlaylistRequest,
+} from "../utils/listRequest.js";
+import { emptyToNull } from "../utils/sqlHelpers.js";
+import { INSTANCE_ID_PATTERN } from "../utils/stashMediaPath.js";
 
 /**
- * Default user fields for scenes (when no user data is merged yet).
- * These override any values from Stash to ensure Peek user data takes precedence.
+ * A scene reference from a request: a playlist item names its scene and the
+ * scene's instance, and the server never guesses the instance. `where`
+ * names the field in the refusal.
  */
-const DEFAULT_SCENE_USER_FIELDS = {
-  rating: null,
-  rating100: null,
-  favorite: false,
-  o_counter: 0,
-  play_count: 0,
-  play_duration: 0,
-  resume_time: 0,
-  play_history: [] as string[],
-  o_history: [] as string[],
-  last_played_at: null,
-  last_o_at: null,
-};
+function parseSceneRef(
+  sceneId: unknown,
+  instanceId: unknown,
+  where = ""
+): { sceneId: string; instanceId: string } | { error: string } {
+  if (typeof sceneId !== "string" || sceneId === "") {
+    return { error: `${where}sceneId is required` };
+  }
+  if (instanceId === undefined) {
+    return { error: `${where}instanceId is required` };
+  }
+  if (typeof instanceId !== "string" || !INSTANCE_ID_PATTERN.test(instanceId)) {
+    return { error: `${where}instanceId must be an instance id` };
+  }
+  return { sceneId, instanceId };
+}
 
 /**
- * Get all playlists for current user
- * Includes first 4 items with scene preview data for thumbnail display
+ * With `containsScene`, the ids of these playlists that hold that scene;
+ * undefined when the request did not ask
+ */
+async function holdingScene(
+  playlistIds: readonly number[],
+  scene: EntityRef | undefined
+): Promise<Set<number> | undefined> {
+  return scene === undefined
+    ? undefined
+    : playlistsHoldingScene(playlistIds, scene);
+}
+
+/**
+ * Get all playlists for current user, each with the first four items and
+ * the item count the user can see (PlaylistQueryService); with
+ * `containsScene`, each says whether it holds that scene
  */
 export const getUserPlaylists = async (
-  req: TypedAuthRequest,
+  req: TypedLibraryRequest<
+    unknown,
+    Record<string, string>,
+    GetUserPlaylistsQuery
+  >,
   res: TypedResponse<GetUserPlaylistsResponse | ApiErrorResponse>
 ) => {
-  try {
-    const userId = req.user?.id;
+  const userId = req.user.id;
+  // A ValidationError (400) reaches the central error handler
+  const { containsScene } = parsePlaylistsQuery(req.query, { userId });
 
-    if (!userId) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
+  const playlists = await prisma.playlist.findMany({
+    where: {
+      userId,
+    },
+    orderBy: {
+      updatedAt: "desc",
+    },
+  });
 
-    const playlists = await prisma.playlist.findMany({
-      where: {
-        userId,
-      },
-      include: {
-        _count: {
-          select: { items: true },
-        },
-        items: {
-          orderBy: {
-            position: "asc",
-          },
-          take: 4, // Only fetch first 4 items for preview
-        },
-      },
-      orderBy: {
-        updatedAt: "desc",
-      },
-    });
+  const previews = await loadPlaylistPreviews({
+    userId,
+    allowedInstanceIds: req.allowedInstanceIds,
+    playlistIds: playlists.map((p) => p.id),
+  });
+  const holding = await holdingScene(
+    playlists.map((p) => p.id),
+    containsScene
+  );
 
-    // Fetch scene details for preview items from cache
-    const playlistsWithScenes = await Promise.all(
-      playlists.map(async (playlist) => {
-        if (playlist.items.length === 0) {
-          return playlist;
-        }
-
-        try {
-          // 1. Fetch scenes from cache with relations, grouped by instance
-          const scenesByInstance = groupIdsByInstance(
-            playlist.items,
-            (item) => item.instanceId,
-            (item) => item.sceneId,
-            stashInstanceManager.getDefaultConfig().id
-          );
-          const scenes: NormalizedScene[] = [];
-          for (const [instId, ids] of scenesByInstance) {
-            scenes.push(...await stashEntityService.getScenesByIdsWithRelations(ids, instId));
-          }
-
-          // 2. Apply user exclusions (filter out hidden/restricted scenes)
-          const visibleScenes = await entityExclusionHelper.filterExcluded(
-            scenes,
-            userId,
-            'scene'
-          );
-
-          // 3. Transform scenes to add proxy URLs
-          const transformedScenes = visibleScenes.map((s) =>
-            transformScene(s)
-          );
-
-          // Create a map of composite key to scene data (avoids cross-instance ID collisions)
-          const sceneMap = new Map(
-            transformedScenes.map((s) => [`${s.id}${KEY_SEP}${s.instanceId}`, s])
-          );
-
-          // Attach scene data to each playlist item (only paths.screenshot needed for preview)
-          const itemsWithScenes = playlist.items.map((item) => ({
-            ...item,
-            scene: sceneMap.get(`${item.sceneId}${KEY_SEP}${item.instanceId || ""}`) || null,
-          }));
-
-          return {
-            ...playlist,
-            items: itemsWithScenes,
-          };
-        } catch (cacheError) {
-          logger.error(`Error fetching scenes for playlist ${playlist.id}`, { error: cacheError instanceof Error ? cacheError.message : "Unknown error" });
-          // Return playlist without scene details if cache fails
-          return playlist;
-        }
-      })
-    );
-
-    res.json({ playlists: playlistsWithScenes });
-  } catch (error) {
-    logger.error("Error getting playlists", { error: error instanceof Error ? error.message : "Unknown error" });
-    res.status(500).json({ error: "Failed to get playlists" });
-  }
+  res.json({
+    playlists: playlists.map((playlist) => {
+      const preview = previews.get(playlist.id);
+      return {
+        ...playlist,
+        ...(holding && { containsScene: holding.has(playlist.id) }),
+        _count: { items: preview?.visibleCount ?? 0 },
+        items: preview?.items ?? [],
+      };
+    }),
+  });
 };
 
 /**
- * Get playlists shared with current user (not owned by them)
+ * Get playlists shared with current user (not owned by them), each with the
+ * first four items and the item count this user can see: their own
+ * exclusions and instances, never the owner's (invariant 10); with
+ * `containsScene`, each says whether it holds that scene
  */
 export const getSharedPlaylists = async (
-  req: TypedAuthRequest,
+  req: TypedLibraryRequest<
+    unknown,
+    Record<string, string>,
+    GetUserPlaylistsQuery
+  >,
   res: TypedResponse<GetSharedPlaylistsResponse | ApiErrorResponse>
 ) => {
-  try {
-    const userId = req.user?.id;
+  const userId = req.user.id;
+  // A ValidationError (400) reaches the central error handler
+  const { containsScene } = parsePlaylistsQuery(req.query, { userId });
 
-    if (!userId) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
-
-    // Find playlists shared with groups the user belongs to (excluding own playlists)
-    const sharedPlaylists = await prisma.playlist.findMany({
-      where: {
-        userId: { not: userId },
-        shares: {
-          some: {
-            group: {
-              members: {
-                some: { userId },
-              },
+  // Find playlists shared with groups the user belongs to (excluding own playlists)
+  const allSharedPlaylists = await prisma.playlist.findMany({
+    where: {
+      userId: { not: userId },
+      shares: {
+        some: {
+          group: {
+            members: {
+              some: { userId },
             },
           },
         },
       },
-      include: {
-        user: {
-          select: { id: true, username: true },
-        },
-        shares: {
-          where: {
-            group: {
-              members: {
-                some: { userId },
-              },
-            },
-          },
-          select: {
-            sharedAt: true,
-            group: {
-              select: { name: true },
+    },
+    include: {
+      user: {
+        select: { id: true, username: true },
+      },
+      shares: {
+        where: {
+          group: {
+            members: {
+              some: { userId },
             },
           },
         },
-        _count: {
-          select: { items: true },
-        },
-        items: {
-          orderBy: {
-            position: "asc",
+        select: {
+          sharedAt: true,
+          group: {
+            select: { name: true },
           },
-          take: 4, // Only fetch first 4 items for preview thumbnails
         },
       },
-      orderBy: { updatedAt: "desc" },
-    });
+    },
+    orderBy: { updatedAt: "desc" },
+  });
 
-    // Fetch scene details for preview items from cache
-    const playlistsWithScenes = await Promise.all(
-      sharedPlaylists.map(async (p) => {
-        let itemsWithScenes: Array<{ instanceId: string | null; sceneId: string; scene: NormalizedScene | null }> = [];
-
-        if (p.items.length > 0) {
-          try {
-            // Fetch scenes from cache with relations, grouped by instance
-            const scenesByInstance = groupIdsByInstance(
-              p.items,
-              (item) => item.instanceId,
-              (item) => item.sceneId,
-              stashInstanceManager.getDefaultConfig().id
-            );
-            const scenes: NormalizedScene[] = [];
-            for (const [instId, ids] of scenesByInstance) {
-              scenes.push(...await stashEntityService.getScenesByIdsWithRelations(ids, instId));
-            }
-
-            // Apply user exclusions (filter out hidden/restricted scenes)
-            const visibleScenes = await entityExclusionHelper.filterExcluded(
-              scenes,
-              userId,
-              'scene'
-            );
-
-            // Transform scenes to add proxy URLs
-            const transformedScenes = visibleScenes.map((s) =>
-              transformScene(s)
-            );
-
-            // Create a map of composite key to scene data (avoids cross-instance ID collisions)
-            const sceneMap = new Map(
-              transformedScenes.map((s) => [`${s.id}${KEY_SEP}${s.instanceId}`, s])
-            );
-
-            // Attach scene data to each playlist item
-            itemsWithScenes = p.items.map((item) => ({
-              instanceId: item.instanceId,
-              sceneId: item.sceneId,
-              scene: sceneMap.get(`${item.sceneId}${KEY_SEP}${item.instanceId || ""}`) || null,
-            }));
-          } catch (cacheError) {
-            logger.error(`Error fetching scenes for shared playlist ${p.id}`, { error: cacheError instanceof Error ? cacheError.message : "Unknown error" });
-          }
-        }
-
-        return {
-          id: p.id,
-          name: p.name,
-          description: p.description,
-          sceneCount: p._count.items,
-          owner: { id: p.user.id, username: p.user.username },
-          sharedViaGroups: p.shares.map((s) => s.group.name),
-          sharedAt: p.shares.length > 0
-            ? p.shares.reduce((earliest, s) =>
-                s.sharedAt < earliest ? s.sharedAt : earliest,
-              (p.shares[0] as (typeof p.shares)[number]).sharedAt).toISOString()
-            : new Date().toISOString(),
-          items: itemsWithScenes,
-        };
-      })
+  // A share counts only while its owner may share: each distinct owner is
+  // resolved once, and the shares of one who may not stay stored but unseen
+  const mayShare = new Map<number, boolean>();
+  for (const ownerId of new Set(allSharedPlaylists.map((p) => p.userId))) {
+    mayShare.set(
+      ownerId,
+      Boolean((await resolveUserPermissions(ownerId))?.canShare)
     );
-
-    res.json({ playlists: playlistsWithScenes });
-  } catch (error) {
-    logger.error("Error getting shared playlists", { error: error instanceof Error ? error.message : "Unknown error" });
-    res.status(500).json({ error: "Failed to get shared playlists" });
   }
+  const sharedPlaylists = allSharedPlaylists.filter((p) =>
+    mayShare.get(p.userId)
+  );
+
+  const previews = await loadPlaylistPreviews({
+    userId,
+    allowedInstanceIds: req.allowedInstanceIds,
+    playlistIds: sharedPlaylists.map((p) => p.id),
+  });
+  const holding = await holdingScene(
+    sharedPlaylists.map((p) => p.id),
+    containsScene
+  );
+
+  res.json({
+    playlists: sharedPlaylists.map((p) => {
+      const preview = previews.get(p.id);
+      return {
+        ...(holding && { containsScene: holding.has(p.id) }),
+        id: p.id,
+        name: p.name,
+        description: p.description,
+        sceneCount: preview?.visibleCount ?? 0,
+        owner: { id: p.user.id, username: p.user.username },
+        sharedViaGroups: p.shares.map((s) => s.group.name),
+        sharedAt:
+          p.shares.length > 0
+            ? p.shares
+                .reduce(
+                  (earliest, s) =>
+                    s.sharedAt < earliest ? s.sharedAt : earliest,
+                  (p.shares[0] as (typeof p.shares)[number]).sharedAt
+                )
+                .toISOString()
+            : new Date().toISOString(),
+        items: preview?.items ?? [],
+      };
+    }),
+  });
 };
 
 /**
- * Get single playlist with items and scene details from cache
+ * Get single playlist with one page of the items this user can see, with
+ * their scenes, in the request's sort (PlaylistQueryService
+ * .loadPlaylistItems; page 1 of 50 when the request names none). The answer
+ * names the sort it read, a random one as `random_<seed>`. The owner also
+ * gets how many items they cannot play; a recipient is told nothing about
+ * those (0).
  */
 export const getPlaylist = async (
-  req: TypedAuthRequest<unknown, GetPlaylistParams>,
+  req: TypedLibraryRequest<unknown, GetPlaylistParams, GetPlaylistQuery>,
   res: TypedResponse<GetPlaylistResponse | ApiErrorResponse>
 ) => {
-  try {
-    const userId = req.user?.id;
-    const playlistId = parseInt(req.params.id);
+  const userId = req.user.id;
+  // A ValidationError (400) reaches the central error handler
+  const request = parsePlaylistItemsRequest(req.query, { userId });
 
-    if (!userId) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
+  const playlistId = parseInt(req.params.id);
 
-    if (isNaN(playlistId)) {
-      return res.status(400).json({ error: "Invalid playlist ID" });
-    }
-
-    // Check access level
-    const access = await getPlaylistAccess(playlistId, userId);
-    if (access.level === "none") {
-      return res.status(404).json({ error: "Playlist not found" });
-    }
-
-    const playlist = await prisma.playlist.findUnique({
-      where: { id: playlistId },
-      include: {
-        items: {
-          orderBy: {
-            position: "asc",
-          },
-        },
-      },
-    });
-
-    if (!playlist) {
-      return res.status(404).json({ error: "Playlist not found" });
-    }
-
-    // Fetch scene details from cache for all items
-    if (playlist.items.length > 0) {
-      try {
-        // 1. Fetch scenes from cache with relations, grouped by instance
-        const scenesByInstance = groupIdsByInstance(
-          playlist.items,
-          (item) => item.instanceId,
-          (item) => item.sceneId,
-          stashInstanceManager.getDefaultConfig().id
-        );
-        const scenes: NormalizedScene[] = [];
-        for (const [instId, ids] of scenesByInstance) {
-          scenes.push(...await stashEntityService.getScenesByIdsWithRelations(ids, instId));
-        }
-
-        // 2. Apply user exclusions (filter out hidden/restricted scenes)
-        const visibleScenes = await entityExclusionHelper.filterExcluded(
-          scenes,
-          userId,
-          'scene'
-        );
-
-        // 3. Reset user-specific fields to defaults before merging Peek user data
-        const scenesWithDefaults = visibleScenes.map((s) => ({
-          ...s,
-          ...DEFAULT_SCENE_USER_FIELDS,
-        }));
-
-        // 4. Merge with user's personal data (WatchHistory + SceneRating)
-        const { mergeScenesWithUserData } = await import("./library/scenes.js");
-        // Type assertion safe: scenes from cache are compatible with Normalized type structure
-        // Type assertion: cached scenes have o_history as string[] (from DB) vs Date[] in NormalizedScene
-        const scenesWithUserHistory = await mergeScenesWithUserData(
-          scenesWithDefaults as unknown as NormalizedScene[],
-          userId
-        );
-
-        // 5. Transform paths for proxy URLs
-        const transformedScenes = scenesWithUserHistory.map((s) =>
-          transformScene(s)
-        );
-
-        // Create a map of composite key to scene data (avoids cross-instance ID collisions)
-        const sceneMap = new Map(
-          transformedScenes.map((s) => [`${s.id}${KEY_SEP}${s.instanceId}`, s])
-        );
-
-        // Attach scene data to each playlist item
-        // Note: Items with restricted/hidden scenes will have scene: null
-        const itemsWithScenes = playlist.items.map((item) => ({
-          ...item,
-          scene: sceneMap.get(`${item.sceneId}${KEY_SEP}${item.instanceId || ""}`) || null,
-        }));
-
-        res.json({
-          playlist: {
-            ...playlist,
-            items: itemsWithScenes,
-          },
-          isOwner: access.level === "owner",
-          accessLevel: access.level,
-          sharedViaGroups: access.level === "shared" ? access.groups : undefined,
-        });
-      } catch (cacheError) {
-        logger.error("Error fetching scenes from cache", { error: cacheError instanceof Error ? cacheError.message : "Unknown error" });
-        // Return playlist without scene details if cache fails
-        res.json({
-          playlist,
-          isOwner: access.level === "owner",
-          accessLevel: access.level,
-          sharedViaGroups: access.level === "shared" ? access.groups : undefined,
-        });
-      }
-    } else {
-      res.json({
-        playlist,
-        isOwner: access.level === "owner",
-        accessLevel: access.level,
-        sharedViaGroups: access.level === "shared" ? access.groups : undefined,
-      });
-    }
-  } catch (error) {
-    logger.error("Error getting playlist", { error: error instanceof Error ? error.message : "Unknown error" });
-    res.status(500).json({ error: "Failed to get playlist" });
+  if (isNaN(playlistId)) {
+    res.status(400).json({ error: "Invalid playlist ID" });
+    return;
   }
+
+  // Check access level
+  const access = await getPlaylistAccess(playlistId, userId);
+  if (access.level === "none") {
+    res.status(404).json({ error: "Playlist not found" });
+    return;
+  }
+
+  const row = await prisma.playlist.findUnique({
+    where: { id: playlistId },
+    include: { user: { select: { id: true, username: true } } },
+  });
+
+  if (!row) {
+    res.status(404).json({ error: "Playlist not found" });
+    return;
+  }
+  const { user: owner, ...playlist } = row;
+
+  const { paging, sort } = request;
+  const { items, totalItems } = await loadPlaylistItems({
+    userId,
+    allowedInstanceIds: req.allowedInstanceIds,
+    playlistId,
+    paging,
+    sort,
+  });
+  const unavailableItems =
+    access.level === "owner"
+      ? await countUnavailableItems({
+          userId,
+          allowedInstanceIds: req.allowedInstanceIds,
+          playlistId,
+        })
+      : 0;
+
+  res.json({
+    playlist: { ...playlist, items },
+    totalItems,
+    unavailableItems,
+    page: paging.page,
+    perPage: paging.perPage,
+    // The parser always seeds a random sort
+    sort: sort.field === "random" ? `random_${sort.seed ?? 0}` : sort.field,
+    direction: sort.direction,
+    isOwner: access.level === "owner",
+    accessLevel: access.level,
+    ...(access.level === "shared" ? { sharedViaGroups: access.groups } : {}),
+    owner: { id: owner.id, username: owner.username },
+  });
 };
+
+/**
+ * The play queue: every item of the playlist this user can see, in the
+ * order the item page shows under the same `sort` and `direction`
+ * (PlaylistQueryService.loadPlaylistQueue), with the fields the player's
+ * sidebar shows. Access as `getPlaylist`: the owner or a recipient.
+ */
+export const getPlaylistQueue = async (
+  req: TypedLibraryRequest<unknown, GetPlaylistParams, GetPlaylistQueueQuery>,
+  res: TypedResponse<GetPlaylistQueueResponse | ApiErrorResponse>
+) => {
+  const userId = req.user.id;
+  // A ValidationError (400) reaches the central error handler
+  const sort = parsePlaylistQueueRequest(req.query, { userId });
+  const playlistId = parseInt(req.params.id);
+
+  if (isNaN(playlistId)) {
+    res.status(400).json({ error: "Invalid playlist ID" });
+    return;
+  }
+
+  const access = await getPlaylistAccess(playlistId, userId);
+  if (access.level === "none") {
+    res.status(404).json({ error: "Playlist not found" });
+    return;
+  }
+
+  const entries = await loadPlaylistQueue({
+    userId,
+    allowedInstanceIds: req.allowedInstanceIds,
+    playlistId,
+    sort,
+  });
+  res.json({ entries });
+};
+
+const NAME_REQUIRED = "Playlist name is required";
+const DESCRIPTION_INVALID = "description must be a string or null";
+
+/** A playlist name: text that is not blank once trimmed. */
+function isPlaylistName(value: unknown): value is string {
+  return typeof value === "string" && value.trim() !== "";
+}
+
+/** A description as sent: text, or null (or left out) for none. */
+function isPlaylistDescription(
+  value: unknown
+): value is string | null | undefined {
+  return value === undefined || value === null || typeof value === "string";
+}
 
 /**
  * Create new playlist
@@ -420,96 +390,123 @@ export const createPlaylist = async (
   req: TypedAuthRequest<CreatePlaylistRequest>,
   res: TypedResponse<CreatePlaylistResponse | ApiErrorResponse>
 ) => {
-  try {
-    const userId = req.user?.id;
+  const userId = req.user.id;
 
-    if (!userId) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
+  // Read as unknown: the body is the client's, whatever its type says
+  const { name, description }: { name?: unknown; description?: unknown } =
+    req.body;
 
-    const { name, description, isPublic } = req.body;
+  if (!isPlaylistName(name)) {
+    res.status(400).json({ error: NAME_REQUIRED });
+    return;
+  }
+  if (!isPlaylistDescription(description)) {
+    res.status(400).json({ error: DESCRIPTION_INVALID });
+    return;
+  }
 
-    if (!name || name.trim() === "") {
-      return res.status(400).json({ error: "Playlist name is required" });
-    }
-
-    const playlist = await prisma.playlist.create({
+  const playlist = await dbWrite("playlist.create", () =>
+    prisma.playlist.create({
       data: {
         name: name.trim(),
-        description: description?.trim() || null,
-        isPublic: isPublic === true,
+        description: emptyToNull(description?.trim()),
         userId,
       },
-      include: {
-        _count: {
-          select: { items: true },
-        },
-      },
-    });
+    })
+  );
 
-    res.status(201).json({ playlist });
-  } catch (error) {
-    logger.error("Error creating playlist", { error: error instanceof Error ? error.message : "Unknown error" });
-    res.status(500).json({ error: "Failed to create playlist" });
-  }
+  // A new playlist has no items
+  res.status(201).json({ playlist: { ...playlist, _count: { items: 0 } } });
 };
 
 /**
  * Update playlist
  */
 export const updatePlaylist = async (
-  req: TypedAuthRequest<UpdatePlaylistRequest, UpdatePlaylistParams>,
+  req: TypedLibraryRequest<UpdatePlaylistRequest, UpdatePlaylistParams>,
   res: TypedResponse<UpdatePlaylistResponse | ApiErrorResponse>
 ) => {
-  try {
-    const userId = req.user?.id;
-    const playlistId = parseInt(req.params.id);
+  const userId = req.user.id;
+  const playlistId = parseInt(req.params.id);
 
-    if (!userId) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
+  if (isNaN(playlistId)) {
+    res.status(400).json({ error: "Invalid playlist ID" });
+    return;
+  }
 
-    if (isNaN(playlistId)) {
-      return res.status(400).json({ error: "Invalid playlist ID" });
-    }
+  // Read as unknown: the body is the client's, whatever its type says.
+  // Only a literal true turns shuffle on
+  const {
+    name,
+    description,
+    repeat,
+    shuffle,
+  }: {
+    name?: unknown;
+    description?: unknown;
+    repeat?: unknown;
+    shuffle?: unknown;
+  } = req.body;
 
-    const { name, description, isPublic, shuffle, repeat } = req.body;
-
-    // Check ownership
-    const existing = await prisma.playlist.findFirst({
-      where: {
-        id: playlistId,
-        userId,
-      },
+  // A name, when sent, follows the rule of create: a string, not blank
+  if (name !== undefined && !isPlaylistName(name)) {
+    res.status(400).json({ error: NAME_REQUIRED });
+    return;
+  }
+  // null clears the description, as a blank one does
+  if (!isPlaylistDescription(description)) {
+    res.status(400).json({ error: DESCRIPTION_INVALID });
+    return;
+  }
+  if (
+    repeat !== undefined &&
+    !(PLAYLIST_REPEAT_MODES as readonly unknown[]).includes(repeat)
+  ) {
+    res.status(400).json({
+      error: `repeat must be one of ${PLAYLIST_REPEAT_MODES.join(", ")}`,
     });
+    return;
+  }
 
-    if (!existing) {
-      return res.status(404).json({ error: "Playlist not found" });
-    }
+  // Check ownership
+  const existing = await prisma.playlist.findFirst({
+    where: {
+      id: playlistId,
+      userId,
+    },
+  });
 
-    const playlist = await prisma.playlist.update({
+  if (!existing) {
+    res.status(404).json({ error: "Playlist not found" });
+    return;
+  }
+
+  const playlist = await dbWrite("playlist.update", () =>
+    prisma.playlist.update({
       where: { id: playlistId },
       data: {
-        ...(name !== undefined && { name: name.trim() }),
+        ...(typeof name === "string" && { name: name.trim() }),
         ...(description !== undefined && {
-          description: description?.trim() || null,
+          description: emptyToNull(description?.trim()),
         }),
-        ...(isPublic !== undefined && { isPublic: isPublic === true }),
         ...(shuffle !== undefined && { shuffle: shuffle === true }),
-        ...(repeat !== undefined && { repeat }),
+        ...(typeof repeat === "string" && { repeat }),
       },
-      include: {
-        _count: {
-          select: { items: true },
-        },
-      },
-    });
+    })
+  );
 
-    res.json({ playlist });
-  } catch (error) {
-    logger.error("Error updating playlist", { error: error instanceof Error ? error.message : "Unknown error" });
-    res.status(500).json({ error: "Failed to update playlist" });
-  }
+  // The count is what the requester can see, not the rows
+  const previews = await loadPlaylistPreviews({
+    userId,
+    allowedInstanceIds: req.allowedInstanceIds,
+    playlistIds: [playlistId],
+  });
+  res.json({
+    playlist: {
+      ...playlist,
+      _count: { items: previews.get(playlistId)?.visibleCount ?? 0 },
+    },
+  });
 };
 
 /**
@@ -519,249 +516,400 @@ export const deletePlaylist = async (
   req: TypedAuthRequest<unknown, DeletePlaylistParams>,
   res: TypedResponse<DeletePlaylistResponse | ApiErrorResponse>
 ) => {
-  try {
-    const userId = req.user?.id;
-    const playlistId = parseInt(req.params.id);
+  const userId = req.user.id;
+  const playlistId = parseInt(req.params.id);
 
-    if (!userId) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
-
-    if (isNaN(playlistId)) {
-      return res.status(400).json({ error: "Invalid playlist ID" });
-    }
-
-    // Check ownership
-    const existing = await prisma.playlist.findFirst({
-      where: {
-        id: playlistId,
-        userId,
-      },
-    });
-
-    if (!existing) {
-      return res.status(404).json({ error: "Playlist not found" });
-    }
-
-    // Delete playlist (items will cascade delete)
-    await prisma.playlist.delete({
-      where: { id: playlistId },
-    });
-
-    res.json({ success: true, message: "Playlist deleted" });
-  } catch (error) {
-    logger.error("Error deleting playlist", { error: error instanceof Error ? error.message : "Unknown error" });
-    res.status(500).json({ error: "Failed to delete playlist" });
+  if (isNaN(playlistId)) {
+    res.status(400).json({ error: "Invalid playlist ID" });
+    return;
   }
+
+  // Check ownership
+  const existing = await prisma.playlist.findFirst({
+    where: {
+      id: playlistId,
+      userId,
+    },
+  });
+
+  if (!existing) {
+    res.status(404).json({ error: "Playlist not found" });
+    return;
+  }
+
+  // Delete playlist (items will cascade delete)
+  await dbWrite("playlist.delete", () =>
+    prisma.playlist.delete({
+      where: { id: playlistId },
+    })
+  );
+
+  res.json({ success: true, message: "Playlist deleted" });
 };
 
 /**
- * Add scene to playlist
+ * Add scene to playlist: owners and shared users alike (remove, move and
+ * rename stay owner-only). The item takes the next position inside the
+ * insert (appendItems), so two adds at once never share one.
  */
 export const addSceneToPlaylist = async (
-  req: TypedAuthRequest<AddSceneToPlaylistRequest, AddSceneToPlaylistParams>,
+  req: TypedLibraryRequest<AddSceneToPlaylistRequest, AddSceneToPlaylistParams>,
   res: TypedResponse<AddSceneToPlaylistResponse | ApiErrorResponse>
 ) => {
-  try {
-    const userId = req.user?.id;
-    const playlistId = parseInt(req.params.id);
+  const userId = req.user.id;
+  const playlistId = parseInt(req.params.id);
 
-    if (!userId) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
-
-    if (isNaN(playlistId)) {
-      return res.status(400).json({ error: "Invalid playlist ID" });
-    }
-
-    const { sceneId } = req.body;
-
-    if (!sceneId) {
-      return res.status(400).json({ error: "Scene ID is required" });
-    }
-
-    // Check access — owners and shared users can add scenes
-    // Note: remove/reorder/rename remain owner-only (intentional asymmetry)
-    const access = await getPlaylistAccess(playlistId, userId);
-    if (access.level === "none") {
-      return res.status(404).json({ error: "Playlist not found" });
-    }
-
-    const playlist = await prisma.playlist.findUnique({
-      where: { id: playlistId },
-      include: {
-        items: {
-          orderBy: {
-            position: "desc",
-          },
-          take: 1,
-        },
-      },
-    });
-
-    if (!playlist) {
-      return res.status(404).json({ error: "Playlist not found" });
-    }
-
-    // Get scene instanceId
-    const instanceId = await getEntityInstanceId('scene', sceneId);
-
-    // Check if scene already in playlist
-    const existing = await prisma.playlistItem.findUnique({
-      where: {
-        playlistId_instanceId_sceneId: {
-          playlistId,
-          instanceId,
-          sceneId,
-        },
-      },
-    });
-
-    if (existing) {
-      return res.status(400).json({ error: "Scene already in playlist" });
-    }
-
-    // Calculate next position
-    const nextPosition =
-      playlist.items.length > 0 ? (playlist.items[0] as (typeof playlist.items)[number]).position + 1 : 0;
-
-    const item = await prisma.playlistItem.create({
-      data: {
-        playlistId,
-        instanceId,
-        sceneId,
-        position: nextPosition,
-      },
-    });
-
-    res.status(201).json({ item });
-  } catch (error) {
-    logger.error("Error adding scene to playlist", { error: error instanceof Error ? error.message : "Unknown error" });
-    res.status(500).json({ error: "Failed to add scene to playlist" });
+  if (isNaN(playlistId)) {
+    res.status(400).json({ error: "Invalid playlist ID" });
+    return;
   }
+
+  const ref = parseSceneRef(req.body.sceneId, req.body.instanceId);
+  if ("error" in ref) {
+    res.status(400).json({ error: ref.error });
+    return;
+  }
+  const { sceneId, instanceId } = ref;
+
+  const access = await getPlaylistAccess(playlistId, userId);
+  if (access.level === "none") {
+    res.status(404).json({ error: "Playlist not found" });
+    return;
+  }
+
+  const result = await appendItems(playlistId, userId, [
+    { id: sceneId, instanceId },
+  ]);
+  // Only a scene this user can see: missing, hidden, restricted or on an
+  // instance they do not use alike
+  if (result.unavailable > 0) {
+    res.status(404).json({ error: "Scene not found" });
+    return;
+  }
+  if (result.alreadyInPlaylist > 0) {
+    res.status(409).json({ error: "Scene already in playlist" });
+    return;
+  }
+
+  const item = await prisma.playlistItem.findUnique({
+    where: {
+      playlistId_instanceId_sceneId: { playlistId, instanceId, sceneId },
+    },
+  });
+  if (!item) {
+    // Removed, or the playlist deleted, since the add
+    res.status(404).json({ error: "Scene not in playlist" });
+    return;
+  }
+
+  res.status(201).json({ item });
+};
+
+/**
+ * Add several scenes at once (`POST /playlists/:id/items/bulk`), at most a
+ * page of them, in the order given: the ones already there or that the
+ * adder cannot see are skipped and counted. Access as a single add.
+ */
+export const addScenesToPlaylist = async (
+  req: TypedLibraryRequest<
+    AddScenesToPlaylistRequest,
+    AddSceneToPlaylistParams
+  >,
+  res: TypedResponse<AddScenesToPlaylistResponse | ApiErrorResponse>
+) => {
+  const userId = req.user.id;
+  const playlistId = parseInt(req.params.id);
+
+  if (isNaN(playlistId)) {
+    res.status(400).json({ error: "Invalid playlist ID" });
+    return;
+  }
+
+  // The body is not validated: every entry is checked here
+  const { scenes }: { scenes?: unknown } = req.body;
+  if (
+    !Array.isArray(scenes) ||
+    scenes.length === 0 ||
+    scenes.length > PER_PAGE_MAX
+  ) {
+    res.status(400).json({
+      error: `scenes must be an array of 1 to ${PER_PAGE_MAX} scenes`,
+    });
+    return;
+  }
+
+  const refs: EntityRef[] = [];
+  for (const [index, entry] of (scenes as unknown[]).entries()) {
+    if (typeof entry !== "object" || entry === null) {
+      res.status(400).json({ error: `scenes[${index}] must be an object` });
+      return;
+    }
+    const fields = entry as Record<string, unknown>;
+    const ref = parseSceneRef(
+      fields.sceneId,
+      fields.instanceId,
+      `scenes[${index}].`
+    );
+    if ("error" in ref) {
+      res.status(400).json({ error: ref.error });
+      return;
+    }
+    refs.push({ id: ref.sceneId, instanceId: ref.instanceId });
+  }
+
+  const access = await getPlaylistAccess(playlistId, userId);
+  if (access.level === "none") {
+    res.status(404).json({ error: "Playlist not found" });
+    return;
+  }
+
+  const { added, alreadyInPlaylist, unavailable } = await appendItems(
+    playlistId,
+    userId,
+    refs
+  );
+  res.json({ added, alreadyInPlaylist, unavailable });
 };
 
 /**
  * Remove scene from playlist
  */
 export const removeSceneFromPlaylist = async (
-  req: TypedAuthRequest<unknown, RemoveSceneFromPlaylistParams>,
+  req: TypedAuthRequest<
+    unknown,
+    RemoveSceneFromPlaylistParams,
+    RemoveSceneFromPlaylistQuery
+  >,
   res: TypedResponse<RemoveSceneFromPlaylistResponse | ApiErrorResponse>
 ) => {
-  try {
-    const userId = req.user?.id;
-    const playlistId = parseInt(req.params.id);
-    const { sceneId } = req.params;
+  const userId = req.user.id;
+  const playlistId = parseInt(req.params.id);
 
-    if (!userId) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
-
-    if (isNaN(playlistId)) {
-      return res.status(400).json({ error: "Invalid playlist ID" });
-    }
-
-    // Check ownership
-    const playlist = await prisma.playlist.findFirst({
-      where: {
-        id: playlistId,
-        userId,
-      },
-    });
-
-    if (!playlist) {
-      return res.status(404).json({ error: "Playlist not found" });
-    }
-
-    // Get scene instanceId
-    const instanceId = await getEntityInstanceId('scene', sceneId);
-
-    // Delete the item
-    await prisma.playlistItem.delete({
-      where: {
-        playlistId_instanceId_sceneId: {
-          playlistId,
-          instanceId,
-          sceneId,
-        },
-      },
-    });
-
-    res.json({ success: true, message: "Scene removed from playlist" });
-  } catch (error) {
-    logger.error("Error removing scene from playlist", { error: error instanceof Error ? error.message : "Unknown error" });
-    res.status(500).json({ error: "Failed to remove scene from playlist" });
+  if (isNaN(playlistId)) {
+    res.status(400).json({ error: "Invalid playlist ID" });
+    return;
   }
+
+  const ref = parseSceneRef(req.params.sceneId, req.query.instanceId);
+  if ("error" in ref) {
+    res.status(400).json({ error: ref.error });
+    return;
+  }
+  const { sceneId, instanceId } = ref;
+
+  // Check ownership
+  const playlist = await prisma.playlist.findFirst({
+    where: {
+      id: playlistId,
+      userId,
+    },
+  });
+
+  if (!playlist) {
+    res.status(404).json({ error: "Playlist not found" });
+    return;
+  }
+
+  // Delete the item of that scene on that instance only; the same id on
+  // another instance is another item
+  const { count } = await dbWrite("playlist.removeItem", () =>
+    prisma.playlistItem.deleteMany({
+      where: { playlistId, instanceId, sceneId },
+    })
+  );
+
+  if (count === 0) {
+    res.status(404).json({ error: "Scene not in playlist" });
+    return;
+  }
+
+  res.json({ success: true, message: "Scene removed from playlist" });
+};
+
+/** A positive integer id from a route parameter or a body; NaN otherwise */
+function parseItemId(value: unknown): number {
+  if (typeof value === "number") {
+    return Number.isInteger(value) && value > 0 ? value : NaN;
+  }
+  if (typeof value === "string" && /^[1-9]\d*$/.test(value)) {
+    return Number(value);
+  }
+  return NaN;
+}
+
+/** The owner's playlist id, or null when the requester does not own it */
+async function ownedPlaylist(
+  playlistId: number,
+  userId: number
+): Promise<number | null> {
+  const playlist = await prisma.playlist.findFirst({
+    where: { id: playlistId, userId },
+    select: { id: true },
+  });
+  return playlist?.id ?? null;
+}
+
+/**
+ * Move one item (by item id) to an index among the items the owner sees, in
+ * playlist order (owner only; PlaylistQueryService.moveItem renumbers the
+ * playlist 0..n-1). An index past the end puts it after the last visible
+ * item. An item of another playlist, or one the owner cannot see, is 404.
+ */
+export const movePlaylistItem = async (
+  req: TypedLibraryRequest<MovePlaylistItemRequest, MovePlaylistItemParams>,
+  res: TypedResponse<MovePlaylistItemResponse | ApiErrorResponse>
+) => {
+  const userId = req.user.id;
+  const playlistId = parseInt(req.params.id);
+
+  if (isNaN(playlistId)) {
+    res.status(400).json({ error: "Invalid playlist ID" });
+    return;
+  }
+
+  const itemId = parseItemId(req.params.itemId);
+  if (isNaN(itemId)) {
+    res.status(400).json({ error: "Invalid item ID" });
+    return;
+  }
+
+  // The body is not validated: the index is checked here
+  const { index }: { index?: unknown } = req.body;
+  if (typeof index !== "number" || !Number.isInteger(index) || index < 0) {
+    res.status(400).json({ error: "index must be a non-negative integer" });
+    return;
+  }
+
+  if ((await ownedPlaylist(playlistId, userId)) === null) {
+    res.status(404).json({ error: "Playlist not found" });
+    return;
+  }
+
+  const moved = await moveItem(
+    playlistId,
+    userId,
+    req.allowedInstanceIds,
+    itemId,
+    index
+  );
+  if (!moved) {
+    res.status(404).json({ error: "Item not found" });
+    return;
+  }
+
+  res.json({ success: true });
 };
 
 /**
- * Reorder playlist items
+ * Remove several items by item id (owner only), in one statement; ids of
+ * another playlist's items are ignored and not counted
  */
-export const reorderPlaylist = async (
-  req: TypedAuthRequest<ReorderPlaylistRequest, ReorderPlaylistParams>,
-  res: TypedResponse<ReorderPlaylistResponse | ApiErrorResponse>
+export const removePlaylistItems = async (
+  req: TypedAuthRequest<RemovePlaylistItemsRequest, GetPlaylistParams>,
+  res: TypedResponse<RemovePlaylistItemsResponse | ApiErrorResponse>
 ) => {
-  try {
-    const userId = req.user?.id;
-    const playlistId = parseInt(req.params.id);
+  const userId = req.user.id;
+  const playlistId = parseInt(req.params.id);
 
-    if (!userId) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
-
-    if (isNaN(playlistId)) {
-      return res.status(400).json({ error: "Invalid playlist ID" });
-    }
-
-    const { items } = req.body; // Array of { sceneId, position }
-
-    if (!Array.isArray(items)) {
-      return res.status(400).json({ error: "Items must be an array" });
-    }
-
-    // Check ownership
-    const playlist = await prisma.playlist.findFirst({
-      where: {
-        id: playlistId,
-        userId,
-      },
-    });
-
-    if (!playlist) {
-      return res.status(404).json({ error: "Playlist not found" });
-    }
-
-    // Get instanceIds for all scenes
-    const sceneIds = items.map((item) => item.sceneId);
-    const instanceIdMap = await getEntityInstanceIds('scene', sceneIds);
-
-    // Update positions in a transaction
-    await prisma.$transaction(
-      items.map((item) => {
-        const instanceId = instanceIdMap.get(item.sceneId);
-        if (!instanceId) {
-          throw new Error(`Missing instanceId for scene ${item.sceneId}`);
-        }
-        return prisma.playlistItem.update({
-          where: {
-            playlistId_instanceId_sceneId: {
-              playlistId,
-              instanceId,
-              sceneId: item.sceneId,
-            },
-          },
-          data: {
-            position: item.position,
-          },
-        });
-      })
-    );
-
-    res.json({ success: true, message: "Playlist reordered" });
-  } catch (error) {
-    logger.error("Error reordering playlist", { error: error instanceof Error ? error.message : "Unknown error" });
-    res.status(500).json({ error: "Failed to reorder playlist" });
+  if (isNaN(playlistId)) {
+    res.status(400).json({ error: "Invalid playlist ID" });
+    return;
   }
+
+  // The body is not validated: every id is checked here
+  const { itemIds }: { itemIds?: unknown } = req.body;
+  const ids = Array.isArray(itemIds)
+    ? (itemIds as unknown[]).map((id) =>
+        typeof id === "number" ? parseItemId(id) : NaN
+      )
+    : [];
+  if (ids.length === 0 || ids.length > PER_PAGE_MAX || ids.some(Number.isNaN)) {
+    res.status(400).json({
+      error: `itemIds must be an array of 1 to ${PER_PAGE_MAX} item ids`,
+    });
+    return;
+  }
+
+  if ((await ownedPlaylist(playlistId, userId)) === null) {
+    res.status(404).json({ error: "Playlist not found" });
+    return;
+  }
+
+  const { count } = await dbWrite("playlist.removeItems", () =>
+    prisma.playlistItem.deleteMany({
+      where: { playlistId, id: { in: ids } },
+    })
+  );
+  res.json({ removed: count });
+};
+
+/**
+ * Save a view sort as the playlist's order (owner only, as a move): the
+ * owner's visible items take positions 0..n-1 in the sort the page read,
+ * the items they cannot see follow in their own order
+ * (PlaylistQueryService.sortPlaylistItems). No item list crosses the wire.
+ */
+export const sortPlaylist = async (
+  req: TypedLibraryRequest<SortPlaylistRequest, GetPlaylistParams>,
+  res: TypedResponse<SortPlaylistResponse | ApiErrorResponse>
+) => {
+  const userId = req.user.id;
+  // A ValidationError (400) reaches the central error handler
+  const sort = parseSortPlaylistRequest(req.body, { userId });
+  const playlistId = parseInt(req.params.id);
+
+  if (isNaN(playlistId)) {
+    res.status(400).json({ error: "Invalid playlist ID" });
+    return;
+  }
+
+  const playlist = await prisma.playlist.findFirst({
+    where: { id: playlistId, userId },
+    select: { id: true },
+  });
+  if (!playlist) {
+    res.status(404).json({ error: "Playlist not found" });
+    return;
+  }
+
+  const itemCount = await sortPlaylistItems({
+    userId,
+    allowedInstanceIds: req.allowedInstanceIds,
+    playlistId,
+    sort,
+  });
+  res.json({ success: true, itemCount });
+};
+
+/**
+ * Remove the items whose scene is deleted from Stash (owner only, as
+ * sort): items hidden, restricted or on an instance the owner does not use
+ * stay, since they may come back (PlaylistQueryService
+ * .removeUnavailableItems). A recipient gets 404.
+ */
+export const removeUnavailablePlaylistItems = async (
+  req: TypedLibraryRequest<unknown, GetPlaylistParams>,
+  res: TypedResponse<RemoveUnavailableItemsResponse | ApiErrorResponse>
+) => {
+  const userId = req.user.id;
+  const playlistId = parseInt(req.params.id);
+
+  if (isNaN(playlistId)) {
+    res.status(400).json({ error: "Invalid playlist ID" });
+    return;
+  }
+
+  const playlist = await prisma.playlist.findFirst({
+    where: { id: playlistId, userId },
+    select: { id: true },
+  });
+  if (!playlist) {
+    res.status(404).json({ error: "Playlist not found" });
+    return;
+  }
+
+  const removed = await removeUnavailableItems(playlistId);
+  res.json({ removed });
 };
 
 /**
@@ -771,48 +919,41 @@ export const getPlaylistShares = async (
   req: TypedAuthRequest<unknown, GetPlaylistParams>,
   res: TypedResponse<GetPlaylistSharesResponse | ApiErrorResponse>
 ) => {
-  try {
-    const userId = req.user?.id;
-    const playlistId = parseInt(req.params.id);
+  const userId = req.user.id;
+  const playlistId = parseInt(req.params.id);
 
-    if (!userId) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
-
-    if (isNaN(playlistId)) {
-      return res.status(400).json({ error: "Invalid playlist ID" });
-    }
-
-    // Verify ownership
-    const playlist = await prisma.playlist.findFirst({
-      where: { id: playlistId, userId },
-    });
-
-    if (!playlist) {
-      return res.status(404).json({ error: "Playlist not found" });
-    }
-
-    const shares = await prisma.playlistShare.findMany({
-      where: { playlistId },
-      select: {
-        sharedAt: true,
-        group: {
-          select: { id: true, name: true },
-        },
-      },
-    });
-
-    res.json({
-      shares: shares.map((s) => ({
-        groupId: s.group.id,
-        groupName: s.group.name,
-        sharedAt: s.sharedAt.toISOString(),
-      })),
-    });
-  } catch (error) {
-    logger.error("Error getting playlist shares", { error: error instanceof Error ? error.message : "Unknown error" });
-    res.status(500).json({ error: "Failed to get playlist shares" });
+  if (isNaN(playlistId)) {
+    res.status(400).json({ error: "Invalid playlist ID" });
+    return;
   }
+
+  // Verify ownership
+  const playlist = await prisma.playlist.findFirst({
+    where: { id: playlistId, userId },
+  });
+
+  if (!playlist) {
+    res.status(404).json({ error: "Playlist not found" });
+    return;
+  }
+
+  const shares = await prisma.playlistShare.findMany({
+    where: { playlistId },
+    select: {
+      sharedAt: true,
+      group: {
+        select: { id: true, name: true },
+      },
+    },
+  });
+
+  res.json({
+    shares: shares.map((s) => ({
+      groupId: s.group.id,
+      groupName: s.group.name,
+      sharedAt: s.sharedAt.toISOString(),
+    })),
+  });
 };
 
 /**
@@ -822,151 +963,150 @@ export const updatePlaylistShares = async (
   req: TypedAuthRequest<UpdatePlaylistSharesRequest, GetPlaylistParams>,
   res: TypedResponse<UpdatePlaylistSharesResponse | ApiErrorResponse>
 ) => {
-  try {
-    const userId = req.user?.id;
-    const playlistId = parseInt(req.params.id);
+  const userId = req.user.id;
+  const playlistId = parseInt(req.params.id);
 
-    if (!userId) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
-
-    if (isNaN(playlistId)) {
-      return res.status(400).json({ error: "Invalid playlist ID" });
-    }
-
-    const { groupIds } = req.body;
-
-    if (!Array.isArray(groupIds)) {
-      return res.status(400).json({ error: "groupIds must be an array" });
-    }
-
-    // Verify ownership
-    const playlist = await prisma.playlist.findFirst({
-      where: { id: playlistId, userId },
-    });
-
-    if (!playlist) {
-      return res.status(404).json({ error: "Playlist not found" });
-    }
-
-    // If sharing with any groups, check canShare permission
-    if (groupIds.length > 0) {
-      const permissions = await resolveUserPermissions(userId);
-      if (!permissions?.canShare) {
-        return res.status(403).json({ error: "You don't have permission to share playlists" });
-      }
-
-      // Verify user belongs to all specified groups
-      const userGroups = await getUserGroups(userId);
-      const userGroupIds = new Set(userGroups.map((g) => g.id));
-
-      for (const groupId of groupIds) {
-        if (!userGroupIds.has(groupId)) {
-          return res.status(403).json({ error: "You can only share with groups you belong to" });
-        }
-      }
-    }
-
-    // Replace all shares with new set
-    await prisma.$transaction([
-      prisma.playlistShare.deleteMany({ where: { playlistId } }),
-      ...groupIds.map((groupId) =>
-        prisma.playlistShare.create({
-          data: { playlistId, groupId },
-        })
-      ),
-    ]);
-
-    // Fetch updated shares
-    const shares = await prisma.playlistShare.findMany({
-      where: { playlistId },
-      select: {
-        sharedAt: true,
-        group: {
-          select: { id: true, name: true },
-        },
-      },
-    });
-
-    res.json({
-      shares: shares.map((s) => ({
-        groupId: s.group.id,
-        groupName: s.group.name,
-        sharedAt: s.sharedAt.toISOString(),
-      })),
-    });
-  } catch (error) {
-    logger.error("Error updating playlist shares", { error: error instanceof Error ? error.message : "Unknown error" });
-    res.status(500).json({ error: "Failed to update playlist shares" });
+  if (isNaN(playlistId)) {
+    res.status(400).json({ error: "Invalid playlist ID" });
+    return;
   }
+
+  const { groupIds } = req.body;
+
+  if (!Array.isArray(groupIds)) {
+    res.status(400).json({ error: "groupIds must be an array" });
+    return;
+  }
+
+  // Verify ownership
+  const playlist = await prisma.playlist.findFirst({
+    where: { id: playlistId, userId },
+  });
+
+  if (!playlist) {
+    res.status(404).json({ error: "Playlist not found" });
+    return;
+  }
+
+  // If sharing with any groups, check canShare permission
+  let newGroupIds: number[] = [];
+  if (groupIds.length > 0) {
+    const permissions = await resolveUserPermissions(userId);
+    if (!permissions?.canShare) {
+      res
+        .status(403)
+        .json({ error: "You don't have permission to share playlists" });
+      return;
+    }
+
+    // Verify user belongs to every group being added. A group already shared
+    // with that the owner has since left is not being added: it is dropped
+    // here (leaving a group deletes its shares, but older shares may remain)
+    const userGroups = await getUserGroups(userId);
+    const userGroupIds = new Set(userGroups.map((g) => g.id));
+    const strangers = groupIds.filter((groupId) => !userGroupIds.has(groupId));
+    if (strangers.length > 0) {
+      const stored = await prisma.playlistShare.findMany({
+        where: { playlistId, groupId: { in: strangers } },
+        select: { groupId: true },
+      });
+      const alreadyShared = new Set(stored.map((s) => s.groupId));
+      if (strangers.some((groupId) => !alreadyShared.has(groupId))) {
+        res
+          .status(403)
+          .json({ error: "You can only share with groups you belong to" });
+        return;
+      }
+    }
+    newGroupIds = [...new Set(groupIds.filter((id) => userGroupIds.has(id)))];
+  }
+
+  // Replace all shares with new set
+  await dbWriteBatch("playlist.shares", [
+    prisma.playlistShare.deleteMany({ where: { playlistId } }),
+    ...newGroupIds.map((groupId) =>
+      prisma.playlistShare.create({
+        data: { playlistId, groupId },
+      })
+    ),
+  ]);
+
+  // Fetch updated shares
+  const shares = await prisma.playlistShare.findMany({
+    where: { playlistId },
+    select: {
+      sharedAt: true,
+      group: {
+        select: { id: true, name: true },
+      },
+    },
+  });
+
+  res.json({
+    shares: shares.map((s) => ({
+      groupId: s.group.id,
+      groupName: s.group.name,
+      sharedAt: s.sharedAt.toISOString(),
+    })),
+  });
 };
 
 /**
  * Duplicate a playlist (requires access - owner or shared)
  */
 export const duplicatePlaylist = async (
-  req: TypedAuthRequest<unknown, GetPlaylistParams>,
+  req: TypedLibraryRequest<unknown, GetPlaylistParams>,
   res: TypedResponse<DuplicatePlaylistResponse | ApiErrorResponse>
 ) => {
-  try {
-    const userId = req.user?.id;
-    const playlistId = parseInt(req.params.id);
+  const userId = req.user.id;
+  const playlistId = parseInt(req.params.id);
 
-    if (!userId) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
-
-    if (isNaN(playlistId)) {
-      return res.status(400).json({ error: "Invalid playlist ID" });
-    }
-
-    // Check access
-    const access = await getPlaylistAccess(playlistId, userId);
-    if (access.level === "none") {
-      return res.status(404).json({ error: "Playlist not found" });
-    }
-
-    // Fetch original playlist with items
-    const original = await prisma.playlist.findUnique({
-      where: { id: playlistId },
-      include: {
-        items: {
-          orderBy: { position: "asc" },
-        },
-      },
-    });
-
-    if (!original) {
-      return res.status(404).json({ error: "Playlist not found" });
-    }
-
-    // Create duplicate
-    const duplicate = await prisma.playlist.create({
-      data: {
-        name: `${original.name} (Copy)`,
-        description: original.description,
-        userId,
-        isPublic: false,
-        shuffle: original.shuffle,
-        repeat: original.repeat,
-        items: {
-          create: original.items.map((item) => ({
-            sceneId: item.sceneId,
-            instanceId: item.instanceId,
-            position: item.position,
-          })),
-        },
-      },
-      include: {
-        _count: {
-          select: { items: true },
-        },
-      },
-    });
-
-    res.status(201).json({ playlist: duplicate });
-  } catch (error) {
-    logger.error("Error duplicating playlist", { error: error instanceof Error ? error.message : "Unknown error" });
-    res.status(500).json({ error: "Failed to duplicate playlist" });
+  if (isNaN(playlistId)) {
+    res.status(400).json({ error: "Invalid playlist ID" });
+    return;
   }
+
+  // Check access
+  const access = await getPlaylistAccess(playlistId, userId);
+  if (access.level === "none") {
+    res.status(404).json({ error: "Playlist not found" });
+    return;
+  }
+
+  const original = await prisma.playlist.findUnique({
+    where: { id: playlistId },
+  });
+
+  if (!original) {
+    res.status(404).json({ error: "Playlist not found" });
+    return;
+  }
+
+  // The copy holds the items the requester can see, copied by one statement
+  const items = duplicateVisibleItems(
+    userId,
+    req.allowedInstanceIds,
+    playlistId
+  );
+  const { copy, added } = await dbWriteTransaction(
+    "playlist.duplicate",
+    async (tx) => {
+      const copy = await tx.playlist.create({
+        data: {
+          name: `${original.name} (Copy)`,
+          description: original.description,
+          userId,
+          shuffle: original.shuffle,
+          repeat: original.repeat,
+        },
+      });
+      const added = await tx.$executeRawUnsafe(
+        items.sql,
+        ...items.paramsFor(copy.id)
+      );
+      return { copy, added };
+    }
+  );
+
+  res.status(201).json({ playlist: { ...copy, _count: { items: added } } });
 };

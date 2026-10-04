@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useEffect, useRef, useState } from "react";
 import { LANDING_PAGE_OPTIONS } from "../../constants/navigation";
 import { Button, Switch } from "../ui/index";
 
@@ -9,7 +9,8 @@ interface LandingPagePreference {
 
 interface Props {
   landingPagePreference: LandingPagePreference | null;
-  onSave: (preference: LandingPagePreference) => void;
+  /** Rejects when the save failed, after reporting it. */
+  onSave: (preference: LandingPagePreference) => Promise<void>;
 }
 
 /**
@@ -21,15 +22,20 @@ const LandingPageSettings = ({ landingPagePreference, onSave }: Props) => {
     landingPagePreference?.randomize || false
   );
   const [selectedPages, setSelectedPages] = useState(
-    landingPagePreference?.pages || ["home"]
+    landingPagePreference?.pages ?? ["home"]
   );
   const [hasChanges, setHasChanges] = useState(false);
   const [validationError, setValidationError] = useState("");
 
-  // Sync state when prop changes (e.g., after settings reload)
+  // Sync state when prop changes (e.g., after settings reload), unless the
+  // user has edits: a save that fails puts the stored value back in the
+  // prop, and the edits stay marked unsaved
+  const hasChangesRef = useRef(hasChanges);
+  hasChangesRef.current = hasChanges;
   useEffect(() => {
+    if (hasChangesRef.current) return;
     setRandomize(landingPagePreference?.randomize || false);
-    setSelectedPages(landingPagePreference?.pages || ["home"]);
+    setSelectedPages(landingPagePreference?.pages ?? ["home"]);
     setHasChanges(false);
     setValidationError("");
   }, [landingPagePreference]);
@@ -40,8 +46,9 @@ const LandingPageSettings = ({ landingPagePreference, onSave }: Props) => {
     setValidationError("");
 
     // If turning off randomize and multiple pages selected, keep only first
-    if (!checked && selectedPages.length > 1) {
-      setSelectedPages([selectedPages[0]]);
+    const firstPage = selectedPages[0];
+    if (!checked && selectedPages.length > 1 && firstPage !== undefined) {
+      setSelectedPages([firstPage]);
     }
   };
 
@@ -67,23 +74,27 @@ const LandingPageSettings = ({ landingPagePreference, onSave }: Props) => {
     }
   };
 
-  const handleSave = () => {
+  const handleSave = async () => {
     // Validate
     if (randomize && selectedPages.length < 2) {
       setValidationError("Select at least 2 pages for random mode");
       return;
     }
 
-    onSave({
-      pages: selectedPages,
-      randomize,
-    });
-    setHasChanges(false);
+    try {
+      await onSave({
+        pages: selectedPages,
+        randomize,
+      });
+      setHasChanges(false);
+    } catch {
+      // onSave reported the failure; the changes stay marked unsaved
+    }
   };
 
   const handleReset = () => {
     setRandomize(landingPagePreference?.randomize || false);
-    setSelectedPages(landingPagePreference?.pages || ["home"]);
+    setSelectedPages(landingPagePreference?.pages ?? ["home"]);
     setHasChanges(false);
     setValidationError("");
   };
@@ -124,9 +135,7 @@ const LandingPageSettings = ({ landingPagePreference, onSave }: Props) => {
               key={option.key}
               className="flex items-center gap-3 p-2 rounded cursor-pointer hover:bg-opacity-50"
               style={{
-                backgroundColor: isSelected
-                  ? "var(--bg-hover)"
-                  : "transparent",
+                backgroundColor: isSelected ? "var(--bg-hover)" : "transparent",
               }}
             >
               <input
@@ -155,7 +164,7 @@ const LandingPageSettings = ({ landingPagePreference, onSave }: Props) => {
       {/* Save/Reset buttons */}
       {hasChanges && (
         <div className="flex gap-2 pt-2">
-          <Button variant="primary" onClick={handleSave}>
+          <Button variant="primary" onClick={() => void handleSave()}>
             Save
           </Button>
           <Button variant="secondary" onClick={handleReset}>

@@ -1,7 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { useConfig } from "../../contexts/ConfigContext";
+import { useHoverCapable } from "../../hooks/useHoverCapable";
+import { useInView } from "../../hooks/useInView";
 import { getEntityPath, getScenePathWithTime } from "../../utils/entityLinks";
+import { usePreviewSlot } from "./previewSlots";
 
 interface WallItemConfig {
   getImageUrl: (item: Record<string, unknown>) => string | null;
@@ -19,6 +22,8 @@ interface Props {
   height: number;
   playbackMode?: "autoplay" | "hover" | "static";
   onClick?: (item: Record<string, unknown>) => void;
+  /** The tile's link in place of its entity's own (an image on its list) */
+  itemPath?: ((item: Record<string, unknown>) => string) | undefined;
 }
 
 /**
@@ -32,14 +37,16 @@ const WallItem = ({
   height,
   playbackMode = "autoplay",
   onClick,
+  itemPath,
 }: Props) => {
   const { hasMultipleInstances } = useConfig();
+  const hoverCapable = useHoverCapable();
   const containerRef = useRef<HTMLAnchorElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const [isHovering, setIsHovering] = useState(false);
-  const [isInView, setIsInView] = useState(false);
   const [showOverlay, setShowOverlay] = useState(false);
   const [imageLoaded, setImageLoaded] = useState(false);
+  const [imageFailed, setImageFailed] = useState(false);
   const overlayTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const imageUrl = config.getImageUrl(item);
@@ -47,52 +54,64 @@ const WallItem = ({
   const title = config.getTitle(item);
   const subtitle = config.getSubtitle(item);
   const hasPreview = config.hasPreview && previewUrl;
+  // A touch screen has no hover to wait for: the title is always there. A
+  // mouse shows it 500 ms after the pointer enters.
+  const titleShown = !hoverCapable || showOverlay;
 
   // Compute link path with multi-instance support
   // Clips are special: they link to scene with timestamp
-  const linkPath = entityType === "clip"
-    ? getScenePathWithTime({ id: item.sceneId as string, instanceId: item.instanceId as string | undefined } as Record<string, unknown>, (item.seconds as number | undefined) ?? 0, hasMultipleInstances)
-    : getEntityPath(entityType, item, hasMultipleInstances);
+  const linkPath = itemPath
+    ? itemPath(item)
+    : entityType === "clip"
+      ? getScenePathWithTime(
+          {
+            id: item.sceneId as string,
+            instanceId: item.instanceId as string | undefined,
+          } as Record<string, unknown>,
+          (item.seconds as number | undefined) ?? 0,
+          hasMultipleInstances
+        )
+      : getEntityPath(entityType, item, hasMultipleInstances);
 
-  // Intersection Observer for autoplay mode
+  // Autoplay mode plays the preview while half the tile is in view
+  const isInView = useInView(containerRef, {
+    threshold: 0.5,
+    skip: playbackMode !== "autoplay" || !hasPreview,
+  });
+
+  const wantsToPlay =
+    !!hasPreview &&
+    (playbackMode === "autoplay"
+      ? isInView
+      : playbackMode === "hover"
+        ? isHovering
+        : false);
+
+  // Only a tile holding a slot plays; the wall hands out a few at a time
+  const slotId = useId();
+  const hasSlot = usePreviewSlot(slotId, wantsToPlay, containerRef);
+
+  // A tile with a slot loads and plays its preview; one without releases the
+  // download, so the connection goes to thumbnails and pages
   useEffect(() => {
-    if (playbackMode !== "autoplay" || !hasPreview) return;
+    const video = videoRef.current;
+    if (!video || !hasPreview) return;
 
-    const observer = new IntersectionObserver(
-      ([entry]) => {
-        setIsInView(entry.isIntersecting);
-      },
-      { threshold: 0.5 }
-    );
-
-    if (containerRef.current) {
-      observer.observe(containerRef.current);
+    if (hasSlot) {
+      if (video.getAttribute("src") !== previewUrl) {
+        video.setAttribute("src", previewUrl);
+      }
+      video.play().catch(() => {});
+    } else if (video.hasAttribute("src")) {
+      video.pause();
+      video.removeAttribute("src");
+      video.load();
     }
+  }, [hasSlot, hasPreview, previewUrl]);
 
-    return () => observer.disconnect();
-  }, [playbackMode, hasPreview]);
-
-  // Video playback control
+  // Overlay show delay (500ms), for a mouse
   useEffect(() => {
-    if (!videoRef.current || !hasPreview) return;
-
-    const shouldPlay =
-      playbackMode === "autoplay"
-        ? isInView
-        : playbackMode === "hover"
-          ? isHovering
-          : false;
-
-    if (shouldPlay) {
-      videoRef.current.play().catch(() => {});
-    } else {
-      videoRef.current.pause();
-    }
-  }, [playbackMode, isInView, isHovering, hasPreview]);
-
-  // Overlay show delay (500ms)
-  useEffect(() => {
-    if (isHovering) {
+    if (isHovering && hoverCapable) {
       overlayTimeoutRef.current = setTimeout(() => {
         setShowOverlay(true);
       }, 500);
@@ -108,7 +127,7 @@ const WallItem = ({
         clearTimeout(overlayTimeoutRef.current);
       }
     };
-  }, [isHovering]);
+  }, [isHovering, hoverCapable]);
 
   const handleClick = (e: React.MouseEvent) => {
     if (onClick) {
@@ -128,7 +147,7 @@ const WallItem = ({
       onMouseLeave={() => setIsHovering(false)}
     >
       {/* Loading spinner */}
-      {!imageLoaded && (
+      {!imageLoaded && !imageFailed && (
         <div className="absolute inset-0 flex items-center justify-center">
           <div
             className="animate-spin rounded-full border-2 border-t-transparent"
@@ -143,7 +162,7 @@ const WallItem = ({
       )}
 
       {/* Background image */}
-      {imageUrl && (
+      {imageUrl && !imageFailed && (
         <img
           src={imageUrl}
           alt={title}
@@ -151,6 +170,7 @@ const WallItem = ({
           style={{ opacity: imageLoaded ? 1 : 0 }}
           loading="lazy"
           onLoad={() => setImageLoaded(true)}
+          onError={() => setImageFailed(true)}
         />
       )}
 
@@ -158,7 +178,6 @@ const WallItem = ({
       {hasPreview && playbackMode !== "static" && (
         <video
           ref={videoRef}
-          src={previewUrl}
           className="absolute inset-0 w-full h-full object-cover"
           muted
           loop
@@ -173,19 +192,16 @@ const WallItem = ({
         style={{
           height: "100px",
           background: "linear-gradient(transparent, rgba(0, 0, 0, 0.7))",
-          opacity: showOverlay ? 1 : 0,
+          opacity: titleShown ? 1 : 0,
         }}
       />
 
       {/* Text overlay */}
       <div
         className="absolute bottom-0 left-0 right-0 p-4 transition-opacity duration-300"
-        style={{ opacity: showOverlay ? 1 : 0 }}
+        style={{ opacity: titleShown ? 1 : 0 }}
       >
-        <h3
-          className="text-sm font-medium truncate"
-          style={{ color: "white" }}
-        >
+        <h3 className="text-sm font-medium truncate" style={{ color: "white" }}>
           {title}
         </h3>
         {subtitle && (

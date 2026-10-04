@@ -1,13 +1,20 @@
-import { useState } from "react";
+import { Suspense, lazy, useEffect, useRef, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
-import { getOrderedNavItems } from "../../constants/navigation";
-import { useKeyboardShortcuts } from "../../hooks/useKeyboardShortcuts";
+import {
+  getNavKeyForPath,
+  getOrderedNavItems,
+} from "../../constants/navigation";
 import { useScrollDirection } from "../../hooks/useScrollDirection";
+import { useShortcutScope } from "../../hooks/useShortcutScope";
+import { showError } from "../../utils/toast";
 import { PeekLogo } from "../branding/PeekLogo";
 import { ThemedIcon } from "../icons/index";
 import Button from "./Button";
-import HelpModal from "./HelpModal";
+import { PieceErrorBoundary } from "./ErrorBoundary";
 import UserMenu from "./UserMenu";
+
+// Loaded on first open: the shortcut list is not part of the first load
+const HelpModal = lazy(() => import("./HelpModal"));
 
 /**
  * TopBar Component
@@ -33,46 +40,47 @@ const TopBar = ({ navPreferences = [] }: Props) => {
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [isHelpModalOpen, setIsHelpModalOpen] = useState(false);
   const location = useLocation();
+  const navRef = useRef<HTMLElement>(null);
   const scrollDirection = useScrollDirection(100);
 
   // Help dialog hotkey (? or Shift+/)
-  useKeyboardShortcuts(
-    {
-      "shift+?": () => setIsHelpModalOpen(true),
-    },
-    {
-      enabled: true,
-      context: "help-dialog",
-    }
-  );
+  useShortcutScope({
+    layer: "global",
+    keys: { "shift+?": () => setIsHelpModalOpen(true) },
+  });
 
   // Get ordered and filtered nav items based on user preferences
   const navItems = getOrderedNavItems(navPreferences).filter(
     (item): item is NonNullable<typeof item> => item != null
   );
 
-  // Get current page from React Router location
-  const getCurrentPage = () => {
-    const path = location.pathname;
-    if (path === "/") return "Home";
-    if (path.startsWith("/scenes")) return "Scenes";
-    if (path.startsWith("/recommended")) return "Recommended";
-    if (path.startsWith("/performers")) return "Performers";
-    if (path.startsWith("/studios")) return "Studios";
-    if (path.startsWith("/tags")) return "Tags";
-    if (path.startsWith("/collections") || path.startsWith("/collection/"))
-      return "Collections";
-    if (path.startsWith("/galleries") || path.startsWith("/gallery/"))
-      return "Galleries";
-    if (path.startsWith("/images")) return "Images";
-    if (path.startsWith("/playlists") || path.startsWith("/playlist/"))
-      return "Playlists";
-    if (path.startsWith("/clips")) return "Clips";
-    if (path.startsWith("/watch-history")) return "Watch History";
-    return null;
-  };
+  // The nav item the current path belongs to
+  const currentPage = getNavKeyForPath(location.pathname);
+  const isSettingsActive = currentPage === "Settings";
 
-  const currentPage = getCurrentPage();
+  // A route change closes the mobile menu
+  useEffect(() => {
+    setIsMobileMenuOpen(false);
+  }, [location.pathname]);
+
+  // A press outside the bar closes it
+  useEffect(() => {
+    if (!isMobileMenuOpen) return;
+    const handleMouseDown = (event: MouseEvent) => {
+      if (navRef.current && !navRef.current.contains(event.target as Node)) {
+        setIsMobileMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleMouseDown);
+    return () => document.removeEventListener("mousedown", handleMouseDown);
+  }, [isMobileMenuOpen]);
+
+  const handleKeyDown = (event: React.KeyboardEvent) => {
+    if (event.key === "Escape" && isMobileMenuOpen) {
+      event.preventDefault();
+      setIsMobileMenuOpen(false);
+    }
+  };
 
   // Determine if topbar should be visible
   const isVisible = scrollDirection === "top" || scrollDirection === "up";
@@ -80,6 +88,8 @@ const TopBar = ({ navPreferences = [] }: Props) => {
   return (
     <>
       <nav
+        ref={navRef}
+        onKeyDown={handleKeyDown}
         className="lg:hidden fixed top-0 left-0 right-0 z-50 py-2 px-4 transition-transform duration-300 ease-in-out"
         style={{
           backgroundColor: "var(--bg-secondary)",
@@ -146,7 +156,7 @@ const TopBar = ({ navPreferences = [] }: Props) => {
 
         {/* Mobile Navigation Menu */}
         {isMobileMenuOpen && (
-          <div className="mt-4 pb-4">
+          <div className="mt-4 pb-4 max-h-[calc(100dvh-4rem)] overflow-y-auto">
             {/* Main navigation items */}
             <ul className="flex flex-col space-y-2">
               {navItems.map((item) => (
@@ -176,7 +186,9 @@ const TopBar = ({ navPreferences = [] }: Props) => {
               <li>
                 <Link
                   to="/settings"
-                  className="nav-link block text-base font-medium transition-colors duration-200 px-3 py-2 rounded"
+                  className={`nav-link block text-base font-medium transition-colors duration-200 px-3 py-2 rounded ${
+                    isSettingsActive ? "nav-link-active" : ""
+                  }`}
                   onClick={() => setIsMobileMenuOpen(false)}
                 >
                   <div className="flex items-center gap-2">
@@ -192,7 +204,17 @@ const TopBar = ({ navPreferences = [] }: Props) => {
 
       {/* Help Modal */}
       {isHelpModalOpen && (
-        <HelpModal onClose={() => setIsHelpModalOpen(false)} />
+        // Its own chunk: one that fails to load closes and says so
+        <PieceErrorBoundary
+          onError={() => {
+            setIsHelpModalOpen(false);
+            showError("Couldn't open help");
+          }}
+        >
+          <Suspense fallback={null}>
+            <HelpModal onClose={() => setIsHelpModalOpen(false)} />
+          </Suspense>
+        </PieceErrorBoundary>
       )}
     </>
   );

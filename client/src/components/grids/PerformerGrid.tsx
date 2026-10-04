@@ -1,5 +1,7 @@
-import { SearchableGrid } from "../ui/SearchableGrid";
+import type { ComponentProps } from "react";
+import { makeCompositeKey } from "../../utils/compositeKey";
 import { PerformerCard } from "../cards/index";
+import { SearchableGrid } from "../ui/SearchableGrid";
 
 interface Props {
   lockedFilters?: Record<string, unknown>;
@@ -24,13 +26,18 @@ const PerformerGrid = ({
       emptyMessage={emptyMessage}
       defaultSort="o_counter"
       density={density}
-      renderItem={(performer: any, _index: number, { onHideSuccess }: any) => (
-        <PerformerCard
-          key={performer.id}
-          performer={performer}
-          onHideSuccess={() => onHideSuccess(performer.id)}
-        />
-      )}
+      renderItem={(item, _index, { onHideSuccess }) => {
+        const performer = item as ComponentProps<
+          typeof PerformerCard
+        >["performer"];
+        return (
+          <PerformerCard
+            key={makeCompositeKey(performer.id, performer.instanceId)}
+            performer={performer}
+            onHideSuccess={onHideSuccess}
+          />
+        );
+      }}
       {...rest}
     />
   );

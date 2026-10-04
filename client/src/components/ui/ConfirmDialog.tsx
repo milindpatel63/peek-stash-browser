@@ -1,21 +1,24 @@
-import { type ReactNode } from "react";
-import { useFocusTrap } from "../../hooks/useFocusTrap";
+import { type ReactNode, type RefObject, useRef } from "react";
 import Button from "./Button";
+import Modal from "./Modal";
 
 interface Props {
   isOpen: boolean;
   onClose: () => void;
   onConfirm: () => void;
-  title?: string;
+  title?: string | undefined;
   message: ReactNode;
-  confirmText?: string;
-  cancelText?: string;
-  confirmStyle?: "danger" | "primary";
+  confirmText?: string | undefined;
+  cancelText?: string | undefined;
+  confirmStyle?: "danger" | "primary" | undefined;
   variant?: string;
+  /** Focused on open; default the Cancel button, a safe answer for a TV
+   * remote's OK button (Modal alone would focus its close button) */
+  initialFocusRef?: RefObject<HTMLElement | null>;
 }
 
 /**
- * Reusable confirmation dialog component
+ * Reusable confirmation dialog on `Modal`
  * HTML-based modal, no browser native dialogs
  */
 const ConfirmDialog = ({
@@ -27,11 +30,9 @@ const ConfirmDialog = ({
   confirmText = "Confirm",
   cancelText = "Cancel",
   confirmStyle = "danger",
+  initialFocusRef,
 }: Props) => {
-  // Focus trap to keep keyboard navigation within modal
-  const dialogRef = useFocusTrap(isOpen, onClose);
-
-  if (!isOpen) return null;
+  const cancelRef = useRef<HTMLButtonElement>(null);
 
   const handleConfirm = (e: React.MouseEvent<HTMLButtonElement>) => {
     e?.preventDefault();
@@ -42,56 +43,28 @@ const ConfirmDialog = ({
 
   const confirmVariant = confirmStyle === "danger" ? "destructive" : "primary";
 
+  // Modal portals the dialog out of a card's scaled, clipped box, and its
+  // backdrop stops the click and mousedown React would bubble to the card
   return (
-    <div
-      className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50"
-      onClick={onClose}
-    >
-      <div
-        ref={dialogRef as React.Ref<HTMLDivElement>}
-        className="rounded-lg shadow-lg max-w-md w-full m-4"
-        style={{
-          backgroundColor: "var(--bg-card)",
-          border: "1px solid var(--border-color)",
-        }}
-        onClick={(e) => e.stopPropagation()}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="dialog-title"
-      >
-        {/* Header */}
-        <div
-          className="px-6 py-4 border-b"
-          style={{ borderColor: "var(--border-color)" }}
-        >
-          <h3
-            id="dialog-title"
-            className="text-lg font-semibold"
-            style={{ color: "var(--text-primary)" }}
-          >
-            {title}
-          </h3>
-        </div>
-
-        {/* Body */}
-        <div className="px-6 py-4" style={{ color: "var(--text-secondary)" }}>
-          {typeof message === "string" ? <p>{message}</p> : message}
-        </div>
-
-        {/* Footer */}
-        <div
-          className="px-6 py-4 border-t flex justify-end gap-3"
-          style={{ borderColor: "var(--border-color)" }}
-        >
-          <Button onClick={onClose} variant="secondary">
+    <Modal
+      isOpen={isOpen}
+      onClose={onClose}
+      size="sm"
+      title={title}
+      initialFocusRef={initialFocusRef ?? cancelRef}
+      footer={
+        <>
+          <Button ref={cancelRef} onClick={onClose} variant="secondary">
             {cancelText}
           </Button>
           <Button onClick={handleConfirm} variant={confirmVariant}>
             {confirmText}
           </Button>
-        </div>
-      </div>
-    </div>
+        </>
+      }
+    >
+      {typeof message === "string" ? <p>{message}</p> : message}
+    </Modal>
   );
 };
 

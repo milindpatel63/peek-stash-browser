@@ -12,13 +12,15 @@ Peek allows you to open scenes in external media players like VLC for enhanced p
 | **Windows (Firefox)** | ⚠️ Limited | May not work due to Firefox's protocol handling |
 | **macOS** | 🔬 Untested | Should work with protocol handler |
 | **Linux** | 🔬 Untested | Should work with protocol handler |
+| **Chromecast** | ❌ Not supported | The Chromecast button and the "Enable Chromecast/AirPlay" setting are gone: casting needs your Peek login, which a cast device cannot pass on. Casting returns in a later release; use this button on the device instead |
+| **AirPlay (Safari to Apple TV)** | ❌ Not supported | Removed with Chromecast, for the same reason. It returns with casting in a later release; use this button on the device instead |
 
 !!! note "Help Us Test"
     We need community feedback on platform compatibility. If you test on a platform not marked as "Works", please [report your results on GitHub](https://github.com/carrotwaxr/peek-stash-browser/issues) so we can update this documentation.
 
 ## Using the External Player Button
 
-On the scene page, you'll find an external player button (external link icon) next to the "View in Stash" button. The behavior differs by platform:
+On the scene page, you'll find an external player button (external link icon) beside the **Back** button, at the top of the page. (Admins also see a "View in Stash" button next to it.) The behavior differs by platform:
 
 ### Mobile Devices
 
@@ -32,6 +34,16 @@ The button becomes a combo button with two parts:
 1. **Main button** (external link icon): Opens the scene in VLC
 2. **Dropdown arrow**: Click to reveal additional options:
    - **Copy Stream URL**: Copies the direct stream URL to your clipboard
+
+## Your personal link
+
+The link behind the button belongs to you. Peek creates it when you open the scene page, and it:
+
+- works for 12 hours, then returns an error until you reopen the scene page for a fresh one
+- stops working as soon as your password changes, or an admin resets it
+- shows only what your account may see, so hidden items and content restrictions still apply
+
+Don't share it: anyone who has it can watch that scene as you until it expires. If a link stops working, reopen the scene page and copy a fresh one.
 
 ## Setting Up VLC Protocol Handler (Desktop)
 
@@ -134,6 +146,8 @@ If you don't want to set up a protocol handler, or it's not working on your plat
 
 This method works on all platforms without any additional setup.
 
+Copying to the clipboard works only when you reach Peek over HTTPS. On a plain HTTP address, the browser has no clipboard API, so a text field with the link appears instead: select it and press Ctrl+C (Cmd+C on macOS).
+
 ## Troubleshooting
 
 ### "Open in VLC" doesn't work (Windows)
@@ -157,7 +171,7 @@ Firefox handles custom protocols differently from Edge/Chrome and may not respec
 ### Video won't play in VLC
 
 - Ensure VLC is up to date (version 3.0 or later recommended)
-- The stream URL goes through Peek's proxy, which should handle authentication automatically
+- A link older than 12 hours, or from before a password change, returns 401: reopen the scene page and copy a fresh one
 - Try the "Copy Stream URL" method to verify the URL works
 
 ### Android: No app found to handle the link
@@ -179,15 +193,17 @@ Firefox handles custom protocols differently from Edge/Chrome and may not respec
 |----------|------------|---------|
 | Android | Intent URI | `intent://host#Intent;action=android.intent.action.VIEW;scheme=https;type=video/mp4;...` |
 | iOS | VLC x-callback | `vlc-x-callback://x-callback-url/stream?url=...` |
-| Desktop | VLC protocol | `vlc://https://peek.example.com/api/scene/123/proxy-stream/stream` |
+| Desktop | VLC protocol | `vlc://https://peek.example.com/api/scene/123/proxy-stream/stream?instanceId=…&uid=…&exp=…&sig=…` |
+
+On Android, the `type` in the intent is the real type of the scene's file, taken from its extension: `video/mp4` for an MP4, `video/x-matroska` for an MKV, and so on. A file with an unknown extension gets `video/*`, which any video app accepts. This lets players that pick by type open MKV, AVI and WMV files too.
 
 ### Stream URL
 
 The stream URL points to Peek's proxy endpoint, not directly to Stash. This ensures:
 
 - API keys are not exposed in URLs
-- Authentication is handled by Peek
-- The URL format is: `{peek-url}/api/scene/{sceneId}/proxy-stream/stream`
+- The link is signed for you: `uid` is your account, `exp` is when it stops working (12 hours after it was made), and `sig` is a signature Peek checks on every request. The signature also covers your password, so a password change or reset invalidates the link, and Peek still applies your hidden items and content restrictions when the link is used
+- The URL format is: `{peek-url}/api/scene/{sceneId}/proxy-stream/stream?instanceId=…&uid=…&exp=…&sig=…`
 
 ## Contributing
 

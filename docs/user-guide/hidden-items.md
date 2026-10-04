@@ -27,33 +27,39 @@ The same three-dot menu is available on:
 - Tag cards
 - Group/Collection cards
 - Gallery cards
+- Image cards
+- Clip cards (on the Clips page)
 
 ### Bulk Actions (Scenes)
 
 1. Enable multi-select mode by clicking the checkbox icon
 2. Select multiple scenes
-3. Click "Hide Selected" in the bulk action bar
+3. Click **Hide** in the bulk action bar
+
+A bulk hide is all or nothing: either every selected item is hidden, or, if something goes wrong, none is and you can try again.
 
 ## Managing Hidden Items
 
 ### Viewing Hidden Items
 
-1. Go to **My Settings**
-2. Scroll to the "Hidden Items" section
-3. Click **View Hidden Items**
+1. Go to **Settings** > **User Preferences** > **Content**
+2. Find the **Hidden Items** section
+3. Click **Hidden Items**
+
+The page lists your hidden items newest first, 50 to a page, each with its thumbnail and name. The tabs show how many items of each type you have hidden; a type you have hidden nothing of has no tab. An item you can no longer see for another reason (a content restriction, or it was removed from the library) shows as its type with "Details unavailable", and you can still restore it.
 
 ### Restoring Hidden Items
 
 From the Hidden Items page:
-- Click **Restore** on individual items to unhide them
-- Click **Restore All** to restore all hidden items at once
-- Use the tabs to filter by entity type (Scenes, Performers, Studios, etc.)
+- Click **Restore** on individual items to unhide them. Restore finishes once the item shows again in your lists, so it can take a moment on a large library
+- Click **Restore All** to restore all hidden items at once, or every hidden item of the open tab's type
+- Use the tabs to filter by entity type (Scenes, Performers, Studios, Clips, etc.)
 
 ### Don't Ask Again
 
 If you frequently hide items and want to skip the confirmation dialog:
 1. Check "Don't ask me again" when hiding an item, OR
-2. Go to **My Settings** > Hidden Items section
+2. Go to **Settings** > **User Preferences** > **Content**, in the **Hidden Items** section
 3. Check "Don't ask for confirmation when hiding items"
 
 You can toggle this setting on/off at any time.
@@ -68,23 +74,26 @@ You can toggle this setting on/off at any time.
 ### For Admin Users
 - Admins can hide content for themselves just like regular users
 - Content Restrictions (INCLUDE/EXCLUDE rules) are bypassed for admins
-- Hidden Items filtering is ALWAYS applied, even for admins
+- Hidden Items filtering is ALWAYS applied, even for admins, with one exception: the Content Restrictions editor lists everything, so an admin can restrict another user from items they hid for themselves
 - This allows admins to maintain full admin access while personalizing their own view
 
 ### Cascading Behavior
 
 When you hide an entity:
-- **Hiding a Scene**: Only that scene is hidden
-- **Hiding a Performer**: That performer and scenes where they appear may be affected
-- **Hiding a Studio**: That studio and scenes from it may be affected
-- **Hiding a Tag**: That tag and related content may be affected
+- **Hiding a Scene or Image**: Only that item is hidden
+- **Hiding a Performer**: That performer, and the scenes, galleries and images they appear in
+- **Hiding a Studio**: That studio, its child studios, and the scenes, galleries and images from any of them
+- **Hiding a Tag**: That tag, its child tags, and the scenes (including inherited tags), galleries, images, clip markers, performers, studios and collections tagged with any of them
+- **Hiding a Collection**: That collection and its scenes
+- **Hiding a Gallery**: That gallery, its images and the scenes linked to it
+- **Hiding a Clip**: Only that clip. Its scene and the scene's other clips stay; hiding a scene hides its clips too
 
-**Note**: The exact cascading behavior depends on your Content Restrictions settings and whether hidden entities are the only content associated with related items.
+Hiding a tag or studio hides its whole subtree; unhiding the parent restores the children and their content at the next recompute. For user accounts, performers, studios, collections and tags left with no visible content disappear from lists until some of their content is visible again; admin accounts keep seeing them.
 
 ## FAQ
 
 ### Can I accidentally hide something important?
-You can always restore hidden items from **My Settings** > **View Hidden Items**. The Restore All button makes it easy to undo bulk actions.
+You can always restore hidden items from **Settings** > **User Preferences** > **Content** > **Hidden Items**. The Restore All button makes it easy to undo bulk actions.
 
 ### Do hidden items count toward my stats?
 Hidden items are excluded from most views but may still appear in certain statistics or reports.
@@ -94,6 +103,9 @@ Admins can see that you have hidden items (via database access) but the hidden i
 
 ### What happens if content I've hidden is updated in Stash?
 Hidden items remain hidden even if the underlying content is modified in Stash. The hiding is based on entity ID, not content characteristics.
+
+### When do new or changed items appear?
+If you have hidden anything, items a sync adds or changes (a new scene of a performer you hid, say) stay out of sight until that sync finishes and your hidden items have been applied to them, so nothing you hid shows up in between.
 
 ---
 

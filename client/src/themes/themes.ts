@@ -1,4 +1,5 @@
 // Theme definitions for the media application
+import type { BuiltInThemeKey } from "@peek/shared-types/themes.js";
 import {
   adjustLightness,
   generateFocusRing,
@@ -11,7 +12,13 @@ import {
 export interface ThemeConfig {
   mode: string;
   fonts: { brand: string; heading: string; body: string; mono: string };
-  colors: { background: string; backgroundSecondary: string; backgroundCard: string; text: string; border: string };
+  colors: {
+    background: string;
+    backgroundSecondary: string;
+    backgroundCard: string;
+    text: string;
+    border: string;
+  };
   accents: { primary: string; secondary: string };
   status: { success: string; error: string; info: string; warning: string };
 }
@@ -53,6 +60,11 @@ export const generateThemeCSSVars = (config: ThemeConfig) => {
     ...generateToastColors(config.status, config.mode),
   };
 };
+
+interface BuiltInTheme {
+  name: string;
+  properties: ReturnType<typeof generateThemeCSSVars>;
+}
 
 export const themes = {
   peek: {
@@ -248,10 +260,21 @@ export const themes = {
       return generateThemeCSSVars(config);
     })(),
   },
-};
+} satisfies Record<BuiltInThemeKey, BuiltInTheme>;
+
+interface FontOption {
+  value: string;
+  label: string;
+}
+
+/** Never empty: the first entry is a new custom theme's default */
+type FontOptionList = [FontOption, ...FontOption[]];
 
 // Available font options for custom theme creation
-export const fontOptions = {
+export const fontOptions: Record<
+  "brand" | "heading" | "body" | "mono",
+  FontOptionList
+> = {
   brand: [{ value: "'Lilita One', cursive", label: "Lilita One" }],
   heading: [
     {

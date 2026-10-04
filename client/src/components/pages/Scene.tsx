@@ -1,45 +1,55 @@
 import { useEffect, useRef, useState } from "react";
-import { useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { useLocation, useParams, useSearchParams } from "react-router-dom";
+import { describeLookupFailure } from "../../api/lookupFailure";
 import {
   ScenePlayerProvider,
   useScenePlayer,
 } from "../../contexts/ScenePlayerContext";
+import { useAuth } from "../../hooks/useAuth";
 import { useInitialFocus } from "../../hooks/useFocusTrap";
+import { useMediaQuery } from "../../hooks/useMediaQuery";
 import { useNavigationState } from "../../hooks/useNavigationState";
 import { usePageTitle } from "../../hooks/usePageTitle";
 import { makeCompositeKey } from "../../utils/compositeKey";
-import { canDirectPlayVideo } from "../../utils/videoFormat";
+import { readSceneLocationState } from "../../utils/playbackQueue";
+import { GalleryGrid, GroupGrid } from "../grids/index";
 import PlaylistSidebar from "../playlist/PlaylistSidebar";
 import PlaylistStatusCard from "../playlist/PlaylistStatusCard";
+import TabNavigation, { TAB_COUNT_LOADING } from "../ui/TabNavigation";
+import ViewInStashButton from "../ui/ViewInStashButton";
 import {
   Button,
+  EntityNotFound,
   ExternalPlayerButton,
-  Navigation,
+  LibraryInitializingBanner,
   RecommendedSidebar,
   ScenesLikeThis,
 } from "../ui/index";
-import { GalleryGrid, GroupGrid } from "../grids/index";
 import PlaybackControls from "../video-player/PlaybackControls";
 import VideoPlayer from "../video-player/VideoPlayer";
-import ViewInStashButton from "../ui/ViewInStashButton";
 import SceneDetails from "./SceneDetails";
-import TabNavigation, { TAB_COUNT_LOADING } from "../ui/TabNavigation";
 
 // Inner component that reads from context
 const SceneContent = () => {
-  const navigate = useNavigate();
   const pageRef = useRef<HTMLDivElement>(null);
   const leftColumnRef = useRef<HTMLDivElement>(null);
 
   // Read state from context
-  const { scene, sceneLoading, sceneError, playlist } = useScenePlayer();
+  const { scene, sceneLoading, sceneError, playlist, retryScene } =
+    useScenePlayer();
 
   // Navigation state for back button
   const { goBack, backButtonText } = useNavigationState();
 
+  // The sidebar column exists from lg up; below it, mount nothing there
+  const isDesktop = useMediaQuery("(min-width: 1024px)");
+
   // Set page title to scene title (with fallback to filename)
   const sceneFiles = scene?.files as Array<Record<string, unknown>> | undefined;
-  const displayTitle = (scene?.title as string) || (sceneFiles?.[0]?.basename as string) || "Scene";
+  const displayTitle =
+    (scene?.title as string) ||
+    (sceneFiles?.[0]?.basename as string) ||
+    "Scene";
   usePageTitle(displayTitle);
 
   // Set initial focus to video player when page loads (excluding back button)
@@ -50,43 +60,39 @@ const SceneContent = () => {
   const [showTechnicalDetails, setShowTechnicalDetails] = useState(false);
   const [sidebarHeight, setSidebarHeight] = useState<number | null>(null);
   const [searchParams] = useSearchParams();
-  const activeTab = searchParams.get('tab') || 'similar';
+  const activeTab = searchParams.get("tab") || "similar";
   // TAB_COUNT_LOADING means loading (show tab without count badge), updated by ScenesLikeThis onCountChange
-  const [similarScenesCount, setSimilarScenesCount] = useState(TAB_COUNT_LOADING);
-
-  // Dispatch zone change event to disable TV navigation on this page
-  useEffect(() => {
-    // Dispatch event to inform global listeners (Sidebar) that we're on a page without TV navigation zones
-    window.dispatchEvent(
-      new CustomEvent("tvZoneChange", {
-        detail: { zone: null }, // null zone means no TV navigation active
-      })
-    );
-  }, []); // Run once on mount
+  const [similarScenesCount, setSimilarScenesCount] =
+    useState(TAB_COUNT_LOADING);
 
   // Reset similar scenes count when scene changes (back to loading state)
   useEffect(() => {
     setSimilarScenesCount(TAB_COUNT_LOADING);
   }, [scene?.id]);
 
-  // Seek to timestamp from URL query param (e.g., ?t=120 for 2 minutes)
+  // Seek to timestamp from URL query param (e.g., ?t=120 for 2 minutes),
+  // once per scene and time: a tab click keeps ?t= in the URL and must not
+  // seek again
+  const startTime = searchParams.get("t");
+  const sceneKey = scene ? makeCompositeKey(scene.id, scene.instanceId) : null;
+  const seekedRef = useRef<string | null>(null);
   useEffect(() => {
-    const startTime = searchParams.get('t');
-    if (startTime && scene?.id) {
-      const seconds = parseInt(startTime, 10);
-      if (!isNaN(seconds) && seconds > 0) {
-        // Small delay to ensure video player is ready
-        const timer = setTimeout(() => {
-          window.dispatchEvent(
-            new CustomEvent("seekToTime", {
-              detail: { seconds },
-            })
-          );
-        }, 500);
-        return () => clearTimeout(timer);
-      }
-    }
-  }, [scene?.id, searchParams]);
+    if (!startTime || !sceneKey) return undefined;
+    const seconds = parseInt(startTime, 10);
+    if (isNaN(seconds) || seconds <= 0) return undefined;
+    const seek = `${sceneKey}@${startTime}`;
+    if (seekedRef.current === seek) return undefined;
+    // Small delay to ensure video player is ready
+    const timer = setTimeout(() => {
+      seekedRef.current = seek;
+      window.dispatchEvent(
+        new CustomEvent("seekToTime", {
+          detail: { seconds },
+        })
+      );
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [sceneKey, startTime]);
 
   // Measure left column height and sync to sidebar
   useEffect(() => {
@@ -124,20 +130,11 @@ const SceneContent = () => {
         className="min-h-screen"
         style={{ backgroundColor: "var(--bg-primary)" }}
       >
-        <Navigation />
-        <div className="flex items-center justify-center min-h-screen">
-          <div className="text-center">
-            <h2
-              className="text-xl mb-2"
-              style={{ color: "var(--text-primary)" }}
-            >
-              {(sceneError as { message?: string })?.message || "Scene not found"}
-            </h2>
-            <Button onClick={() => navigate("/scenes")} variant="primary">
-              Browse Scenes
-            </Button>
-          </div>
-        </div>
+        <EntityNotFound
+          entityType="scene"
+          {...describeLookupFailure(sceneError)}
+          onRetry={retryScene}
+        />
       </div>
     );
   }
@@ -148,6 +145,8 @@ const SceneContent = () => {
       className="min-h-screen"
       style={{ backgroundColor: "var(--bg-primary)" }}
     >
+      <LibraryInitializingBanner className="mx-4 lg:mx-6 xl:mx-8 mt-6" />
+
       {/* Video Player Header */}
       <header className="w-full py-8 px-4 lg:px-6 xl:px-8">
         <div className="flex flex-col md:flex-row md:items-center gap-4">
@@ -165,7 +164,7 @@ const SceneContent = () => {
               instanceId={scene?.instanceId as string}
               title={displayTitle}
             />
-            <ViewInStashButton stashUrl={(scene?.stashUrl as string) || ""} size={20} />
+            <ViewInStashButton stashUrl={scene?.stashUrl ?? ""} size={20} />
           </div>
           <h1
             className="text-2xl font-bold line-clamp-2"
@@ -180,13 +179,16 @@ const SceneContent = () => {
       <main className="w-full px-4 lg:px-6 xl:px-8">
         {/* Two-column layout on desktop, single column on mobile */}
         <div className="grid grid-cols-1 lg:grid-cols-[1fr_minmax(320px,380px)] xl:grid-cols-[1fr_400px] gap-6 mb-6">
-          {/* Left Column: Video + Controls */}
-          <div ref={leftColumnRef} className="flex flex-col gap-2">
+          {/* Left Column: Video + Controls. self-start: a stretched grid item
+              would measure the sidebar's height, and the sidebar takes its
+              height from this measurement */}
+          <div ref={leftColumnRef} className="flex flex-col gap-2 self-start">
             <VideoPlayer />
             <PlaybackControls />
 
-            {/* Mobile-only playlist card (below controls on small screens) */}
-            {playlist && (
+            {/* Below lg only: the sidebar replaces the card from lg up, and a
+                mounted card loads its thumbnails even when hidden */}
+            {playlist && !isDesktop && (
               <div className="lg:hidden">
                 <PlaylistStatusCard />
               </div>
@@ -200,9 +202,11 @@ const SceneContent = () => {
               {playlist ? (
                 <PlaylistSidebar maxHeight={sidebarHeight ?? undefined} />
               ) : (
+                isDesktop &&
                 scene && (
                   <RecommendedSidebar
-                    sceneId={scene.id as string}
+                    sceneId={scene.id}
+                    instanceId={scene.instanceId}
                     maxHeight={sidebarHeight ?? undefined}
                   />
                 )
@@ -224,12 +228,28 @@ const SceneContent = () => {
           <div className="mt-6">
             <TabNavigation
               tabs={[
-                { id: 'similar', label: 'Similar Scenes', count: similarScenesCount },
-                ...((scene.groups as unknown[])?.length > 0
-                  ? [{ id: 'collections', label: 'Collections', count: (scene.groups as unknown[]).length }]
+                {
+                  id: "similar",
+                  label: "Similar Scenes",
+                  count: similarScenesCount,
+                },
+                ...(scene.groups.length > 0
+                  ? [
+                      {
+                        id: "collections",
+                        label: "Collections",
+                        count: scene.groups.length,
+                      },
+                    ]
                   : []),
-                ...((scene.galleries as unknown[])?.length > 0
-                  ? [{ id: 'galleries', label: 'Galleries', count: (scene.galleries as unknown[]).length }]
+                ...(scene.galleries.length > 0
+                  ? [
+                      {
+                        id: "galleries",
+                        label: "Galleries",
+                        count: scene.galleries.length,
+                      },
+                    ]
                   : []),
               ]}
               defaultTab="similar"
@@ -237,22 +257,26 @@ const SceneContent = () => {
             />
 
             {/* Tab Content */}
-            {activeTab === 'similar' && (
+            {activeTab === "similar" && (
               <div className="mt-6">
-                <ScenesLikeThis sceneId={scene.id as string} onCountChange={setSimilarScenesCount} />
+                <ScenesLikeThis
+                  sceneId={scene.id}
+                  instanceId={scene.instanceId}
+                  onCountChange={setSimilarScenesCount}
+                />
               </div>
             )}
 
-            {activeTab === 'collections' && (
+            {activeTab === "collections" && (
               <div className="mt-6">
                 <GroupGrid
                   lockedFilters={{
                     group_filter: {
                       scenes: {
-                        value: [makeCompositeKey(scene.id as string, scene.instanceId as string)],
-                        modifier: "INCLUDES"
-                      }
-                    }
+                        value: [makeCompositeKey(scene.id, scene.instanceId)],
+                        modifier: "INCLUDES",
+                      },
+                    },
                   }}
                   hideLockedFilters
                   emptyMessage="No collections found for this scene"
@@ -260,16 +284,16 @@ const SceneContent = () => {
               </div>
             )}
 
-            {activeTab === 'galleries' && (
+            {activeTab === "galleries" && (
               <div className="mt-6">
                 <GalleryGrid
                   lockedFilters={{
                     gallery_filter: {
                       scenes: {
-                        value: [makeCompositeKey(scene.id as string, scene.instanceId as string)],
-                        modifier: "INCLUDES"
-                      }
-                    }
+                        value: [makeCompositeKey(scene.id, scene.instanceId)],
+                        modifier: "INCLUDES",
+                      },
+                    },
                   }}
                   hideLockedFilters
                   emptyMessage="No galleries found for this scene"
@@ -290,92 +314,25 @@ const Scene = () => {
 
   // Extract instance ID from URL query params for multi-instance support
   const searchParams = new URLSearchParams(location.search);
-  const instanceId = searchParams.get('instance');
+  const instanceId = searchParams.get("instance");
 
-  // Capture location state in a ref to preserve it across re-renders
-  // React Router sometimes loses state on initial render, so we store it once it arrives
-  const locationStateRef = useRef<Record<string, unknown> | null>(null);
-
-  // Update ref synchronously during render (not in useEffect)
-  if (location.state && !locationStateRef.current) {
-    locationStateRef.current = location.state;
-  }
-
-  // Extract data from location.state (prefer current state, fall back to ref)
-  const stateToUse = location.state || locationStateRef.current;
-  let playlist = stateToUse?.playlist;
-  const shouldResume = stateToUse?.shouldResume;
-
-  // Persist auto-playlists to sessionStorage for page refresh support
-  // Use a stable key that doesn't change when navigating between scenes
-  const PLAYLIST_STORAGE_KEY = "currentPlaylist";
-
-  // If playlist came via location.state, save it
-  if (playlist) {
-    sessionStorage.setItem(PLAYLIST_STORAGE_KEY, JSON.stringify(playlist));
-  }
-
-  // If no playlist in location.state, try to restore from sessionStorage
-  // This handles page refresh for auto-generated playlists
-  if (!playlist) {
-    const storedPlaylist = sessionStorage.getItem(PLAYLIST_STORAGE_KEY);
-    if (storedPlaylist) {
-      try {
-        const parsed = JSON.parse(storedPlaylist);
-        // Verify the current scene is actually in this playlist
-        const sceneInPlaylist = (parsed.scenes as Array<{ sceneId: string }>)?.some(
-          (s: { sceneId: string }) => s.sceneId === sceneId
-        );
-        if (sceneInPlaylist) {
-          playlist = parsed;
-          // Update currentIndex to match the current scene
-          const currentIndex = (parsed.scenes as Array<{ sceneId: string }>).findIndex(
-            (s: { sceneId: string }) => s.sceneId === sceneId
-          );
-          if (currentIndex >= 0) {
-            playlist.currentIndex = currentIndex;
-          }
-        } else {
-          // Scene not in stored playlist, clear it
-          sessionStorage.removeItem(PLAYLIST_STORAGE_KEY);
-        }
-      } catch (e) {
-        console.error("Failed to parse stored playlist:", e);
-        sessionStorage.removeItem(PLAYLIST_STORAGE_KEY);
-      }
-    }
-  }
-
-  // Cleanup: Clear playlist when navigating away from scene player
-  useEffect(() => {
-    return () => {
-      // Only clear if we're navigating away, not just to another scene
-      // This is handled by checking if location.state has a playlist on next navigation
-    };
-  }, []);
-
-  // Compute compatibility if scene data is available from navigation state
-  // (only available when navigating from scene cards, not on direct page load)
-  const scene = stateToUse?.scene;
-  const firstFile = scene?.files?.[0];
-  const compatibility = firstFile ? canDirectPlayVideo(firstFile) : null;
-
-  // Always default to "direct" quality - the auto-fallback mechanism in
-  // useVideoPlayerSources will switch to 480p if browser can't play the codec
-  const initialQuality = "direct";
-
-  // Extract shouldAutoplay from location state (set by PlaylistDetail's Play button or clip cards)
-  const shouldAutoplayFromState = stateToUse?.shouldAutoplay ?? false;
+  // The history entry's state is the only source: the queue a navigation
+  // handed over, or the one the player wrote back into this entry (a reload
+  // or Back finds it there). An entry opened without state has no queue.
+  // A queue another user left in the entry (sign-out, sign-in, Back) is none.
+  const { user } = useAuth();
+  const { playlist, shouldResume, shouldAutoplay } = readSceneLocationState(
+    location.state,
+    user?.id
+  );
 
   return (
     <ScenePlayerProvider
       sceneId={sceneId ?? ""}
-      instanceId={instanceId ?? undefined}
-      playlist={playlist ?? undefined}
-      shouldResume={shouldResume ?? undefined}
-      compatibility={compatibility ?? undefined}
-      initialQuality={initialQuality}
-      initialShouldAutoplay={shouldAutoplayFromState}
+      instanceId={instanceId}
+      playlist={playlist ?? null}
+      shouldResume={shouldResume ?? false}
+      initialShouldAutoplay={shouldAutoplay ?? false}
     >
       <SceneContent />
     </ScenePlayerProvider>

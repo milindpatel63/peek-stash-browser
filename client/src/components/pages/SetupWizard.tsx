@@ -1,9 +1,15 @@
 import React, { useState } from "react";
+import {
+  PASSWORD_MIN_LENGTH,
+  PASSWORD_RULES_TEXT,
+  validatePassword,
+} from "@peek/shared-types/password.js";
 import { setupApi } from "../../api";
+import type { LoginResult } from "../../contexts/AuthContextProvider";
 import { useAuth } from "../../hooks/useAuth";
+import type { ThemeDefinition } from "../../themes/ThemeContext";
 import { useTheme } from "../../themes/useTheme";
 import { Button } from "../ui/index";
-import type { ThemeDefinition } from "../../themes/ThemeContext";
 
 interface WelcomeStepProps {
   theme: ThemeDefinition | undefined;
@@ -29,12 +35,21 @@ interface StashConfigStepProps {
   testing: boolean;
   testSuccess: boolean;
   stashUrl: string;
+  stashUiUrl: string;
   stashApiKey: string;
   onStashUrlChange: (e: React.ChangeEvent<HTMLInputElement>) => void;
+  onStashUiUrlChange: (e: React.ChangeEvent<HTMLInputElement>) => void;
   onStashApiKeyChange: (e: React.ChangeEvent<HTMLInputElement>) => void;
   onTestConnection: () => void;
-  onBack: () => void;
+  onBack?: () => void;
   onSubmit: () => void;
+}
+
+interface SignInToFinishStepProps {
+  onSignIn: (credentials: {
+    username: string;
+    password: string;
+  }) => Promise<LoginResult>;
 }
 
 interface CompleteStepProps {
@@ -91,8 +106,12 @@ const WelcomeStep = ({ theme, onNext }: WelcomeStepProps) => (
           color: theme?.properties?.["--text-secondary"] || "#b3b3b3",
         }}
       >
-        <li>Create an admin account to manage Peek</li>
-        <li>Complete setup and start browsing your Stash library</li>
+        <li>Create an admin account</li>
+        <li>
+          Connect Peek to your Stash server (its GraphQL address and API key,
+          from Stash's Settings &gt; Security)
+        </li>
+        <li>Start browsing</li>
       </ul>
 
       <div
@@ -116,8 +135,7 @@ const WelcomeStep = ({ theme, onNext }: WelcomeStepProps) => (
             color: theme?.properties?.["--text-secondary"] || "#b3b3b3",
           }}
         >
-          Make sure your Stash server is running and accessible. Peek connects
-          to Stash via the STASH_URL and STASH_API_KEY environment variables.
+          Make sure Stash is running and reachable from this server.
         </p>
       </div>
     </div>
@@ -207,10 +225,11 @@ const AdminPasswordStep = ({
             color: theme?.properties?.["--text-muted"] || "#666666",
           }}
         >
-          8+ characters with at least one letter and one number
+          {PASSWORD_RULES_TEXT}
         </p>
         <input
           type="password"
+          minLength={PASSWORD_MIN_LENGTH}
           value={adminPassword}
           onChange={onAdminPasswordChange}
           className="w-full px-3 py-2 rounded border focus:outline-none focus:ring-2"
@@ -273,8 +292,10 @@ const StashConfigStep = ({
   testing,
   testSuccess,
   stashUrl,
+  stashUiUrl,
   stashApiKey,
   onStashUrlChange,
+  onStashUiUrlChange,
   onStashApiKeyChange,
   onTestConnection,
   onBack,
@@ -345,9 +366,44 @@ const StashConfigStep = ({
         />
         <p
           className="text-xs mt-1"
-          style={{ color: theme?.properties?.["--text-secondary"] || "#b3b3b3" }}
+          style={{
+            color: theme?.properties?.["--text-secondary"] || "#b3b3b3",
+          }}
         >
-          The full URL to your Stash GraphQL endpoint (usually ends with /graphql)
+          The full URL to your Stash GraphQL endpoint (usually ends with
+          /graphql)
+        </p>
+      </div>
+
+      <div>
+        <label
+          className="block text-sm font-semibold mb-1"
+          style={{
+            color: theme?.properties?.["--text-primary"] || "#ffffff",
+          }}
+        >
+          Stash UI URL
+        </label>
+        <input
+          type="text"
+          value={stashUiUrl}
+          onChange={onStashUiUrlChange}
+          className="w-full px-3 py-2 rounded border focus:outline-none focus:ring-2"
+          style={{
+            backgroundColor: theme?.properties?.["--bg-card"] || "#1f1f1f",
+            borderColor: theme?.properties?.["--border-color"] || "#404040",
+            color: theme?.properties?.["--text-primary"] || "#ffffff",
+          }}
+          placeholder="https://stash.example.com"
+        />
+        <p
+          className="text-xs mt-1"
+          style={{
+            color: theme?.properties?.["--text-secondary"] || "#b3b3b3",
+          }}
+        >
+          Optional. Used for "View in Stash" links. If blank, Peek uses the API
+          URL.
         </p>
       </div>
 
@@ -374,7 +430,9 @@ const StashConfigStep = ({
         />
         <p
           className="text-xs mt-1"
-          style={{ color: theme?.properties?.["--text-secondary"] || "#b3b3b3" }}
+          style={{
+            color: theme?.properties?.["--text-secondary"] || "#b3b3b3",
+          }}
         >
           Found in Stash Settings → Security → API Key
         </p>
@@ -382,9 +440,11 @@ const StashConfigStep = ({
     </div>
 
     <div className="flex gap-4">
-      <Button onClick={onBack} variant="tertiary" fullWidth>
-        Back
-      </Button>
+      {onBack && (
+        <Button onClick={onBack} variant="tertiary" fullWidth>
+          Back
+        </Button>
+      )}
       <Button
         onClick={onTestConnection}
         disabled={testing || !stashUrl || !stashApiKey}
@@ -408,6 +468,117 @@ const StashConfigStep = ({
     </Button>
   </div>
 );
+
+// Step 3 without a session (the wizard resumed after the admin was created):
+// the Stash setup routes need the admin session once the admin exists
+const SignInToFinishStep = ({ onSignIn }: SignInToFinishStepProps) => {
+  const [username, setUsername] = useState("admin");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [signingIn, setSigningIn] = useState(false);
+
+  const signIn = async (e: React.SubmitEvent) => {
+    e.preventDefault();
+    setSigningIn(true);
+    setError("");
+    try {
+      const result = await onSignIn({ username, password });
+      if (!result.success) {
+        setError(result.error || "Sign in failed");
+      }
+    } catch (err: unknown) {
+      setError((err as Error).message || "Sign in failed");
+    } finally {
+      setSigningIn(false);
+    }
+  };
+
+  const inputStyle = {
+    backgroundColor: "var(--bg-card)",
+    borderColor: "var(--border-color)",
+    color: "var(--text-primary)",
+  };
+
+  return (
+    <form className="space-y-6" onSubmit={(e) => void signIn(e)}>
+      <div>
+        <h2
+          className="text-2xl font-bold mb-2"
+          style={{ color: "var(--text-primary)" }}
+        >
+          Sign in as the admin to finish setup
+        </h2>
+        <p style={{ color: "var(--text-secondary)" }}>
+          The admin account already exists. Sign in with it to connect Peek to
+          Stash.
+        </p>
+      </div>
+
+      {error && (
+        <div
+          className="p-4 rounded border-l-4"
+          style={{
+            backgroundColor: "var(--bg-card)",
+            borderColor: "var(--status-error)",
+          }}
+        >
+          <p style={{ color: "var(--status-error)" }}>{error}</p>
+        </div>
+      )}
+
+      <div className="space-y-4">
+        <div>
+          <label
+            htmlFor="setup-signin-username"
+            className="block text-sm font-semibold mb-1"
+            style={{ color: "var(--text-primary)" }}
+          >
+            Username
+          </label>
+          <input
+            id="setup-signin-username"
+            type="text"
+            autoComplete="username"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            className="w-full px-3 py-2 rounded border focus:outline-none focus:ring-2"
+            style={inputStyle}
+          />
+        </div>
+
+        <div>
+          <label
+            htmlFor="setup-signin-password"
+            className="block text-sm font-semibold mb-1"
+            style={{ color: "var(--text-primary)" }}
+          >
+            Password
+          </label>
+          <input
+            id="setup-signin-password"
+            type="password"
+            autoComplete="current-password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            className="w-full px-3 py-2 rounded border focus:outline-none focus:ring-2"
+            style={inputStyle}
+          />
+        </div>
+      </div>
+
+      <Button
+        type="submit"
+        disabled={signingIn || !username || !password}
+        variant="primary"
+        fullWidth
+        size="lg"
+        loading={signingIn}
+      >
+        Sign in
+      </Button>
+    </form>
+  );
+};
 
 // Step 4: Complete - defined outside to avoid recreation on re-render
 const CompleteStep = ({ theme, onComplete }: CompleteStepProps) => (
@@ -441,7 +612,7 @@ const CompleteStep = ({ theme, onComplete }: CompleteStepProps) => (
 
 const SetupWizard = ({ onSetupComplete, setupStatus }: SetupWizardProps) => {
   const { theme } = useTheme();
-  const { login } = useAuth();
+  const { login, isAuthenticated, isLoading: authLoading } = useAuth();
   const [currentStep, setCurrentStep] = useState(() => {
     // If both users and stash instance exist, go straight to complete
     if (setupStatus?.hasUsers && setupStatus?.hasStashInstance) {
@@ -455,6 +626,8 @@ const SetupWizard = ({ onSetupComplete, setupStatus }: SetupWizardProps) => {
   });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  // Once the admin exists there is no step to go back to
+  const [adminCreated, setAdminCreated] = useState(false);
 
   // Admin credentials
   const [adminPassword, setAdminPassword] = useState("");
@@ -462,11 +635,17 @@ const SetupWizard = ({ onSetupComplete, setupStatus }: SetupWizardProps) => {
 
   // Stash configuration
   const [stashUrl, setStashUrl] = useState("");
+  const [stashUiUrl, setStashUiUrl] = useState("");
   const [stashApiKey, setStashApiKey] = useState("");
   const [testing, setTesting] = useState(false);
   const [testSuccess, setTestSuccess] = useState(false);
 
-  const steps = ["Welcome", "Create Admin User", "Connect to Stash", "Complete"];
+  const steps = [
+    "Welcome",
+    "Create Admin User",
+    "Connect to Stash",
+    "Complete",
+  ];
 
   const createAdminUser = async () => {
     if (adminPassword !== confirmPassword) {
@@ -474,16 +653,9 @@ const SetupWizard = ({ onSetupComplete, setupStatus }: SetupWizardProps) => {
       return;
     }
 
-    if (adminPassword.length < 8) {
-      setError("Password must be at least 8 characters");
-      return;
-    }
-    if (!/[a-zA-Z]/.test(adminPassword)) {
-      setError("Password must contain at least one letter");
-      return;
-    }
-    if (!/[0-9]/.test(adminPassword)) {
-      setError("Password must contain at least one number");
+    const passwordCheck = validatePassword(adminPassword);
+    if (!passwordCheck.valid) {
+      setError(passwordCheck.errors.join(". "));
       return;
     }
 
@@ -502,11 +674,14 @@ const SetupWizard = ({ onSetupComplete, setupStatus }: SetupWizardProps) => {
             password: adminPassword,
           });
           if (!loginResult.success) {
-            console.warn("Auto-login failed, user will need to log in manually");
+            console.warn(
+              "Auto-login failed, user will need to log in manually"
+            );
           }
         } catch (loginErr) {
           console.warn("Auto-login failed:", loginErr);
         }
+        setAdminCreated(true);
         // Clear password from memory immediately for security
         setAdminPassword("");
         setConfirmPassword("");
@@ -521,7 +696,8 @@ const SetupWizard = ({ onSetupComplete, setupStatus }: SetupWizardProps) => {
       }
     } catch (err: unknown) {
       setError(
-        "Failed to create admin user: " + ((err as Error).message || "Unknown error")
+        "Failed to create admin user: " +
+          ((err as Error).message || "Unknown error")
       );
     } finally {
       setLoading(false);
@@ -534,7 +710,10 @@ const SetupWizard = ({ onSetupComplete, setupStatus }: SetupWizardProps) => {
     setTestSuccess(false);
 
     try {
-      const response = await setupApi.testStashConnection(stashUrl, stashApiKey);
+      const response = await setupApi.testStashConnection(
+        stashUrl,
+        stashApiKey
+      );
 
       if (response.success) {
         setTestSuccess(true);
@@ -543,7 +722,9 @@ const SetupWizard = ({ onSetupComplete, setupStatus }: SetupWizardProps) => {
       }
     } catch (err: unknown) {
       const apiErr = err as { data?: { error?: string }; message?: string };
-      setError(apiErr.data?.error || apiErr.message || "Connection test failed");
+      setError(
+        apiErr.data?.error || apiErr.message || "Connection test failed"
+      );
     } finally {
       setTesting(false);
     }
@@ -556,7 +737,9 @@ const SetupWizard = ({ onSetupComplete, setupStatus }: SetupWizardProps) => {
     try {
       const response = await setupApi.createFirstStashInstance(
         stashUrl,
-        stashApiKey
+        stashApiKey,
+        "Default",
+        stashUiUrl
       );
 
       if (response.success) {
@@ -588,13 +771,20 @@ const SetupWizard = ({ onSetupComplete, setupStatus }: SetupWizardProps) => {
             loading={loading}
             adminPassword={adminPassword}
             confirmPassword={confirmPassword}
-            onAdminPasswordChange={(e: React.ChangeEvent<HTMLInputElement>) => setAdminPassword(e.target.value)}
-            onConfirmPasswordChange={(e: React.ChangeEvent<HTMLInputElement>) => setConfirmPassword(e.target.value)}
+            onAdminPasswordChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+              setAdminPassword(e.target.value)
+            }
+            onConfirmPasswordChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+              setConfirmPassword(e.target.value)
+            }
             onBack={() => setCurrentStep(0)}
-            onSubmit={createAdminUser}
+            onSubmit={() => void createAdminUser()}
           />
         );
       case 2:
+        if (!authLoading && !isAuthenticated) {
+          return <SignInToFinishStep onSignIn={login} />;
+        }
         return (
           <StashConfigStep
             theme={theme}
@@ -603,22 +793,30 @@ const SetupWizard = ({ onSetupComplete, setupStatus }: SetupWizardProps) => {
             testing={testing}
             testSuccess={testSuccess}
             stashUrl={stashUrl}
+            stashUiUrl={stashUiUrl}
             stashApiKey={stashApiKey}
             onStashUrlChange={(e: React.ChangeEvent<HTMLInputElement>) => {
               setStashUrl(e.target.value);
               setTestSuccess(false); // Reset test status when URL changes
             }}
+            onStashUiUrlChange={(e: React.ChangeEvent<HTMLInputElement>) => {
+              setStashUiUrl(e.target.value);
+            }}
             onStashApiKeyChange={(e: React.ChangeEvent<HTMLInputElement>) => {
               setStashApiKey(e.target.value);
               setTestSuccess(false); // Reset test status when API key changes
             }}
-            onTestConnection={testStashConnection}
-            onBack={() => {
-              setCurrentStep(1);
-              setError("");
-              setTestSuccess(false);
-            }}
-            onSubmit={createStashInstance}
+            onTestConnection={() => void testStashConnection()}
+            onBack={
+              setupStatus?.hasUsers || adminCreated
+                ? undefined
+                : () => {
+                    setCurrentStep(1);
+                    setError("");
+                    setTestSuccess(false);
+                  }
+            }
+            onSubmit={() => void createStashInstance()}
           />
         );
       case 3:
@@ -638,11 +836,18 @@ const SetupWizard = ({ onSetupComplete, setupStatus }: SetupWizardProps) => {
       <div className="max-w-2xl w-full">
         {/* Resume setup message */}
         {setupStatus?.hasUsers && currentStep === 2 && (
-          <div className="mb-4 p-4 rounded border-l-4" style={{
-            backgroundColor: theme?.properties?.["--bg-card"] || "#1f1f1f",
-            borderColor: theme?.properties?.["--accent-color"] || "#3b82f6",
-          }}>
-            <p style={{ color: theme?.properties?.["--text-primary"] || "#ffffff" }}>
+          <div
+            className="mb-4 p-4 rounded border-l-4"
+            style={{
+              backgroundColor: theme?.properties?.["--bg-card"] || "#1f1f1f",
+              borderColor: theme?.properties?.["--accent-color"] || "#3b82f6",
+            }}
+          >
+            <p
+              style={{
+                color: theme?.properties?.["--text-primary"] || "#ffffff",
+              }}
+            >
               Resuming setup - admin account already exists
             </p>
           </div>

@@ -3,8 +3,62 @@
  * Focuses on the singular-to-plural param mapping with instance support
  * for card indicator click navigation.
  */
-import { describe, it, expect } from "vitest";
-import { buildSearchParams as _buildSearchParams, parseSearchParams } from "@/utils/urlParams";
+import { type ReactNode, createElement } from "react";
+import { MemoryRouter, useLocation } from "react-router-dom";
+import {
+  DEFAULT_SORT,
+  type GetFilterPresetsResponse,
+  LIST_KINDS,
+  type ListKind,
+  PANEL_FIELDS,
+  type PanelField,
+  SCENE_FIELDS,
+} from "@peek/shared-types";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { act, renderHook } from "@testing-library/react";
+import { must } from "@tests/testUtils";
+import { describe, expect, it } from "vitest";
+import {
+  type SavedPreset,
+  defaultPresetsQueryOptions,
+  presetsQueryOptions,
+} from "@/api/hooks/usePresets";
+import { useListUrlState } from "@/hooks/useListUrlState";
+import {
+  IMAGE_FILTER_OPTIONS,
+  PERFORMER_FILTER_OPTIONS,
+  SCENE_FILTER_OPTIONS,
+  buildImageFilter,
+  buildPerformerFilter,
+  buildSceneFilter,
+} from "@/utils/filterConfig";
+import {
+  CODECS,
+  codecOf,
+  filterOptionsOf,
+  removeRow,
+  urlKeysOf,
+} from "@/utils/filterFields";
+import { sortOptionsFor, withoutLockedFilters } from "@/utils/listQuery";
+import {
+  heightBoundToCm,
+  kgToLbs,
+  lengthInchesToCm,
+  weightBoundToKg,
+} from "@/utils/unitConversions";
+import {
+  LIST_OWNED_KEYS,
+  buildSearchParams as _buildSearchParams,
+  isListOwnedKey,
+  listOwnedKeys,
+  parseSearchParams,
+  readListParams,
+  switchTabParams,
+  writeListParams,
+} from "@/utils/urlParams";
+import { DETAILS_WITH_PRESENCE_ROW } from "../helpers/editorRows";
+import { sentFilter } from "../helpers/sentFilter";
+import { untrusted } from "../helpers/untrusted";
 
 // Wrapper with defaults for optional params to avoid repeating them in every test
 const buildSearchParams = (params: Record<string, any>) =>
@@ -76,7 +130,10 @@ describe("parseSearchParams", () => {
     it("parses multi-select comma-separated values", () => {
       const params = new URLSearchParams("performerIds=82:server-1,5:server-2");
       const result = parseSearchParams(params, mockFilterOptions);
-      expect(result.filters.performerIds).toEqual(["82:server-1", "5:server-2"]);
+      expect(result.filters.performerIds).toEqual([
+        "82:server-1",
+        "5:server-2",
+      ]);
     });
 
     it("parses single-select value", () => {
@@ -105,6 +162,19 @@ describe("parseSearchParams", () => {
       const result = parseSearchParams(params, mockFilterOptions);
       expect(result.currentPage).toBe(3);
       expect(result.perPage).toBe(48);
+    });
+
+    it("per_page=500 in the URL parses to 250, per_page=0 to 24", () => {
+      const parse = (query: string) =>
+        parseSearchParams(new URLSearchParams(query), mockFilterOptions)
+          .perPage;
+
+      expect(parse("per_page=500")).toBe(250);
+      expect(parse("per_page=250")).toBe(250);
+      expect(parse("per_page=1")).toBe(1);
+      expect(parse("per_page=0")).toBe(24);
+      expect(parse("per_page=-5")).toBe(24);
+      expect(parse("per_page=abc")).toBe(24);
     });
 
     it("parses view mode", () => {
@@ -153,6 +223,32 @@ describe("buildSearchParams", () => {
     expect(params.get("studioId")).toBe("3:server-1");
   });
 
+  it("serializes a numeric single-select value", () => {
+    const params = buildSearchParams({
+      searchText: "",
+      sortField: "",
+      sortDirection: "",
+      currentPage: 1,
+      perPage: 24,
+      filters: { studioId: 3 },
+      filterOptions: mockFilterOptions,
+    });
+    expect(params.get("studioId")).toBe("3");
+  });
+
+  it("leaves out a single-select value that has no URL form", () => {
+    const params = buildSearchParams({
+      searchText: "",
+      sortField: "",
+      sortDirection: "",
+      currentPage: 1,
+      perPage: 24,
+      filters: { studioId: { id: "3" } },
+      filterOptions: mockFilterOptions,
+    });
+    expect(params.has("studioId")).toBe(false);
+  });
+
   it("skips empty filters", () => {
     const params = buildSearchParams({
       searchText: "",
@@ -187,8 +283,19 @@ describe("buildSearchParams", () => {
 
 describe("parseSearchParams - additional filter types", () => {
   const extendedFilterOptions = [
-    { key: "performerIds", type: "searchable-select", multi: true, modifierKey: "performerIdsModifier", hierarchyKey: "performerIdsDepth" },
-    { key: "tagIds", type: "searchable-select", multi: true, modifierKey: "tagIdsModifier" },
+    {
+      key: "performerIds",
+      type: "searchable-select",
+      multi: true,
+      modifierKey: "performerIdsModifier",
+      hierarchyKey: "performerIdsDepth",
+    },
+    {
+      key: "tagIds",
+      type: "searchable-select",
+      multi: true,
+      modifierKey: "tagIdsModifier",
+    },
     { key: "studioId", type: "searchable-select", multi: false },
     { key: "groupIds", type: "searchable-select", multi: true },
     { key: "galleryIds", type: "searchable-select", multi: true },
@@ -230,9 +337,14 @@ describe("parseSearchParams - additional filter types", () => {
   });
 
   it("parses date-range filter with both start and end", () => {
-    const params = new URLSearchParams("date_start=2024-01-01&date_end=2024-12-31");
+    const params = new URLSearchParams(
+      "date_start=2024-01-01&date_end=2024-12-31"
+    );
     const result = parseSearchParams(params, extendedFilterOptions);
-    expect(result.filters.date).toEqual({ start: "2024-01-01", end: "2024-12-31" });
+    expect(result.filters.date).toEqual({
+      start: "2024-01-01",
+      end: "2024-12-31",
+    });
   });
 
   it("parses date-range filter with only start", () => {
@@ -260,7 +372,9 @@ describe("parseSearchParams - additional filter types", () => {
   });
 
   it("parses modifier key for searchable-select", () => {
-    const params = new URLSearchParams("performerIds=1,2&performerIdsModifier=INCLUDES_ALL");
+    const params = new URLSearchParams(
+      "performerIds=1,2&performerIdsModifier=INCLUDES_ALL"
+    );
     const result = parseSearchParams(params, extendedFilterOptions);
     expect(result.filters.performerIds).toEqual(["1", "2"]);
     expect(result.filters.performerIdsModifier).toBe("INCLUDES_ALL");
@@ -312,15 +426,98 @@ describe("parseSearchParams - additional filter types", () => {
     expect(result.timelinePeriod).toBe("2024-01");
   });
 
-  it("skips singularProcessedKeys when parsing standard filters", () => {
-    // When performerId is present, it processes into performerIds
-    // Then the regular performerIds handling (including modifierKey) is skipped
-    const params = new URLSearchParams("performerId=82&instance=server-1");
+  it("a singular param sets the option's value; its modifier and depth are still read", () => {
+    const params = new URLSearchParams(
+      "performerId=82&instance=server-1&performerIdsModifier=EXCLUDES&performerIdsDepth=2"
+    );
     const result = parseSearchParams(params, extendedFilterOptions);
-    // performerIds should come from singular mapping
     expect(result.filters.performerIds).toEqual(["82:server-1"]);
-    // modifierKey is skipped because the key was handled by singular-to-plural mapping
-    expect(result.filters.performerIdsModifier).toBeUndefined();
+    expect(result.filters.performerIdsModifier).toBe("EXCLUDES");
+    expect(result.filters.performerIdsDepth).toBe(2);
+  });
+});
+
+describe("parseSearchParams - a list page reads only the entity params it declares (FILTERS-11)", () => {
+  it("a galleryId param on a page without a galleryIds option is ignored", () => {
+    // Options with no gallery filter (the Scenes page has one since F18)
+    const { filters } = parseSearchParams(
+      new URLSearchParams("galleryId=12&instance=abc"),
+      mockFilterOptions.filter((option) => option.key !== "galleryIds")
+    );
+    expect(filters).not.toHaveProperty("galleryIds");
+    expect(buildSceneFilter(filters)).not.toHaveProperty("galleries");
+  });
+
+  it("galleryId on the Scenes page sets its Galleries filter with the instance", () => {
+    const { filters } = parseSearchParams(
+      new URLSearchParams("galleryId=12&instance=abc"),
+      [...SCENE_FILTER_OPTIONS]
+    );
+    expect(filters.galleryIds).toEqual(["12:abc"]);
+    expect(buildSceneFilter(filters).galleries).toEqual({
+      value: ["12:abc"],
+      modifier: "INCLUDES",
+    });
+  });
+
+  it("studioId on the Images page sets its Studios filter, studioIds, with the instance", () => {
+    const { filters } = parseSearchParams(
+      new URLSearchParams("studioId=3&instance=abc"),
+      [...IMAGE_FILTER_OPTIONS]
+    );
+    expect(filters.studioIds).toEqual(["3:abc"]);
+    expect(filters).not.toHaveProperty("studioId");
+    expect(buildImageFilter(filters).studios).toEqual({
+      value: ["3:abc"],
+      modifier: "INCLUDES",
+    });
+  });
+
+  it("every entity option reads its key in the singular, with the instance", () => {
+    const options = [
+      { key: "sceneId", type: "searchable-select", multi: false },
+      { key: "sceneTagIds", type: "searchable-select", multi: true },
+    ];
+    const { filters } = parseSearchParams(
+      new URLSearchParams("sceneId=5&sceneTagId=9&instance=abc"),
+      options
+    );
+    expect(filters.sceneId).toBe("5:abc");
+    expect(filters.sceneTagIds).toEqual(["9:abc"]);
+  });
+
+  it("a single-select value that names its instance keeps it beside the page's instance", () => {
+    // A detail page's URL: instance is the page's entity, studioId the
+    // user's filter, written as "id:instance"
+    const { filters } = parseSearchParams(
+      new URLSearchParams("instance=abc&studioId=3:def&studioIdDepth=-1"),
+      [...SCENE_FILTER_OPTIONS]
+    );
+    // Scenes' Studios takes a list, so one value is a one-element list
+    expect(filters.studioId).toEqual(["3:def"]);
+    expect(filters.studioIdDepth).toBe(-1);
+    // A single-select Studio keeps one value
+    expect(
+      parseSearchParams(new URLSearchParams("instance=abc&studioId=3:def"), [
+        { key: "studioId", type: "searchable-select", multi: false },
+      ]).filters.studioId
+    ).toBe("3:def");
+  });
+
+  it("an empty singular param is ignored", () => {
+    const { filters } = parseSearchParams(
+      new URLSearchParams("tagId=&instance=abc"),
+      mockFilterOptions
+    );
+    expect(filters).not.toHaveProperty("tagIds");
+  });
+
+  it("a single-select value is never split on commas", () => {
+    const { filters } = parseSearchParams(
+      new URLSearchParams("studioId=3,4"),
+      mockFilterOptions
+    );
+    expect(filters.studioId).toBe("3,4");
   });
 });
 
@@ -331,7 +528,13 @@ describe("buildSearchParams - additional serialization", () => {
     { key: "date", type: "date-range" },
     { key: "orientation", type: "select" },
     { key: "title", type: "text" },
-    { key: "performerIds", type: "searchable-select", multi: true, modifierKey: "performerIdsModifier", hierarchyKey: "performerIdsDepth" },
+    {
+      key: "performerIds",
+      type: "searchable-select",
+      multi: true,
+      modifierKey: "performerIdsModifier",
+      hierarchyKey: "performerIdsDepth",
+    },
   ];
 
   it("serializes checkbox filter", () => {
@@ -421,7 +624,10 @@ describe("buildSearchParams - additional serialization", () => {
       sortDirection: "",
       currentPage: 1,
       perPage: 24,
-      filters: { performerIds: ["1", "2"], performerIdsModifier: "INCLUDES_ALL" },
+      filters: {
+        performerIds: ["1", "2"],
+        performerIdsModifier: "INCLUDES_ALL",
+      },
       filterOptions: extendedFilterOptions,
     });
     expect(params.get("performerIds")).toBe("1,2");
@@ -524,5 +730,1003 @@ describe("composite key round-tripping", () => {
     const multiParams = new URLSearchParams("tagIds=82,15&instance=inst-1");
     const multiResult = parseSearchParams(multiParams, mockFilterOptions);
     expect(multiResult.filters.tagIds).toEqual(["82", "15"]);
+  });
+});
+
+describe("list-owned keys (useListUrlState)", () => {
+  const missing = (keys: readonly string[], wanted: readonly string[]) =>
+    wanted.filter((key) => !keys.includes(key));
+
+  it("listOwnedKeys of scene includes tagIds, tagIdsModifier, tagIdsDepth and tagId", () => {
+    const keys = listOwnedKeys("scene");
+    expect(
+      missing(keys, [
+        "tagIds",
+        "tagIdsModifier",
+        "tagIdsDepth",
+        "tagId",
+        "performerId",
+        "rating_min",
+        "rating_max",
+        "date_start",
+        "date_end",
+        "q",
+        "sort",
+        "dir",
+        "page",
+        "per_page",
+        "view",
+        "zoom",
+        "grid_density",
+        "timeline_period",
+        "folderPath",
+      ])
+    ).toEqual([]);
+    expect(
+      keys.filter((key) =>
+        [
+          "tab",
+          "instance",
+          "includeSubTags",
+          "includeSubStudios",
+          "image",
+        ].includes(key)
+      )
+    ).toEqual([]);
+  });
+
+  it("LIST_OWNED_KEYS holds every list's keys", () => {
+    expect(
+      missing(LIST_OWNED_KEYS, ["studioIds", "galleryId", "sceneTagIds", "q"])
+    ).toEqual([]);
+    expect(LIST_OWNED_KEYS).not.toContain("tab");
+  });
+
+  const ctx = {
+    entity: "scene" as const,
+    filterOptions: SCENE_FILTER_OPTIONS,
+    shown: {
+      perPage: 48,
+      viewMode: "grid",
+      zoomLevel: "medium",
+      gridDensity: "medium",
+    },
+  };
+
+  it("writeListParams leaves keys it does not own", () => {
+    const prev = new URLSearchParams(
+      "tab=scenes&instance=abc&includeSubTags=true&image=5:abc&favorite=true&rating_min=60&page=3"
+    );
+    const next = writeListParams(
+      prev,
+      { filters: { tagIds: ["1:abc"] }, page: 1 },
+      ctx
+    );
+    expect(next.get("tab")).toBe("scenes");
+    expect(next.get("instance")).toBe("abc");
+    expect(next.get("includeSubTags")).toBe("true");
+    expect(next.get("image")).toBe("5:abc");
+    expect(next.get("tagIds")).toBe("1:abc");
+    expect(next.has("favorite")).toBe(false);
+    expect(next.has("rating_min")).toBe(false);
+    expect(next.has("page")).toBe(false);
+  });
+
+  it("writeListParams drops a filter key under a prefix past the limits (`g6.`, `21.`), which no read holds, on the next filter write", () => {
+    const prev = new URLSearchParams(
+      "g6=any&g6.tagIds=1:abc&21.tagIds=2:abc&g1.21.favorite=true&tab=scenes&g6.unknown=x"
+    );
+    const next = writeListParams(prev, { filters: {} }, ctx);
+    expect([...next.keys()].sort()).toEqual(["filters", "g6.unknown", "tab"]);
+    // A write that names no filters leaves them
+    expect(writeListParams(prev, { page: 2 }, ctx).get("g6.tagIds")).toBe(
+      "1:abc"
+    );
+  });
+
+  it("writeListParams writes a presentation key only when it differs from what the page shows without it", () => {
+    const prev = new URLSearchParams("per_page=24&view=table");
+    const next = writeListParams(
+      prev,
+      { perPage: 48, viewMode: "wall", gridDensity: "small" },
+      ctx
+    );
+    expect(next.has("per_page")).toBe(false);
+    expect(next.get("view")).toBe("wall");
+    expect(next.get("grid_density")).toBe("small");
+    expect(next.has("zoom")).toBe(false);
+  });
+
+  it("readListParams counts the range and date forms and q as filters, and nothing else", () => {
+    const read = (query: string) =>
+      readListParams(new URLSearchParams(query), "scene", SCENE_FILTER_OPTIONS)
+        .hasFilters;
+    expect(read("rating_min=60")).toBe(true);
+    expect(read("date_start=2020-01-01")).toBe(true);
+    expect(read("tagId=5&instance=abc")).toBe(true);
+    expect(read("q=beach")).toBe(true);
+    expect(
+      read("instance=abc&tab=scenes&sort=title&view=wall&per_page=12&page=2")
+    ).toBe(false);
+  });
+
+  it("`savedView` is list-owned, read and written, and never sent in a request", () => {
+    expect(listOwnedKeys("scene")).toContain("savedView");
+    expect(isListOwnedKey("clip", "savedView")).toBe(true);
+
+    const read = readListParams(
+      new URLSearchParams("savedView=v1&tab=scenes"),
+      "scene",
+      SCENE_FILTER_OPTIONS
+    );
+    expect(read.savedView).toBe("v1");
+    // Naming a View is not naming a filter: the default View stays on
+    expect(read.hasFilters).toBe(false);
+    expect(
+      readListParams(new URLSearchParams(""), "scene", SCENE_FILTER_OPTIONS)
+        .savedView
+    ).toBeNull();
+
+    const prev = new URLSearchParams("savedView=v1&tab=scenes&favorite=true");
+    // A filter write keeps it; a write naming it sets or removes it
+    expect(
+      writeListParams(prev, { filters: { tagIds: ["1:abc"] } }, ctx).get(
+        "savedView"
+      )
+    ).toBe("v1");
+    expect(
+      writeListParams(prev, { savedView: "v2" }, ctx).get("savedView")
+    ).toBe("v2");
+    const removed = writeListParams(prev, { savedView: null }, ctx);
+    expect(removed.has("savedView")).toBe(false);
+    expect(removed.get("tab")).toBe("scenes");
+    // Each detail tab is its own list: a tab switch drops it
+    expect(switchTabParams(prev, "images", "scenes").has("savedView")).toBe(
+      false
+    );
+
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    queryClient.setQueryData(presetsQueryOptions.queryKey, {
+      presets: {
+        scene: [
+          {
+            id: "v1",
+            name: "Faves",
+            filters: { favorite: "true" },
+            sort: "date",
+            direction: "DESC",
+          },
+        ],
+      },
+    });
+    queryClient.setQueryData(defaultPresetsQueryOptions.queryKey, {
+      defaults: {},
+    });
+    const wrapper = ({ children }: { children: ReactNode }) =>
+      createElement(
+        QueryClientProvider,
+        { client: queryClient },
+        createElement(
+          MemoryRouter,
+          { initialEntries: ["/scenes?savedView=v1&favorite=true"] },
+          children
+        )
+      );
+    const { result } = renderHook(
+      () =>
+        useListUrlState({
+          entityType: "scene",
+          filterOptions: SCENE_FILTER_OPTIONS,
+          sortOptions: (filters) => sortOptionsFor("scene", filters),
+          viewModes: ["grid"],
+          defaults: {
+            sort: "date",
+            direction: "DESC",
+            perPage: 24,
+            viewMode: "grid",
+            zoomLevel: "medium",
+            gridDensity: "medium",
+          },
+        }),
+      { wrapper }
+    );
+    expect(result.current.activeView?.id).toBe("v1");
+    expect(result.current.listKey).not.toBe("");
+    expect(result.current.listKey).not.toContain("savedView");
+    expect(result.current.listKey).not.toContain("v1");
+  });
+});
+
+// ── The URL from the field table (C5) ─────────────────────────────────────
+
+const writeCtx = (entity: ListKind) => ({
+  entity,
+  filterOptions: filterOptionsOf(entity),
+  shown: {
+    perPage: 24,
+    viewMode: "grid",
+    zoomLevel: "medium",
+    gridDensity: "medium",
+  },
+});
+
+/** A list's state through the URL: written, then read back */
+function viaUrl(
+  entity: ListKind,
+  filters: Record<string, unknown>,
+  unitPreference = "metric"
+) {
+  const options = filterOptionsOf(entity, unitPreference);
+  const written = writeListParams(
+    new URLSearchParams(),
+    { filters },
+    { ...writeCtx(entity), filterOptions: options }
+  );
+  return {
+    query: written.toString(),
+    read: readListParams(written, entity, options).filters,
+  };
+}
+
+describe("a Resolution condition (FILTERS-23)", () => {
+  it("a Resolution condition reaches the URL and back", () => {
+    const state = { resolution: "FULL_HD", resolutionModifier: "GREATER_THAN" };
+
+    const { query, read } = viaUrl("scene", state);
+
+    expect(query).toBe("resolution=FULL_HD&resolutionModifier=GREATER_THAN");
+    expect(read).toEqual(state);
+    expect(buildSceneFilter(read).resolution).toEqual({
+      value: "FULL_HD",
+      modifier: "GREATER_THAN",
+    });
+  });
+
+  it("no resolution writes no condition", () => {
+    expect(viaUrl("scene", { resolutionModifier: "GREATER_THAN" }).query).toBe(
+      "filters=none"
+    );
+  });
+});
+
+describe("body measures are metric in the URL (owner answer 12)", () => {
+  it("an imperial Height reaches the URL in centimetres", () => {
+    // An imperial viewer enters 5 ft 10 in to 6 ft 2 in: the whole cm range
+    // that displays as that
+    const min = heightBoundToCm(5, 10, "min");
+    const max = heightBoundToCm(6, 2, "max");
+    const state = { height: { min: String(min), max: String(max) } };
+
+    const imperial = viaUrl("performer", state, "imperial");
+
+    expect([min, max]).toEqual([177, 189]);
+    expect(imperial.query).toBe("height_min=177&height_max=189");
+    expect(imperial.read).toEqual(state);
+    expect(buildPerformerFilter(imperial.read).height).toEqual({
+      modifier: "BETWEEN",
+      value: 177,
+      value2: 189,
+    });
+    // A metric viewer opening the link sees 177 to 189 cm
+    expect(viaUrl("performer", state, "metric").read).toEqual(state);
+  });
+
+  it("an imperial Weight and Penis Length are stored metric", () => {
+    // At least 150 lbs: the lowest whole kg that shows as 150
+    const kg = weightBoundToKg(150, "min");
+    // 6 in, with two decimals
+    const cm = lengthInchesToCm(6);
+
+    const weight = viaUrl(
+      "performer",
+      { weight: { min: String(kg) } },
+      "imperial"
+    );
+    const length = viaUrl(
+      "performer",
+      { penisLength: { min: String(cm) } },
+      "imperial"
+    );
+
+    expect(weight.query).toBe("weight_min=68");
+    // ...and shows 150 lbs again
+    expect(kgToLbs(kg ?? 0)).toBe(150);
+    expect(length.query).toBe("penisLength_min=15.24");
+    // The request sends the URL's values, unconverted
+    expect(buildPerformerFilter(weight.read).weight).toEqual({
+      modifier: "BETWEEN",
+      value: 68,
+    });
+  });
+
+  it("the measure reader is lenient through the URL", () => {
+    const read = (query: string) =>
+      readListParams(
+        new URLSearchParams(query),
+        "performer",
+        PERFORMER_FILTER_OPTIONS
+      ).filters;
+
+    expect(read("weight_min=abc")).toEqual({});
+    expect(read("weight_min=abc&weight_max=80")).toEqual({
+      weight: { max: "80" },
+    });
+    // Above the editor's bounds: kept, never clamped
+    expect(read("height_min=250")).toEqual({ height: { min: "250" } });
+    expect(read("height_max=9999")).toEqual({ height: { max: "9999" } });
+    // Decimals are kept
+    expect(read("height_min=177.8")).toEqual({ height: { min: "177.8" } });
+    expect(read("penisLength_max=20.32")).toEqual({
+      penisLength: { max: "20.32" },
+    });
+  });
+
+  it("reads the old feet-and-inches height as centimetres", () => {
+    const height = PANEL_FIELDS.performer.find((row) => row.key === "height");
+    if (height?.editor !== "number") throw new Error("no height row");
+
+    expect(
+      CODECS.number.normalize(height, { feetMin: "5", inchesMin: "10" })
+    ).toEqual({ min: 177.8 });
+    expect(
+      CODECS.number.normalize(height, {
+        feetMin: "5",
+        inchesMin: "10",
+        feetMax: "6",
+        inchesMax: "2",
+      })
+    ).toEqual({ min: 177.8, max: 189 });
+    // A maximum is the top of its inch, as the editor writes it: 6'2" keeps
+    // the 188 and 189 cm performers an old link matched
+    expect(
+      CODECS.number.normalize(height, { feetMax: "6", inchesMax: "2" })
+    ).toEqual({ max: 189 });
+    // A bound the state holds wins over a stale legacy one
+    expect(
+      CODECS.number.normalize(height, { min: "170", feetMin: "5" })
+    ).toEqual({ min: "170" });
+    expect(CODECS.number.normalize(height, { feetMin: "x" })).toBeUndefined();
+    // The legacy shape written by a later change reaches the URL as centimetres
+    expect(
+      viaUrl("performer", { height: { feetMin: "5", inchesMin: "10" } }).query
+    ).toBe("height_min=177.8");
+    // The same row is active, and builds
+    expect(CODECS.number.isActive(height, { height: { feetMin: "5" } })).toBe(
+      true
+    );
+    expect(CODECS.number.isActive(height, { height: { feetMin: "x" } })).toBe(
+      false
+    );
+  });
+
+  /** A list's request through `useListUrlState`, the preset as the default or loaded */
+  function renderPerformers(preset: SavedPreset, mode: "default" | "load") {
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    queryClient.setQueryData(
+      presetsQueryOptions.queryKey,
+      untrusted<GetFilterPresetsResponse>({
+        presets: { performer: [preset] },
+      })
+    );
+    queryClient.setQueryData(defaultPresetsQueryOptions.queryKey, {
+      defaults: mode === "default" ? { performer: preset.id } : {},
+    });
+    const wrapper = ({ children }: { children: ReactNode }) =>
+      createElement(
+        QueryClientProvider,
+        { client: queryClient },
+        createElement(
+          MemoryRouter,
+          { initialEntries: ["/performers"] },
+          children
+        )
+      );
+    const view = renderHook(
+      () =>
+        useListUrlState({
+          entityType: "performer",
+          filterOptions: PERFORMER_FILTER_OPTIONS,
+          sortOptions: (filters) => sortOptionsFor("performer", filters),
+          viewModes: ["grid"],
+          defaults: {
+            sort: DEFAULT_SORT.performer.field,
+            direction: "DESC",
+            perPage: 24,
+            viewMode: "grid",
+            zoomLevel: "medium",
+            gridDensity: "medium",
+          },
+        }),
+      { wrapper }
+    );
+    if (mode === "load") {
+      act(() => {
+        view.result.current.loadPreset(preset);
+      });
+    }
+    return view.result.current;
+  }
+
+  it.each(["default", "load"] as const)(
+    "a preset holding the old height shape reads as centimetres, as a %s preset",
+    (mode) => {
+      const state = renderPerformers(
+        untrusted<SavedPreset>({
+          id: "p1",
+          name: "Tall",
+          filters: {
+            height: { feetMin: "5", inchesMin: "10" },
+            weight: { min: "abc", max: "9999" },
+          },
+          sort: "name",
+          direction: "ASC",
+        }),
+        mode
+      );
+
+      expect(state.filters.height).toEqual(
+        mode === "default" ? { min: 177.8 } : { min: "177.8" }
+      );
+      // Not a number: dropped; far outside the editor's bounds: kept
+      expect(state.filters.weight).toEqual({ max: "9999" });
+      expect(
+        sentFilter(
+          untrusted<Record<string, unknown>>(JSON.parse(state.listKey)),
+          "performer_filter"
+        )
+      ).toMatchObject({
+        height: { modifier: "BETWEEN", value: 177.8 },
+        weight: { modifier: "BETWEEN", value2: 9999 },
+      });
+    }
+  );
+});
+
+describe("a list owns what its codecs name", () => {
+  /** A row's own keys, the singular and the range forms (C5) */
+  const expectedKeys = (row: PanelField) => [
+    ...new Set([
+      ...codecOf(row).keys(row),
+      row.key.endsWith("Ids") ? row.key.slice(0, -1) : row.key,
+      ...["_min", "_max", "_start", "_end"].map((suffix) => row.key + suffix),
+    ]),
+  ];
+
+  it.each(LIST_KINDS)(
+    "a list owns every companion its codecs name: %s",
+    (entity) => {
+      const owned = listOwnedKeys(entity);
+      for (const row of PANEL_FIELDS[entity] as readonly PanelField[]) {
+        expect([...urlKeysOf(row)].sort(), row.key).toEqual(
+          expectedKeys(row).sort()
+        );
+        for (const key of urlKeysOf(row)) {
+          expect(owned, `${row.key}: ${key}`).toContain(key);
+        }
+      }
+    }
+  );
+
+  it.each(LIST_KINDS)(
+    "a locked field drops every key its codec names: %s",
+    (entity) => {
+      for (const row of PANEL_FIELDS[entity] as readonly PanelField[]) {
+        const state = Object.fromEntries(
+          codecOf(row)
+            .keys(row)
+            .map((key) => [key, "x"])
+        );
+        expect(
+          withoutLockedFilters(entity, { ...state, kept: 1 }, [row.field]),
+          row.key
+        ).toEqual({ kept: 1 });
+      }
+    }
+  );
+});
+
+describe("a zero bound survives", () => {
+  it("rating: { max: 0 } writes rating_max=0 and reads back", () => {
+    const { query, read } = viaUrl("scene", { rating: { max: 0 } });
+
+    expect(query).toBe("rating_max=0");
+    expect(read).toEqual({ rating: { max: "0" } });
+    expect(buildSceneFilter(read).rating100).toEqual({
+      modifier: "BETWEEN",
+      value2: 0,
+    });
+  });
+
+  it("a minimum of 0 writes, a blank or NaN does not", () => {
+    expect(viaUrl("scene", { rating: { min: 0, max: "" } }).query).toBe(
+      "rating_min=0"
+    );
+    expect(viaUrl("scene", { rating: { min: Number.NaN } }).query).toBe(
+      "filters=none"
+    );
+  });
+});
+
+describe("every companion of a field is written and read, whatever its editor", () => {
+  /** A value and a companion sample for a row */
+  function sampleOf(row: PanelField): Record<string, unknown> | undefined {
+    const companions = {
+      ...(row.modifierKey === undefined
+        ? {}
+        : { [row.modifierKey]: "EXCLUDES" }),
+      ...(row.hierarchyKey === undefined ? {} : { [row.hierarchyKey]: -1 }),
+    };
+    switch (row.editor) {
+      case "ref":
+        return {
+          [row.key]: row.multi ? ["1:inst-a", "2:inst-b"] : "1:inst-a",
+          ...companions,
+        };
+      case "enum": {
+        const choice = row.choices[0];
+        return choice === undefined
+          ? undefined
+          : {
+              // A multi row (Gender) reads back as a list
+              [row.key]: row.multi === true ? [choice.value] : choice.value,
+              ...companions,
+            };
+      }
+      case "text":
+        return { [row.key]: "text", ...companions };
+      case "toggle":
+        return { [row.key]: true, ...companions };
+      case "number":
+      case "date":
+      case "choice":
+        return undefined;
+    }
+  }
+
+  it.each(LIST_KINDS)("%s", (entity) => {
+    const options = filterOptionsOf(entity);
+    for (const row of PANEL_FIELDS[entity] as readonly PanelField[]) {
+      if (row.modifierKey === undefined && row.hierarchyKey === undefined) {
+        continue;
+      }
+      const sample = sampleOf(row);
+      if (sample === undefined) continue;
+      const written = writeListParams(
+        new URLSearchParams(),
+        { filters: sample },
+        { ...writeCtx(entity), filterOptions: options }
+      );
+      expect(
+        readListParams(written, entity, options).filters,
+        `${row.key}: ${written.toString()}`
+      ).toEqual(sample);
+    }
+  });
+
+  it("the scene list has companions to check", () => {
+    const rows = PANEL_FIELDS.scene as readonly PanelField[];
+    expect(
+      rows.filter((row) => row.modifierKey !== undefined && sampleOf(row))
+        .length
+    ).toBeGreaterThan(3);
+  });
+});
+
+describe("include or exclude per value (F22a)", () => {
+  it("include and exclude round-trip through the URL", () => {
+    const state = {
+      tagIds: ["1:a"],
+      tagIdsModifier: "INCLUDES_ALL",
+      tagIdsExclude: ["2:b", "3"],
+    };
+
+    const { query, read } = viaUrl("scene", state);
+
+    expect(new URLSearchParams(query).get("tagIdsExclude")).toBe("2:b,3");
+    expect(read).toEqual(state);
+    expect(buildSceneFilter(read).tags).toEqual({
+      value: ["1:a"],
+      excludes: ["2:b", "3"],
+      modifier: "INCLUDES_ALL",
+    });
+    // Excludes alone keep their key too
+    const alone = viaUrl("scene", { tagIdsExclude: ["2:b"] });
+    expect(alone.query).toBe("tagIdsExclude=2%3Ab");
+    expect(alone.read).toEqual({ tagIdsExclude: ["2:b"] });
+  });
+
+  /** The scene list's state at `url`, and the URL it writes */
+  function renderScenes(url: string) {
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    queryClient.setQueryData(presetsQueryOptions.queryKey, { presets: {} });
+    queryClient.setQueryData(defaultPresetsQueryOptions.queryKey, {
+      defaults: {},
+    });
+    const seen = { search: "" };
+    const wrapper = ({ children }: { children: ReactNode }) =>
+      createElement(
+        QueryClientProvider,
+        { client: queryClient },
+        createElement(MemoryRouter, { initialEntries: [url] }, children)
+      );
+    const view = renderHook(
+      () => {
+        seen.search = useLocation().search;
+        return useListUrlState({
+          entityType: "scene",
+          filterOptions: SCENE_FILTER_OPTIONS,
+          sortOptions: (filters) => sortOptionsFor("scene", filters),
+          viewModes: ["grid"],
+          defaults: {
+            sort: DEFAULT_SORT.scene.field,
+            direction: "DESC",
+            perPage: 24,
+            viewMode: "grid",
+            zoomLevel: "medium",
+            gridDensity: "medium",
+          },
+        });
+      },
+      { wrapper }
+    );
+    return {
+      state: () => view.result.current,
+      params: () => new URLSearchParams(seen.search),
+    };
+  }
+
+  it("removing the last excluded value, removing the chip and Clear All each drop `tagIdsExclude` from the URL", () => {
+    const url = "/scenes?tagIds=1:a&tagIdsExclude=2:b&favorite=true";
+
+    const last = renderScenes(url);
+    expect(last.state().filters.tagIdsExclude).toEqual(["2:b"]);
+    act(() => {
+      last.state().applyFilters({
+        ...last.state().filters,
+        tagIdsExclude: [],
+      });
+    });
+    expect(last.params().has("tagIdsExclude")).toBe(false);
+    expect(last.params().get("tagIds")).toBe("1:a");
+
+    const chip = renderScenes(url);
+    act(() => {
+      chip.state().applyFilters(
+        removeRow("scene", chip.state().filters, {
+          group: 0,
+          occurrence: 1,
+          key: "tagIds",
+        })
+      );
+    });
+    expect(chip.params().has("tagIdsExclude")).toBe(false);
+    expect(chip.params().has("tagIds")).toBe(false);
+    expect(chip.params().get("favorite")).toBe("true");
+
+    const excludesAlone = renderScenes("/scenes?tagIdsExclude=2:b");
+    act(() => {
+      excludesAlone.state().applyFilters(
+        removeRow("scene", excludesAlone.state().filters, {
+          group: 0,
+          occurrence: 1,
+          key: "tagIds",
+        })
+      );
+    });
+    expect(excludesAlone.params().has("tagIdsExclude")).toBe(false);
+
+    const clear = renderScenes(url);
+    act(() => {
+      clear.state().clearFilters();
+    });
+    expect(clear.params().has("tagIdsExclude")).toBe(false);
+    expect(clear.params().get("filters")).toBe("none");
+  });
+
+  /** The scene Tags row offering Has none and Has any, as F18 opts it in */
+  const tagsWithPresence = (): PanelField => {
+    const row = PANEL_FIELDS.scene.find((each) => each.key === "tagIds");
+    if (row?.editor !== "ref") throw new Error("no tags row");
+    return { ...row, modifiers: [...row.modifiers, "IS_NULL", "NOT_NULL"] };
+  };
+
+  it("Has none writes `tagIdsModifier=IS_NULL` with no ids and reads back", () => {
+    const row = tagsWithPresence();
+    const codec = codecOf(row);
+    const spec = SCENE_FIELDS.tags;
+    // Picks left from before the choice are neither written nor sent
+    const state = {
+      tagIds: ["1:a"],
+      tagIdsExclude: ["2:b"],
+      tagIdsDepth: -1,
+      tagIdsModifier: "IS_NULL",
+    };
+
+    const params = new URLSearchParams();
+    codec.writeUrl(row, state, params);
+    expect(params.toString()).toBe("tagIdsModifier=IS_NULL");
+    // With no ids at all, the companion is still written
+    const empty = new URLSearchParams();
+    codec.writeUrl(row, { tagIdsModifier: "NOT_NULL" }, empty);
+    expect(empty.toString()).toBe("tagIdsModifier=NOT_NULL");
+
+    const read = codec.readUrl(row, params);
+    expect(read).toEqual({ tagIdsModifier: "IS_NULL" });
+    expect(codec.isActive(row, read)).toBe(true);
+    expect(codec.toCriterion(row, spec, read)).toEqual({ modifier: "IS_NULL" });
+    expect(codec.toCriterion(row, spec, state)).toEqual({
+      modifier: "IS_NULL",
+    });
+    expect(codec.fromCriterion(row, spec, { modifier: "NOT_NULL" })).toEqual({
+      tagIdsModifier: "NOT_NULL",
+    });
+  });
+
+  it("a cleared picker writes none of its keys, its condition and depth included", () => {
+    const row = must(
+      (PANEL_FIELDS.scene as readonly PanelField[]).find(
+        (each) => each.key === "tagIds"
+      ),
+      "the Tags row"
+    );
+    const params = new URLSearchParams();
+    codecOf(row).writeUrl(
+      row,
+      { tagIds: [], tagIdsModifier: "INCLUDES_ALL", tagIdsDepth: -1 },
+      params
+    );
+    expect(params.toString()).toBe("");
+    // The list then reads no filter: the default preset may apply
+    const cleared = viaUrl("scene", {
+      tagIds: [],
+      tagIdsModifier: "INCLUDES_ALL",
+      tagIdsDepth: -1,
+    });
+    expect(cleared.read).toEqual({});
+  });
+
+  it("excludes with no included value write no condition, and keep their depth", () => {
+    const { query, read } = viaUrl("scene", {
+      tagIds: [],
+      tagIdsModifier: "INCLUDES_ALL",
+      tagIdsDepth: -1,
+      tagIdsExclude: ["2:b"],
+    });
+
+    expect(new URLSearchParams(query).has("tagIdsModifier")).toBe(false);
+    expect(read).toEqual({ tagIdsDepth: -1, tagIdsExclude: ["2:b"] });
+    expect(buildSceneFilter(read).tags).toEqual({
+      value: [],
+      excludes: ["2:b"],
+      modifier: "INCLUDES_ALL",
+      depth: -1,
+    });
+  });
+
+  it("an old link holding a condition and depth without ids still reads, as no filter", () => {
+    const read = readListParams(
+      new URLSearchParams("tagIdsModifier=INCLUDES_ALL&tagIdsDepth=-1"),
+      "scene",
+      SCENE_FILTER_OPTIONS
+    ).filters;
+
+    // A row with no ids filters nothing, so the canonical read drops it
+    expect(read).toEqual({});
+    expect(buildSceneFilter(read).tags).toBeUndefined();
+  });
+
+  it("an old URL with only `tagIds` reads as includes", () => {
+    const read = readListParams(
+      new URLSearchParams("tagIds=1:a,2:b&tagIdsModifier=INCLUDES"),
+      "scene",
+      SCENE_FILTER_OPTIONS
+    ).filters;
+
+    expect(read).toEqual({
+      tagIds: ["1:a", "2:b"],
+      tagIdsModifier: "INCLUDES",
+    });
+    expect(buildSceneFilter(read).tags).toEqual({
+      value: ["1:a", "2:b"],
+      modifier: "INCLUDES",
+    });
+  });
+
+  it("a stored `tagIdsModifier: EXCLUDES` keeps Has NONE", () => {
+    const stored = { tagIds: ["466"], tagIdsModifier: "EXCLUDES" };
+
+    const { query, read } = viaUrl("image", stored);
+
+    expect(query).toBe("tagIds=466&tagIdsModifier=EXCLUDES");
+    expect(buildImageFilter(read).tags).toEqual({
+      value: ["466"],
+      modifier: "EXCLUDES",
+    });
+    // Under Has NONE every value excludes: an excluded pick joins the list
+    expect(
+      buildImageFilter({ ...stored, tagIdsExclude: ["5:a"] }).tags
+    ).toEqual({ value: ["466", "5:a"], modifier: "EXCLUDES" });
+  });
+});
+
+describe("the text condition and playlist ids in the URL (F22b)", () => {
+  /** The scene table's real row (F18) */
+  const rowOf = (key: string): PanelField => {
+    const row = (PANEL_FIELDS.scene as readonly PanelField[]).find(
+      (each) => each.key === key
+    );
+    if (row === undefined) throw new Error(`no scene row ${key}`);
+    return row;
+  };
+  /** A row's state through the URL: written by its codec, then read back */
+  const throughUrl = (row: PanelField, state: Record<string, unknown>) => {
+    const params = new URLSearchParams();
+    codecOf(row).writeUrl(row, state, params);
+    return {
+      query: decodeURIComponent(params.toString()),
+      read: codecOf(row).readUrl(row, params),
+    };
+  };
+
+  it("a text condition round-trips as `<key>Modifier`", () => {
+    const state = { path: "/media/new", pathModifier: "STARTS_WITH" };
+
+    const { query, read } = throughUrl(rowOf("path"), state);
+
+    expect(query).toBe("path=/media/new&pathModifier=STARTS_WITH");
+    expect(read).toEqual(state);
+    // Has none writes the condition alone, and reads back
+    expect(
+      throughUrl(DETAILS_WITH_PRESENCE_ROW, {
+        details: "sunset",
+        detailsModifier: "IS_NULL",
+      })
+    ).toEqual({
+      query: "detailsModifier=IS_NULL",
+      read: { detailsModifier: "IS_NULL" },
+    });
+  });
+
+  it('playlist ids round-trip unjoined; `?playlistIds=12&instance=x` reads `["12"]`', () => {
+    const state = {
+      playlistIds: ["12", "7"],
+      playlistIdsModifier: "INCLUDES_ALL",
+    };
+
+    const { query, read } = throughUrl(rowOf("playlistIds"), state);
+
+    expect(query).toBe("playlistIds=12,7&playlistIdsModifier=INCLUDES_ALL");
+    expect(read).toEqual(state);
+    // The page's instance names a Stash server: never joined to a Peek id
+    expect(
+      codecOf(rowOf("playlistIds")).readUrl(
+        rowOf("playlistIds"),
+        new URLSearchParams("playlistIds=12&instance=x")
+      )
+    ).toEqual({ playlistIds: ["12"] });
+    expect(
+      codecOf(rowOf("playlistIds")).readUrl(
+        rowOf("playlistIds"),
+        new URLSearchParams("playlistId=12&instance=x")
+      )
+    ).toEqual({ playlistIds: ["12"] });
+    // An option no row stands behind reads the same
+    expect(
+      parseSearchParams(new URLSearchParams("playlistId=12&instance=x"), [
+        {
+          key: "playlistIds",
+          type: "searchable-select",
+          multi: true,
+          entityType: "playlists",
+        },
+      ]).filters
+    ).toEqual({ playlistIds: ["12"] });
+  });
+});
+
+describe("prefixed filter keys (groups and repeated rows)", () => {
+  const ctx = {
+    entity: "scene" as const,
+    filterOptions: SCENE_FILTER_OPTIONS,
+    shown: {
+      perPage: 24,
+      viewMode: "grid",
+      zoomLevel: "medium",
+      gridDensity: "medium",
+    },
+  };
+
+  it("writeListParams deletes every prefixed filter key and keeps unrelated keys (tab, instance, image)", () => {
+    const prev = new URLSearchParams(
+      "tab=scenes&instance=abc&image=5:abc&match=any&tagIds=1:abc&2.tagIds=2:abc&g1=any&g1.favorite=true&g2.3.rating_min=60&savedView=v1"
+    );
+    const next = writeListParams(prev, { filters: { title: "x" } }, ctx);
+
+    expect([...next.keys()]).toEqual([
+      "tab",
+      "instance",
+      "image",
+      "savedView",
+      "title",
+    ]);
+  });
+
+  it("writeListParams writes groups and repeats under their prefixes", () => {
+    const next = writeListParams(
+      new URLSearchParams("tab=scenes"),
+      {
+        filters: {
+          tagIds: ["1:abc"],
+          "2.tagIds": ["2:abc"],
+          g1: "any",
+          "g1.favorite": "true",
+          "g1.watched": "false",
+        },
+      },
+      ctx
+    );
+
+    expect(next.toString()).toBe(
+      "tab=scenes&g1=any&g1.favorite=true&g1.watched=false&tagIds=1%3Aabc&2.tagIds=2%3Aabc"
+    );
+    expect(readListParams(next, "scene", SCENE_FILTER_OPTIONS).filters).toEqual(
+      {
+        tagIds: ["1:abc"],
+        "2.tagIds": ["2:abc"],
+        g1: "any",
+        "g1.favorite": "true",
+        "g1.watched": "false",
+      }
+    );
+  });
+
+  it("switchTabParams drops prefixed keys", () => {
+    const next = switchTabParams(
+      new URLSearchParams(
+        "tab=scenes&instance=abc&match=any&2.tagIds=1:abc&g1=any&g1.favorite=true&g5.20.rating_min=60&g1.2.studioId=3:abc"
+      ),
+      "images",
+      "scenes"
+    );
+    expect(next.toString()).toBe("tab=images&instance=abc");
+  });
+
+  it("a URL with only g1.tagIds has filters, so the default preset stays off", () => {
+    const read = readListParams(
+      new URLSearchParams("g1.tagIds=1:abc"),
+      "scene",
+      SCENE_FILTER_OPTIONS
+    );
+    expect(read.hasFilters).toBe(true);
+    expect(read.filters).toEqual({ g1: "all", "g1.tagIds": ["1:abc"] });
+    expect(
+      readListParams(
+        new URLSearchParams("savedView=v1&g6.tagIds=1:abc"),
+        "scene",
+        SCENE_FILTER_OPTIONS
+      ).hasFilters
+    ).toBe(false);
+  });
+
+  it("isListOwnedKey names prefixed filter keys and the list's own keys, not the page's", () => {
+    for (const key of [
+      "g1.tagIds",
+      "2.rating_min",
+      "match",
+      "g3",
+      "sort",
+      "savedView",
+    ]) {
+      expect(isListOwnedKey("scene", key), key).toBe(true);
+    }
+    for (const key of ["tab", "instance", "image", "g6.tagIds"]) {
+      expect(isListOwnedKey("scene", key), key).toBe(false);
+    }
   });
 });

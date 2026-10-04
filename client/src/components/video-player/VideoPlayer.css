@@ -236,7 +236,6 @@ section.video-container {
   font-size: 0.8em; /* Stash font size */
 }
 
-
 /* ============================================================================
    BIG PLAY BUTTON (Stash pattern - no background, no border, large icon)
    ============================================================================ */
@@ -292,13 +291,6 @@ section.video-container {
   .video-js .vjs-skip-button::before {
     font-size: 1.5em;
     line-height: 2;
-  }
-
-  /* Smaller cast buttons */
-  .video-js .vjs-airplay-button .vjs-icon-placeholder,
-  .video-js .vjs-chromecast-button .vjs-icon-placeholder {
-    height: 1.4em;
-    width: 1.4em;
   }
 
   /* Menu adjustments */
@@ -465,19 +457,26 @@ section.video-container {
     visibility: visible;
   }
 
-  .video-js.vjs-touch-enabled.vjs-has-started.vjs-user-inactive.vjs-playing .vjs-big-button-group {
+  .video-js.vjs-touch-enabled.vjs-has-started.vjs-user-inactive.vjs-playing
+    .vjs-big-button-group {
     opacity: 0;
     pointer-events: none;
-    transition: visibility 1s, opacity 1s;
+    transition:
+      visibility 1s,
+      opacity 1s;
     visibility: visible;
   }
 
-  .video-js.vjs-touch-enabled .vjs-big-play-pause-button .vjs-icon-placeholder::before {
+  .video-js.vjs-touch-enabled
+    .vjs-big-play-pause-button
+    .vjs-icon-placeholder::before {
     content: "\f101";
     font-family: VideoJS;
   }
 
-  .video-js.vjs-touch-enabled.vjs-playing .vjs-big-play-pause-button .vjs-icon-placeholder::before {
+  .video-js.vjs-touch-enabled.vjs-playing
+    .vjs-big-play-pause-button
+    .vjs-icon-placeholder::before {
     content: "\f103";
   }
 
@@ -511,15 +510,11 @@ section.video-container {
   transform: scale(1.3, 1.3);
 }
 
-.video-js .vjs-marker-range {
-  background-color: rgba(255, 255, 255, 0.4);
-  border-radius: 2px;
-  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-  height: 8px;
-  min-width: 8px;
-  position: absolute;
-  transform: translateY(-28px);
-  transition: none;
+/* A clip with no generated preview yet: a hollow dot */
+.video-js .vjs-marker.vjs-marker-ungenerated {
+  background-color: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.8);
+  box-sizing: border-box;
 }
 
 .video-js .vjs-marker-tooltip {
@@ -552,7 +547,9 @@ section.video-container {
   font-size: 0.8em;
 }
 
-.video-js .vjs-source-selector .vjs-menu-item.vjs-source-menu-item-error:not(.vjs-selected) {
+.video-js
+  .vjs-source-selector
+  .vjs-menu-item.vjs-source-menu-item-error:not(.vjs-selected) {
   color: rgba(255, 255, 255, 0.5);
 }
 
@@ -574,16 +571,6 @@ section.video-container {
 .video-js.vjs-skip-buttons-prev .vjs-icon-previous-item,
 .video-js.vjs-skip-buttons-next .vjs-icon-next-item {
   display: inline-block;
-}
-
-/* VR Selector - VR mode toggle */
-.video-js .vjs-vr-selector .vjs-menu li {
-  font-size: 0.8em;
-}
-
-.video-js .vjs-vr-selector .vjs-button {
-  background: url("/vr.svg") center center no-repeat;
-  width: 50%;
 }
 
 /* Seek Buttons - videojs-seek-buttons styling */

@@ -1,5 +1,7 @@
-import { SearchableGrid } from "../ui/SearchableGrid";
+import type { ComponentProps } from "react";
+import { makeCompositeKey } from "../../utils/compositeKey";
 import { StudioCard } from "../cards/index";
+import { SearchableGrid } from "../ui/SearchableGrid";
 
 interface Props {
   lockedFilters?: Record<string, unknown>;
@@ -24,13 +26,16 @@ const StudioGrid = ({
       emptyMessage={emptyMessage}
       defaultSort="name"
       density={density}
-      renderItem={(studio: any, _index: number, { onHideSuccess }: any) => (
-        <StudioCard
-          key={studio.id}
-          studio={studio}
-          onHideSuccess={() => onHideSuccess(studio.id)}
-        />
-      )}
+      renderItem={(item, _index, { onHideSuccess }) => {
+        const studio = item as ComponentProps<typeof StudioCard>["studio"];
+        return (
+          <StudioCard
+            key={makeCompositeKey(studio.id, studio.instanceId)}
+            studio={studio}
+            onHideSuccess={onHideSuccess}
+          />
+        );
+      }}
       {...rest}
     />
   );

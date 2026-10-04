@@ -9,6 +9,8 @@
 // SHARED
 // =============================================================================
 
+// Dates are ISO 8601 strings: that is what JSON carries.
+
 export interface GroupData {
   id: number;
   name: string;
@@ -17,8 +19,8 @@ export interface GroupData {
   canDownloadFiles: boolean;
   canDownloadPlaylists: boolean;
   memberCount: number;
-  createdAt: Date;
-  updatedAt: Date;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface GroupMember {
@@ -28,7 +30,7 @@ export interface GroupMember {
     username: string;
     role: string;
   };
-  joinedAt: Date;
+  joinedAt: string;
 }
 
 export interface GroupWithMembers {
@@ -38,9 +40,22 @@ export interface GroupWithMembers {
   canShare: boolean;
   canDownloadFiles: boolean;
   canDownloadPlaylists: boolean;
-  createdAt: Date;
-  updatedAt: Date;
+  createdAt: string;
+  updatedAt: string;
   members: GroupMember[];
+}
+
+/**
+ * A group a user belongs to, as its member lists show it: its name and what
+ * it grants
+ */
+export interface UserGroupSummary {
+  id: number;
+  name: string;
+  description: string | null;
+  canShare: boolean;
+  canDownloadFiles: boolean;
+  canDownloadPlaylists: boolean;
 }
 
 // =============================================================================
@@ -72,7 +87,8 @@ export interface GetUserGroupResponse {
 /** POST /api/groups */
 export interface CreateUserGroupBody {
   name: string;
-  description?: string;
+  /** null or empty clears it */
+  description?: string | null;
   canShare?: boolean;
   canDownloadFiles?: boolean;
   canDownloadPlaylists?: boolean;
@@ -86,8 +102,8 @@ export interface CreateUserGroupResponse {
     canShare: boolean;
     canDownloadFiles: boolean;
     canDownloadPlaylists: boolean;
-    createdAt: Date;
-    updatedAt: Date;
+    createdAt: string;
+    updatedAt: string;
   };
 }
 
@@ -102,7 +118,8 @@ export interface UpdateUserGroupParams extends Record<string, string> {
 
 export interface UpdateUserGroupBody {
   name?: string;
-  description?: string;
+  /** null or empty clears it */
+  description?: string | null;
   canShare?: boolean;
   canDownloadFiles?: boolean;
   canDownloadPlaylists?: boolean;
@@ -116,8 +133,8 @@ export interface UpdateUserGroupResponse {
     canShare: boolean;
     canDownloadFiles: boolean;
     canDownloadPlaylists: boolean;
-    createdAt: Date;
-    updatedAt: Date;
+    createdAt: string;
+    updatedAt: string;
   };
 }
 
@@ -152,7 +169,7 @@ export interface AddMemberResponse {
     id: number;
     userId: number;
     groupId: number;
-    createdAt: Date;
+    createdAt: string;
   };
 }
 
@@ -174,14 +191,16 @@ export interface RemoveMemberResponse {
 // GET USER GROUPS (current user)
 // =============================================================================
 
-/** GET /api/user/groups */
+/** GET /api/groups/user/mine: the requesting user's groups */
 export interface GetCurrentUserGroupsResponse {
-  groups: Array<{
-    id: number;
-    name: string;
-    description: string | null;
-    canShare: boolean;
-    canDownloadFiles: boolean;
-    canDownloadPlaylists: boolean;
-  }>;
+  groups: UserGroupSummary[];
+}
+
+// =============================================================================
+// GET USER GROUP MEMBERSHIPS (admin)
+// =============================================================================
+
+/** GET /api/user/:userId/groups: the groups a user belongs to (admin only) */
+export interface GetUserGroupMembershipsResponse {
+  groups: UserGroupSummary[];
 }

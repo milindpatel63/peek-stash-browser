@@ -1,4 +1,23 @@
+import type { LandingPagePreference } from "@peek/shared-types";
 import { ENTITY_ICON_NAMES } from "./entityIcons";
+
+/**
+ * The pages a signed-out visitor can open. `App.tsx` declares their routes
+ * from here, and `apiFetch` never sends a 401 on one of them to the login
+ * page: that would reload the login or setup page, or throw the visitor out
+ * of a password reset.
+ */
+export const PUBLIC_ROUTES = {
+  login: "/login",
+  setup: "/setup",
+  forgotPassword: "/forgot-password",
+} as const;
+
+const PUBLIC_PATHS: ReadonlySet<string> = new Set(Object.values(PUBLIC_ROUTES));
+
+/** True on a public page; a trailing slash matches, as the router does. */
+export const isPublicRoute = (pathname: string): boolean =>
+  PUBLIC_PATHS.has(pathname.replace(/(.)\/+$/, "$1"));
 
 /**
  * Navigation item definitions with stable keys
@@ -17,7 +36,7 @@ export const NAV_DEFINITIONS = [
     name: "Recommended",
     path: "/recommended",
     icon: "sparkles",
-    description: "AI-recommended scenes based on your preferences",
+    description: "Scenes picked from your own ratings, favorites and watching",
   },
   {
     key: "performers",
@@ -102,7 +121,7 @@ export const LANDING_PAGE_OPTIONS = [
  * @param {string} key - Landing page key
  * @returns {string} Path for the landing page, defaults to "/"
  */
-export const getLandingPagePath = (key: string) => {
+export const getLandingPagePath = (key: string | undefined) => {
   const option = LANDING_PAGE_OPTIONS.find((opt) => opt.key === key);
   return option?.path || "/";
 };
@@ -113,7 +132,10 @@ export const getLandingPagePath = (key: string) => {
  * @param {string} [currentPath] - Current path to exclude from random selection
  * @returns {string} Path to navigate to
  */
-export const getLandingPage = (preference: any, currentPath?: string) => {
+export const getLandingPage = (
+  preference: LandingPagePreference | null | undefined,
+  currentPath?: string
+) => {
   // Default fallback
   if (!preference || !preference.pages?.length) {
     return "/";
@@ -127,7 +149,7 @@ export const getLandingPage = (preference: any, currentPath?: string) => {
         (opt) => opt.path === currentPath
       )?.key;
       if (currentKey) {
-        availablePages = preference.pages.filter((key: string) => key !== currentKey);
+        availablePages = preference.pages.filter((key) => key !== currentKey);
       }
     }
 
@@ -179,9 +201,10 @@ export const migrateNavPreferences = (savedPreferences: NavPreference[]) => {
 
     // Rebuild prefs array in NAV_DEFINITIONS order
     prefs = NAV_DEFINITIONS.map((def, definitionIndex) => {
-      if (prefsMap.has(def.key)) {
+      const existing = prefsMap.get(def.key);
+      if (existing) {
         // Keep existing preference
-        return prefsMap.get(def.key)!;
+        return existing;
       } else {
         // Add new item at its proper position, enabled by default
         return {
@@ -195,7 +218,10 @@ export const migrateNavPreferences = (savedPreferences: NavPreference[]) => {
 
   // Re-normalize order values (ensure sequential 0, 1, 2, ...)
   prefs.sort((a: NavPreference, b: NavPreference) => a.order - b.order);
-  prefs = prefs.map((pref: NavPreference, idx: number) => ({ ...pref, order: idx }));
+  prefs = prefs.map((pref: NavPreference, idx: number) => ({
+    ...pref,
+    order: idx,
+  }));
 
   return prefs;
 };
@@ -227,4 +253,92 @@ export const getOrderedNavItems = (preferences: NavPreference[]) => {
     .filter((pref) => pref.enabled)
     .map((pref) => getNavDefinition(pref.id))
     .filter(Boolean); // Remove any undefined (in case of deleted nav items)
+};
+
+/** The sidebar's and menus' items, by the name they show. */
+export type NavKey =
+  | "Home"
+  | "Scenes"
+  | "Recommended"
+  | "Performers"
+  | "Studios"
+  | "Tags"
+  | "Collections"
+  | "Galleries"
+  | "Images"
+  | "Playlists"
+  | "Clips"
+  | "Watch History"
+  | "Settings";
+
+/**
+ * The first path segment of every route, with the item that shows it. A list
+ * page and its detail page share the item (`/performers` and `/performer/3`).
+ */
+const NAV_KEY_BY_SEGMENT: Record<string, NavKey> = {
+  scenes: "Scenes",
+  scene: "Scenes",
+  recommended: "Recommended",
+  performers: "Performers",
+  performer: "Performers",
+  studios: "Studios",
+  studio: "Studios",
+  tags: "Tags",
+  tag: "Tags",
+  collections: "Collections",
+  collection: "Collections",
+  galleries: "Galleries",
+  gallery: "Galleries",
+  images: "Images",
+  playlists: "Playlists",
+  playlist: "Playlists",
+  clips: "Clips",
+  "watch-history": "Watch History",
+  settings: "Settings",
+};
+
+/** The item a path belongs to, or null for a page no item stands for. */
+export const getNavKeyForPath = (pathname: string): NavKey | null => {
+  if (pathname === "/") return "Home";
+  const segment = pathname.split("/")[1] ?? "";
+  return NAV_KEY_BY_SEGMENT[segment] ?? null;
+};
+
+/** The page whose shortcuts Help shows. */
+export type HelpPage =
+  | "scene"
+  | "scenes"
+  | "performer"
+  | "performers"
+  | "studio"
+  | "studios"
+  | "tag"
+  | "tags"
+  | "gallery"
+  | "galleries"
+  | "group"
+  | "groups"
+  | "playlists"
+  | "global";
+
+const HELP_PAGE_BY_SEGMENT: Record<string, HelpPage> = {
+  scene: "scene",
+  scenes: "scenes",
+  performer: "performer",
+  performers: "performers",
+  studio: "studio",
+  studios: "studios",
+  tag: "tag",
+  tags: "tags",
+  gallery: "gallery",
+  galleries: "galleries",
+  collection: "group",
+  collections: "groups",
+  playlists: "playlists",
+};
+
+/** The Help page for a path; the global shortcuts where it has none. */
+export const getHelpPageForPath = (pathname: string): HelpPage => {
+  const segment = pathname.split("/")[1] ?? "";
+  return HELP_PAGE_BY_SEGMENT[segment] ?? "global";
 };

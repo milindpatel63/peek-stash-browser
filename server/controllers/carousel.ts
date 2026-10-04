@@ -1,37 +1,48 @@
-import type { Prisma } from "@prisma/client";
+import type { Prisma, UserCarousel } from "@prisma/client";
 import prisma from "../prisma/singleton.js";
-import { stashEntityService } from "../services/StashEntityService.js";
-import { entityExclusionHelper } from "../services/EntityExclusionHelper.js";
 import { sceneQueryBuilder } from "../services/SceneQueryBuilder.js";
-import type { NormalizedScene, PeekSceneFilter } from "../types/index.js";
+import {
+  DEFAULT_CAROUSEL_DIRECTION,
+  DEFAULT_CAROUSEL_SORT,
+} from "../services/StoredFilterCleaner.js";
 import type {
-  TypedAuthRequest,
-  TypedResponse,
   ApiErrorResponse,
-  GetUserCarouselsResponse,
-  GetCarouselParams,
-  GetCarouselResponse,
+  CarouselData,
+  CarouselPreference,
   CreateCarouselRequest,
   CreateCarouselResponse,
+  DeleteCarouselParams,
+  DeleteCarouselResponse,
+  ExecuteCarouselByIdParams,
+  ExecuteCarouselByIdResponse,
+  GetCarouselParams,
+  GetCarouselResponse,
+  GetUserCarouselsResponse,
+  PreviewCarouselRequest,
+  PreviewCarouselResponse,
+  TypedAuthRequest,
+  TypedLibraryRequest,
+  TypedResponse,
   UpdateCarouselParams,
   UpdateCarouselRequest,
   UpdateCarouselResponse,
-  DeleteCarouselParams,
-  DeleteCarouselResponse,
-  PreviewCarouselRequest,
-  PreviewCarouselResponse,
-  ExecuteCarouselByIdParams,
-  ExecuteCarouselByIdResponse,
-  CarouselPreference,
+  WithStashUrl,
 } from "../types/api/index.js";
-import { logger } from "../utils/logger.js";
+import type { NormalizedScene } from "../types/index.js";
+import type { ParsedListRequest } from "../types/parsedFilters.js";
 import {
-  mergeScenesWithUserData,
-  applyQuickSceneFilters,
-  applyExpensiveSceneFilters,
-  sortScenes,
-  addStreamabilityInfo,
-} from "./library/scenes.js";
+  carouselRulesLocked,
+  carouselRulesToStore,
+  isPlainObject,
+  logIgnoredStoredRule,
+  parseCarouselRequest,
+  parseLockedCarouselRequest,
+  parseStoredSceneQuery,
+} from "../utils/listRequest.js";
+import { logger } from "../utils/logger.js";
+import { emptyToNull } from "../utils/sqlHelpers.js";
+import { isWhereShape, whereOfFlatFilter } from "../utils/whereTree.js";
+import { addStashUrl } from "./library/scenes.js";
 
 // Maximum number of custom carousels per user
 const MAX_CAROUSELS_PER_USER = 15;
@@ -39,8 +50,37 @@ const MAX_CAROUSELS_PER_USER = 15;
 // Number of scenes to return for carousel preview/display
 const CAROUSEL_SCENE_LIMIT = 12;
 
-// Feature flag for SQL query builder
-const USE_SQL_QUERY_BUILDER = process.env.USE_SQL_QUERY_BUILDER !== "false";
+/**
+ * The stored rules as the tree the client reads, whatever is stored: a tree
+ * as it is, a flat rule set (stored before 9b) as its root "all" tree, and
+ * anything else (which filters nothing) as the empty tree
+ */
+function servedRules(stored: unknown): CarouselData["rules"] {
+  const tree = isWhereShape(stored)
+    ? stored
+    : isPlainObject(stored)
+      ? whereOfFlatFilter(stored)
+      : { match: "all", rules: [] };
+  // The boundary cast: stored JSON, read leniently wherever it runs
+  return tree as unknown as CarouselData["rules"];
+}
+
+/** The row as the client receives it: the stored rules as a tree, dates as ISO strings */
+const toCarouselData = (row: UserCarousel): CarouselData => ({
+  id: row.id,
+  userId: row.userId,
+  title: row.title,
+  icon: row.icon,
+  rules: servedRules(row.rules),
+  rulesLocked: carouselRulesLocked(row.rules),
+  sort: row.sort,
+  direction: row.direction,
+  createdAt: row.createdAt.toISOString(),
+  updatedAt: row.updatedAt.toISOString(),
+});
+
+/** A new seed each load, so a random carousel varies from visit to visit */
+const perLoadSeed = (userId: number) => userId + Date.now();
 
 /**
  * Get all custom carousels for the current user
@@ -49,23 +89,14 @@ export const getUserCarousels = async (
   req: TypedAuthRequest,
   res: TypedResponse<GetUserCarouselsResponse | ApiErrorResponse>
 ) => {
-  try {
-    const userId = req.user?.id;
+  const userId = req.user.id;
 
-    if (!userId) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
+  const carousels = await prisma.userCarousel.findMany({
+    where: { userId },
+    orderBy: { createdAt: "asc" },
+  });
 
-    const carousels = await prisma.userCarousel.findMany({
-      where: { userId },
-      orderBy: { createdAt: "asc" },
-    });
-
-    res.json({ carousels });
-  } catch (error) {
-    logger.error("Error getting user carousels", { error: error instanceof Error ? error.message : "Unknown error" });
-    res.status(500).json({ error: "Failed to get carousels" });
-  }
+  res.json({ carousels: carousels.map(toCarouselData) });
 };
 
 /**
@@ -75,30 +106,22 @@ export const getCarousel = async (
   req: TypedAuthRequest<unknown, GetCarouselParams>,
   res: TypedResponse<GetCarouselResponse | ApiErrorResponse>
 ) => {
-  try {
-    const userId = req.user?.id;
-    const carouselId = req.params.id;
+  const userId = req.user.id;
+  const carouselId = req.params.id;
 
-    if (!userId) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
+  const carousel = await prisma.userCarousel.findFirst({
+    where: {
+      id: carouselId,
+      userId,
+    },
+  });
 
-    const carousel = await prisma.userCarousel.findFirst({
-      where: {
-        id: carouselId,
-        userId,
-      },
-    });
-
-    if (!carousel) {
-      return res.status(404).json({ error: "Carousel not found" });
-    }
-
-    res.json({ carousel });
-  } catch (error) {
-    logger.error("Error getting carousel", { error: error instanceof Error ? error.message : "Unknown error" });
-    res.status(500).json({ error: "Failed to get carousel" });
+  if (!carousel) {
+    res.status(404).json({ error: "Carousel not found" });
+    return;
   }
+
+  res.json({ carousel: toCarouselData(carousel) });
 };
 
 /**
@@ -108,126 +131,160 @@ export const createCarousel = async (
   req: TypedAuthRequest<CreateCarouselRequest>,
   res: TypedResponse<CreateCarouselResponse | ApiErrorResponse>
 ) => {
-  try {
-    const userId = req.user?.id;
+  const userId = req.user.id;
 
-    if (!userId) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
+  // The body is unvalidated: any field may be missing
+  const { title, icon, rules, sort, direction } =
+    req.body as Partial<CreateCarouselRequest>;
 
-    const { title, icon, rules, sort, direction } = req.body;
+  if (!rules || typeof rules !== "object") {
+    res.status(400).json({ error: "Rules are required" });
+    return;
+  }
 
-    // Validate required fields
-    if (!title || title.trim() === "") {
-      return res.status(400).json({ error: "Title is required" });
-    }
+  // The rules, sort and direction against the scene contract; a
+  // ValidationError (400) reaches the central error handler
+  const request = parseCarouselRequest(
+    {
+      rules,
+      sort: sort ?? DEFAULT_CAROUSEL_SORT,
+      direction: direction ?? DEFAULT_CAROUSEL_DIRECTION,
+    },
+    { userId }
+  );
+  // The tree, from either shape (the parser read it as an object); a flat
+  // ids or instance_id is a 400
+  const stored = carouselRulesToStore(rules as Record<string, unknown>);
 
-    if (!rules || typeof rules !== "object") {
-      return res.status(400).json({ error: "Rules are required" });
-    }
+  // Validate required fields
+  if (!title || title.trim() === "") {
+    res.status(400).json({ error: "Title is required" });
+    return;
+  }
 
-    // Check carousel limit
-    const count = await prisma.userCarousel.count({
-      where: { userId },
+  // Check carousel limit
+  const count = await prisma.userCarousel.count({
+    where: { userId },
+  });
+
+  if (count >= MAX_CAROUSELS_PER_USER) {
+    res.status(400).json({
+      error: `Maximum ${MAX_CAROUSELS_PER_USER} custom carousels allowed`,
     });
+    return;
+  }
 
-    if (count >= MAX_CAROUSELS_PER_USER) {
-      return res.status(400).json({
-        error: `Maximum ${MAX_CAROUSELS_PER_USER} custom carousels allowed`,
-      });
-    }
+  const carousel = await prisma.userCarousel.create({
+    data: {
+      userId,
+      title: title.trim(),
+      icon: emptyToNull(icon) ?? "Film",
+      rules: stored as Prisma.InputJsonValue,
+      // As the parser read them: a contract sort, direction upper-case
+      sort: request.sort.field,
+      direction: request.sort.direction,
+    },
+  });
 
-    const carousel = await prisma.userCarousel.create({
+  // Add the new carousel to the user's carouselPreferences so it shows on homepage immediately
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { carouselPreferences: true },
+  });
+
+  const existingPrefs =
+    (user?.carouselPreferences as CarouselPreference[] | null) ?? [];
+  const customCarouselId = `custom-${carousel.id}`;
+
+  // Only add if not already present
+  if (!existingPrefs.find((p) => p.id === customCarouselId)) {
+    const maxOrder = existingPrefs.reduce(
+      (max, p) => Math.max(max, p.order),
+      -1
+    );
+    const newPrefs = [
+      ...existingPrefs,
+      { id: customCarouselId, enabled: true, order: maxOrder + 1 },
+    ];
+
+    await prisma.user.update({
+      where: { id: userId },
       data: {
-        userId,
-        title: title.trim(),
-        icon: icon || "Film",
-        rules: rules as unknown as Prisma.InputJsonValue,
-        sort: sort || "random",
-        direction: direction || "DESC",
+        carouselPreferences: newPrefs as unknown as Prisma.InputJsonValue,
       },
     });
-
-    // Add the new carousel to the user's carouselPreferences so it shows on homepage immediately
-    const user = await prisma.user.findUnique({
-      where: { id: userId },
-      select: { carouselPreferences: true },
-    });
-
-    const existingPrefs = (user?.carouselPreferences as CarouselPreference[] | null) || [];
-    const customCarouselId = `custom-${carousel.id}`;
-
-    // Only add if not already present
-    if (!existingPrefs.find((p) => p.id === customCarouselId)) {
-      const maxOrder = existingPrefs.reduce((max, p) => Math.max(max, p.order), -1);
-      const newPrefs = [
-        ...existingPrefs,
-        { id: customCarouselId, enabled: true, order: maxOrder + 1 },
-      ];
-
-      await prisma.user.update({
-        where: { id: userId },
-        data: { carouselPreferences: newPrefs as unknown as Prisma.InputJsonValue },
-      });
-    }
-
-    res.status(201).json({ carousel });
-  } catch (error) {
-    logger.error("Error creating carousel", { error: error instanceof Error ? error.message : "Unknown error" });
-    res.status(500).json({ error: "Failed to create carousel" });
   }
+
+  res.status(201).json({ carousel: toCarouselData(carousel) });
 };
 
 /**
- * Update an existing carousel
+ * Update an existing carousel. A locked carousel (flat rules stored before
+ * 9b naming `ids` or `instance_id`, served with `rulesLocked`) keeps its
+ * stored rules: `rules` in the body is ignored, so a title, icon or sort
+ * edit from a client that resends the served tree (which has no row for the
+ * ids) cannot widen it, and its sort is checked against the stored rules.
  */
 export const updateCarousel = async (
   req: TypedAuthRequest<UpdateCarouselRequest, UpdateCarouselParams>,
   res: TypedResponse<UpdateCarouselResponse | ApiErrorResponse>
 ) => {
-  try {
-    const userId = req.user?.id;
-    const carouselId = req.params.id;
+  const userId = req.user.id;
+  const carouselId = req.params.id;
 
-    if (!userId) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
+  // The body is unvalidated: any field may be missing
+  const { title, icon, rules, sort, direction } =
+    req.body as Partial<CreateCarouselRequest>;
 
-    const { title, icon, rules, sort, direction } = req.body;
+  // Check ownership
+  const existing = await prisma.userCarousel.findFirst({
+    where: {
+      id: carouselId,
+      userId,
+    },
+  });
 
-    // Check ownership
-    const existing = await prisma.userCarousel.findFirst({
-      where: {
-        id: carouselId,
-        userId,
-      },
-    });
-
-    if (!existing) {
-      return res.status(404).json({ error: "Carousel not found" });
-    }
-
-    // Validate title if provided
-    if (title !== undefined && title.trim() === "") {
-      return res.status(400).json({ error: "Title cannot be empty" });
-    }
-
-    const carousel = await prisma.userCarousel.update({
-      where: { id: carouselId },
-      data: {
-        ...(title !== undefined && { title: title.trim() }),
-        ...(icon !== undefined && { icon }),
-        ...(rules !== undefined && { rules: rules as unknown as Prisma.InputJsonValue }),
-        ...(sort !== undefined && { sort }),
-        ...(direction !== undefined && { direction }),
-      },
-    });
-
-    res.json({ carousel });
-  } catch (error) {
-    logger.error("Error updating carousel", { error: error instanceof Error ? error.message : "Unknown error" });
-    res.status(500).json({ error: "Failed to update carousel" });
+  if (!existing) {
+    res.status(404).json({ error: "Carousel not found" });
+    return;
   }
+
+  // The parts sent, against the scene contract; a ValidationError (400)
+  // reaches the central error handler
+  const locked = carouselRulesLocked(existing.rules);
+  const request = locked
+    ? parseLockedCarouselRequest(
+        existing.rules as Record<string, unknown>,
+        { sort, direction },
+        { userId }
+      )
+    : parseCarouselRequest({ rules, sort, direction }, { userId });
+  // The tree, from either shape; a flat ids or instance_id is a 400
+  const stored =
+    rules === undefined || locked
+      ? undefined
+      : carouselRulesToStore(rules as Record<string, unknown>);
+
+  // Validate title if provided
+  if (title !== undefined && title.trim() === "") {
+    res.status(400).json({ error: "Title cannot be empty" });
+    return;
+  }
+
+  const carousel = await prisma.userCarousel.update({
+    where: { id: carouselId },
+    data: {
+      ...(title !== undefined && { title: title.trim() }),
+      ...(icon !== undefined && { icon }),
+      ...(stored !== undefined && {
+        rules: stored as Prisma.InputJsonValue,
+      }),
+      ...(sort !== undefined && { sort: request.sort.field }),
+      ...(direction !== undefined && { direction: request.sort.direction }),
+    },
+  });
+
+  res.json({ carousel: toCarouselData(carousel) });
 };
 
 /**
@@ -237,35 +294,27 @@ export const deleteCarousel = async (
   req: TypedAuthRequest<unknown, DeleteCarouselParams>,
   res: TypedResponse<DeleteCarouselResponse | ApiErrorResponse>
 ) => {
-  try {
-    const userId = req.user?.id;
-    const carouselId = req.params.id;
+  const userId = req.user.id;
+  const carouselId = req.params.id;
 
-    if (!userId) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
+  // Check ownership
+  const existing = await prisma.userCarousel.findFirst({
+    where: {
+      id: carouselId,
+      userId,
+    },
+  });
 
-    // Check ownership
-    const existing = await prisma.userCarousel.findFirst({
-      where: {
-        id: carouselId,
-        userId,
-      },
-    });
-
-    if (!existing) {
-      return res.status(404).json({ error: "Carousel not found" });
-    }
-
-    await prisma.userCarousel.delete({
-      where: { id: carouselId },
-    });
-
-    res.json({ success: true, message: "Carousel deleted" });
-  } catch (error) {
-    logger.error("Error deleting carousel", { error: error instanceof Error ? error.message : "Unknown error" });
-    res.status(500).json({ error: "Failed to delete carousel" });
+  if (!existing) {
+    res.status(404).json({ error: "Carousel not found" });
+    return;
   }
+
+  await prisma.userCarousel.delete({
+    where: { id: carouselId },
+  });
+
+  res.json({ success: true, message: "Carousel deleted" });
 };
 
 /**
@@ -273,174 +322,76 @@ export const deleteCarousel = async (
  * Executes the carousel query and returns matching scenes
  */
 export const previewCarousel = async (
-  req: TypedAuthRequest<PreviewCarouselRequest>,
+  req: TypedLibraryRequest<PreviewCarouselRequest>,
   res: TypedResponse<PreviewCarouselResponse | ApiErrorResponse>
 ) => {
-  try {
-    const userId = req.user?.id;
+  const userId = req.user.id;
 
-    if (!userId) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
+  const { rules, sort, direction } =
+    req.body as Partial<PreviewCarouselRequest>;
 
-    const { rules, sort, direction } = req.body;
-
-    if (!rules || typeof rules !== "object") {
-      return res.status(400).json({ error: "Rules are required" });
-    }
-
-    // Execute the carousel query
-    const scenes = await executeCarouselQuery(
-      userId,
-      rules as PeekSceneFilter,
-      sort || "random",
-      direction || "DESC"
-    );
-
-    res.json({ scenes });
-  } catch (error) {
-    logger.error("Error previewing carousel", { error: error instanceof Error ? error.message : "Unknown error" });
-    res.status(500).json({ error: "Failed to preview carousel" });
+  if (!rules || typeof rules !== "object") {
+    res.status(400).json({ error: "Rules are required" });
+    return;
   }
+
+  // A ValidationError (400) reaches the central error handler
+  const query = parseCarouselRequest(
+    {
+      rules,
+      sort: sort ?? DEFAULT_CAROUSEL_SORT,
+      direction: direction ?? DEFAULT_CAROUSEL_DIRECTION,
+    },
+    { userId, perPage: CAROUSEL_SCENE_LIMIT, randomSeed: perLoadSeed(userId) }
+  );
+
+  // Execute the carousel query
+  const scenes = await executeCarouselQuery(
+    userId,
+    req.allowedInstanceIds,
+    query,
+    req.user,
+    req.timeZone
+  );
+
+  res.json({ scenes });
 };
 
 /**
- * Execute a carousel's scene query
- * This is also exported for use by the homepage to render carousel scenes
+ * Runs a carousel's parsed scene query for the user: their exclusions
+ * (applyExclusions defaults to true) and only their instances (enabled,
+ * selected and past their first sync; invariant 11), as `requireCacheReady`
+ * put them on the request. The routes answer 503 before this when the user
+ * has none (an empty list matches nothing).
  *
- * OPTIMIZED: For carousels without filters, uses DB pagination with pre-computed exclusions
- * For carousels with filters, still needs to load scenes but uses optimized exclusion checking
+ * `viewer` is the requesting user: only an admin's scenes carry stashUrl.
+ * `timeZone` is the viewer's (`req.timeZone`): a stored rule keeps plain
+ * dates, so its days follow whoever is looking.
  */
 export async function executeCarouselQuery(
   userId: number,
-  rules: PeekSceneFilter,
-  sort: string,
-  direction: string
-): Promise<NormalizedScene[]> {
+  allowedInstanceIds: readonly string[],
+  query: ParsedListRequest<"scene">,
+  viewer: { role: string } | undefined,
+  timeZone: string
+): Promise<WithStashUrl<NormalizedScene>[]> {
   const startTime = Date.now();
 
-  // NEW: Use SQL query builder if enabled
-  if (USE_SQL_QUERY_BUILDER) {
-    logger.info("executeCarouselQuery: using SQL query builder path");
+  const result = await sceneQueryBuilder.execute({
+    userId,
+    allowedInstanceIds,
+    request: query,
+    timeZone,
+  });
 
-    // Execute query (applyExclusions defaults to true)
-    const result = await sceneQueryBuilder.execute({
-      userId,
-      filters: rules,
-      sort,
-      sortDirection: direction.toUpperCase() as "ASC" | "DESC",
-      page: 1,
-      perPage: CAROUSEL_SCENE_LIMIT,
-      // Use different seed per carousel load for variety
-      randomSeed: sort === 'random' ? userId + Date.now() : userId,
-    });
+  const scenes = addStashUrl(result.items, viewer);
 
-    const scenes = addStreamabilityInfo(result.scenes);
+  logger.debug("executeCarouselQuery complete (SQL path)", {
+    totalTimeMs: Date.now() - startTime,
+    resultCount: scenes.length,
+  });
 
-    logger.info("executeCarouselQuery complete (SQL path)", {
-      totalTimeMs: Date.now() - startTime,
-      resultCount: scenes.length,
-    });
-
-    return scenes;
-  }
-
-  // Check if carousel has any actual filters
-  const hasFilters = rules && Object.keys(rules).length > 0;
-
-  // Check for expensive filters that need user data
-  const hasExpensiveFilters =
-    rules?.favorite !== undefined ||
-    rules?.rating100 !== undefined ||
-    rules?.o_counter !== undefined ||
-    rules?.play_count !== undefined ||
-    rules?.play_duration !== undefined ||
-    rules?.last_played_at !== undefined ||
-    rules?.last_o_at !== undefined ||
-    rules?.performer_favorite !== undefined ||
-    rules?.studio_favorite !== undefined ||
-    rules?.tag_favorite !== undefined;
-
-  // Check if sort field is supported by DB
-  const dbSortFields = new Set(['created_at', 'updated_at', 'date', 'title', 'duration', 'random']);
-  const canUseDbSort = dbSortFields.has(sort);
-
-  // FAST PATH: No filters, DB-supported sort
-  if (!hasFilters && canUseDbSort) {
-    logger.info('executeCarouselQuery: using FAST PATH (no filters)');
-
-    // Get pre-computed scene exclusions
-    const exclusionStart = Date.now();
-    const excludeIds = await entityExclusionHelper.getExcludedIds(userId, 'scene');
-    logger.info(`executeCarouselQuery: getExcludedIds took ${Date.now() - exclusionStart}ms (${excludeIds.size} exclusions)`);
-
-    // Get scenes with DB pagination (only need CAROUSEL_SCENE_LIMIT scenes)
-    const dbStart = Date.now();
-    // eslint-disable-next-line @typescript-eslint/no-deprecated -- intentional legacy fallback path when USE_SQL_QUERY_BUILDER=false
-    const { scenes } = await stashEntityService.getScenesPaginated({
-      page: 1,
-      perPage: CAROUSEL_SCENE_LIMIT,
-      sortField: sort,
-      sortDirection: direction.toUpperCase() as 'ASC' | 'DESC',
-      excludeIds,
-    });
-    logger.info(`executeCarouselQuery: DB pagination took ${Date.now() - dbStart}ms`);
-
-    // Merge with user data
-    const mergeStart = Date.now();
-    const scenesWithUserData = await mergeScenesWithUserData(scenes, userId);
-    logger.info(`executeCarouselQuery: mergeScenesWithUserData took ${Date.now() - mergeStart}ms`);
-
-    // Add streamability info
-    const finalScenes = addStreamabilityInfo(scenesWithUserData);
-
-    logger.info(`executeCarouselQuery: TOTAL took ${Date.now() - startTime}ms (FAST PATH)`);
-    return finalScenes;
-  }
-
-  // STANDARD PATH: Has filters, need to load more scenes
-  logger.info(`executeCarouselQuery: using STANDARD PATH (hasFilters=${hasFilters}, hasExpensiveFilters=${hasExpensiveFilters})`);
-
-  // Get pre-computed scene exclusions (instance-aware)
-  const exclusionStart = Date.now();
-  const exclusionData = await entityExclusionHelper.getExclusionData(userId, 'scene');
-  logger.info(`executeCarouselQuery: getExclusionData took ${Date.now() - exclusionStart}ms (${exclusionData.globalIds.size} global, ${exclusionData.scopedKeys.size} scoped exclusions)`);
-
-  // Get scenes from cache (lightweight browse query)
-  const cacheStart = Date.now();
-  // eslint-disable-next-line @typescript-eslint/no-deprecated -- intentional legacy fallback path when USE_SQL_QUERY_BUILDER=false
-  let scenes = await stashEntityService.getAllScenes();
-  logger.info(`executeCarouselQuery: getAllScenes took ${Date.now() - cacheStart}ms`);
-
-  // Apply pre-computed exclusions (instance-aware filtering)
-  const filterStart = Date.now();
-  scenes = scenes.filter(s => !entityExclusionHelper.isExcluded(s.id, s.instanceId, exclusionData));
-  logger.info(`executeCarouselQuery: applied exclusions in ${Date.now() - filterStart}ms, ${scenes.length} scenes remaining`);
-
-  // Apply the carousel's filter rules (quick filters that don't need user data)
-  const quickFilterStart = Date.now();
-  scenes = await applyQuickSceneFilters(scenes, rules);
-  logger.info(`executeCarouselQuery: applyQuickSceneFilters took ${Date.now() - quickFilterStart}ms`);
-
-  // Merge with user-specific data (ratings, watch history, favorites)
-  const mergeStart = Date.now();
-  scenes = await mergeScenesWithUserData(scenes, userId);
-  logger.info(`executeCarouselQuery: mergeScenesWithUserData took ${Date.now() - mergeStart}ms`);
-
-  // Apply filters that require user data (favorite, rating, play_count, etc.)
-  const expensiveFilterStart = Date.now();
-  scenes = applyExpensiveSceneFilters(scenes, rules);
-  logger.info(`executeCarouselQuery: applyExpensiveSceneFilters took ${Date.now() - expensiveFilterStart}ms`);
-
-  // Add streamability info
-  scenes = addStreamabilityInfo(scenes);
-
-  // Sort the results
-  scenes = sortScenes(scenes, sort, direction);
-
-  // Limit to carousel size
-  logger.info(`executeCarouselQuery: TOTAL took ${Date.now() - startTime}ms (STANDARD PATH)`);
-  return scenes.slice(0, CAROUSEL_SCENE_LIMIT);
+  return scenes;
 }
 
 /**
@@ -448,47 +399,53 @@ export async function executeCarouselQuery(
  * Used by the homepage to render a specific carousel
  */
 export const executeCarouselById = async (
-  req: TypedAuthRequest<unknown, ExecuteCarouselByIdParams>,
+  req: TypedLibraryRequest<unknown, ExecuteCarouselByIdParams>,
   res: TypedResponse<ExecuteCarouselByIdResponse | ApiErrorResponse>
 ) => {
-  try {
-    const userId = req.user?.id;
-    const carouselId = req.params.id;
+  const userId = req.user.id;
+  const carouselId = req.params.id;
 
-    if (!userId) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
-
-    // Get the carousel
-    const carousel = await prisma.userCarousel.findFirst({
-      where: {
-        id: carouselId,
-        userId,
-      },
-    });
-
-    if (!carousel) {
-      return res.status(404).json({ error: "Carousel not found" });
-    }
-
-    // Execute the query
-    const scenes = await executeCarouselQuery(
+  // Get the carousel
+  const carousel = await prisma.userCarousel.findFirst({
+    where: {
+      id: carouselId,
       userId,
-      carousel.rules as PeekSceneFilter,
-      carousel.sort,
-      carousel.direction
-    );
+    },
+  });
 
-    res.json({
-      carousel: {
-        id: carousel.id,
-        title: carousel.title,
-        icon: carousel.icon,
-      },
-      scenes,
-    });
-  } catch (error) {
-    logger.error("Error executing carousel", { error: error instanceof Error ? error.message : "Unknown error" });
-    res.status(500).json({ error: "Failed to execute carousel query" });
+  if (!carousel) {
+    res.status(404).json({ error: "Carousel not found" });
+    return;
   }
+
+  // Stored rules parse leniently: what the contract no longer takes is
+  // left out and logged, and a bad sort or direction takes the default
+  const query = parseStoredSceneQuery(
+    carousel.rules,
+    carousel.sort,
+    carousel.direction,
+    {
+      userId,
+      perPage: CAROUSEL_SCENE_LIMIT,
+      randomSeed: perLoadSeed(userId),
+    }
+  );
+  logIgnoredStoredRule(carouselId, query.ignored);
+
+  const scenes = await executeCarouselQuery(
+    userId,
+    req.allowedInstanceIds,
+    query,
+    req.user,
+    req.timeZone
+  );
+
+  res.json({
+    carousel: {
+      id: carousel.id,
+      title: carousel.title,
+      icon: carousel.icon,
+    },
+    scenes,
+  });
 };

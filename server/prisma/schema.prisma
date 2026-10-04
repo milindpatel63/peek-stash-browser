@@ -16,16 +16,14 @@ model User {
   updatedAt DateTime @updatedAt
 
   // User preferences
-  preferredQuality        String? @default("auto") // "auto", "1080p", "720p", "480p", "360p"
-  preferredPlaybackMode   String? @default("auto") // "auto", "direct", "transcode"
   preferredPreviewQuality String? @default("sprite") // "sprite", "webp", "mp4" - Card preview quality (sprite=low quality, webp/mp4=high quality with sprite fallback)
   wallPlayback            String? @default("autoplay") // "autoplay", "hover", "static" - Wall view preview behavior
-  enableCast              Boolean @default(true) // Enable Chromecast/AirPlay plugins
   theme                   String? @default("dark") // "dark", "light", "purple", etc.
   carouselPreferences     Json? // Array of {id, enabled, order} for homepage carousels
   navPreferences          Json? // Array of {id, enabled, order} for navigation menu items
   filterPresets           Json? // Object with keys: scene, performer, studio, tag, group, gallery - each containing array of saved presets
   defaultFilterPresets    Json? // Object with keys: scene, performer, studio, tag, group, gallery - values are preset IDs
+  filterPins              Json? // { [list]: { fields: string[], filters: PinnedFilter[] } }; a list missing from it shows the seeded defaults (shared/types/filters/pins.ts)
   unitPreference          String? @default("metric") // "metric" or "imperial" for measurement display
   tableColumnDefaults     Json? // Object with keys: scene, performer, studio, tag, group, gallery, image - each containing {visible: string[], order: string[]}
   cardDisplaySettings     Json? // Object with per-entity-type card display toggles: {scene: {showCodeOnCard, showDescriptionOnCard, ...}, performer: {...}, ...}
@@ -70,15 +68,22 @@ model User {
   canDownloadFilesOverride     Boolean?
   canDownloadPlaylistsOverride Boolean?
 
-  // Recovery key for password reset (stored plaintext for user viewing)
-  recoveryKey String?
+  // Recovery key for password reset
+  recoveryKeyHash   String? // SHA-256 hex of the normalized key; the key is shown once
+  passwordChangedAt DateTime? // set by setUserPassword(); tokens issued earlier are rejected
 
   // Group memberships relation
   groupMemberships UserGroupMembership[]
 
   // Pre-computed exclusions cache
-  excludedEntities UserExcludedEntity[]
-  entityStats      UserEntityStats[]
+  excludedEntities      UserExcludedEntity[]
+  excludedContentCounts UserExcludedContentCount[]
+
+  // Per-user play statistics and rankings
+  performerStats UserPerformerStats[]
+  studioStats    UserStudioStats[]
+  tagStats       UserTagStats[]
+  entityRankings UserEntityRanking[]
 
   // Custom carousels
   customCarousels UserCarousel[]
@@ -124,7 +129,7 @@ model UserGroupMembership {
 model WatchHistory {
   id         Int     @id @default(autoincrement())
   userId     Int
-  instanceId String? // Stash instance ID (null for legacy single-instance data)
+  instanceId String  // Stash instance ID
   sceneId    String  // Stash scene ID
 
   // Playback tracking (syncs with Stash)
@@ -159,7 +164,6 @@ model Playlist {
   name        String
   description String?
   userId      Int
-  isPublic    Boolean  @default(false)
   shuffle     Boolean  @default(false)
   repeat      String   @default("none") // "none", "all", "one"
   createdAt   DateTime @default(now())
@@ -189,7 +193,7 @@ model PlaylistShare {
 model PlaylistItem {
   id         Int      @id @default(autoincrement())
   playlistId Int
-  instanceId String? // Stash instance ID (for cross-instance playlists)
+  instanceId String  // Stash instance ID (for cross-instance playlists)
   sceneId    String  // Stash scene ID
   position   Int // Order in playlist
   addedAt    DateTime @default(now())
@@ -217,7 +221,7 @@ model CustomTheme {
 model SceneRating {
   id         Int      @id @default(autoincrement())
   userId     Int
-  instanceId String? // Stash instance ID
+  instanceId String  // Stash instance ID
   sceneId    String  // Stash scene ID
   rating     Int? // 0-100, null if not rated
   favorite   Boolean  @default(false)
@@ -236,7 +240,7 @@ model SceneRating {
 model PerformerRating {
   id          Int      @id @default(autoincrement())
   userId      Int
-  instanceId  String? // Stash instance ID
+  instanceId  String  // Stash instance ID
   performerId String  // Stash performer ID
   rating      Int? // 0-100, null if not rated
   favorite    Boolean  @default(false)
@@ -255,7 +259,7 @@ model PerformerRating {
 model StudioRating {
   id         Int      @id @default(autoincrement())
   userId     Int
-  instanceId String? // Stash instance ID
+  instanceId String  // Stash instance ID
   studioId   String  // Stash studio ID
   rating     Int? // 0-100, null if not rated
   favorite   Boolean  @default(false)
@@ -274,7 +278,7 @@ model StudioRating {
 model TagRating {
   id         Int      @id @default(autoincrement())
   userId     Int
-  instanceId String? // Stash instance ID
+  instanceId String  // Stash instance ID
   tagId      String  // Stash tag ID
   rating     Int? // 0-100, null if not rated
   favorite   Boolean  @default(false)
@@ -293,7 +297,7 @@ model TagRating {
 model GalleryRating {
   id         Int      @id @default(autoincrement())
   userId     Int
-  instanceId String? // Stash instance ID
+  instanceId String  // Stash instance ID
   galleryId  String  // Stash gallery ID
   rating     Int? // 0-100, null if not rated
   favorite   Boolean  @default(false)
@@ -312,7 +316,7 @@ model GalleryRating {
 model GroupRating {
   id         Int      @id @default(autoincrement())
   userId     Int
-  instanceId String? // Stash instance ID
+  instanceId String  // Stash instance ID
   groupId    String  // Stash group ID
   rating     Int? // 0-100, null if not rated
   favorite   Boolean  @default(false)
@@ -331,7 +335,7 @@ model GroupRating {
 model ImageRating {
   id         Int      @id @default(autoincrement())
   userId     Int
-  instanceId String? // Stash instance ID
+  instanceId String  // Stash instance ID
   imageId    String  // Stash image ID
   rating     Int? // 0-100, null if not rated
   favorite   Boolean  @default(false)
@@ -350,7 +354,7 @@ model ImageRating {
 model ImageViewHistory {
   id         Int     @id @default(autoincrement())
   userId     Int
-  instanceId String? // Stash instance ID
+  instanceId String  // Stash instance ID
   imageId    String  // Stash image ID
 
   // View tracking (incremented when image is viewed in Lightbox)
@@ -385,7 +389,9 @@ model UserContentRestriction {
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  @@unique([userId, entityType])
+  // One row per (user, type, mode): a type can have a Show-only (INCLUDE)
+  // and an Always-hide (EXCLUDE) list at once (item 13).
+  @@unique([userId, entityType, mode])
   @@index([userId])
 }
 
@@ -395,7 +401,7 @@ model UserContentRestriction {
 model UserPerformerStats {
   id          Int    @id @default(autoincrement())
   userId      Int
-  instanceId  String @default("")
+  instanceId  String
   performerId String // Stash performer ID
 
   // Aggregated statistics from all scenes featuring this performer
@@ -406,6 +412,8 @@ model UserPerformerStats {
 
   updatedAt DateTime @updatedAt
 
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
   @@unique([userId, instanceId, performerId])
   @@index([userId])
   @@index([performerId])
@@ -415,7 +423,7 @@ model UserPerformerStats {
 model UserStudioStats {
   id         Int    @id @default(autoincrement())
   userId     Int
-  instanceId String @default("")
+  instanceId String
   studioId   String // Stash studio ID
 
   // Aggregated statistics from all scenes produced by this studio
@@ -423,6 +431,8 @@ model UserStudioStats {
   playCount Int @default(0) // Total play count
 
   updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([userId, instanceId, studioId])
   @@index([userId])
@@ -433,7 +443,7 @@ model UserStudioStats {
 model UserTagStats {
   id         Int    @id @default(autoincrement())
   userId     Int
-  instanceId String @default("")
+  instanceId String
   tagId      String // Stash tag ID
 
   // Aggregated statistics from all scenes tagged with this tag
@@ -441,6 +451,8 @@ model UserTagStats {
   playCount Int @default(0) // Total play count
 
   updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([userId, instanceId, tagId])
   @@index([userId])
@@ -453,7 +465,7 @@ model UserTagStats {
 model UserEntityRanking {
   id         Int    @id @default(autoincrement())
   userId     Int
-  instanceId String @default("")
+  instanceId String
   entityType String // 'performer' | 'studio' | 'tag' | 'scene'
   entityId   String // Stash entity ID
 
@@ -469,6 +481,8 @@ model UserEntityRanking {
   percentileRank   Float @default(0) // 0-100, where 100 = top ranked among user's engaged entities of this type
 
   updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([userId, instanceId, entityType, entityId])
   @@index([userId, entityType, percentileRank(sort: Desc)])
@@ -517,6 +531,8 @@ model Download {
   filePath    String?        // Server path to completed zip (playlists only)
   progress    Int            @default(0) // 0-100
   error       String?
+  // Playlist zips: scenes left out because they could not be fetched when it was built
+  skippedItems Int           @default(0)
 
   createdAt   DateTime       @default(now())
   completedAt DateTime?
@@ -549,7 +565,7 @@ model UserHiddenEntity {
 model UserExcludedEntity {
   id         Int      @id @default(autoincrement())
   userId     Int
-  entityType String   // 'scene', 'performer', 'studio', 'tag', 'group', 'gallery', 'image'
+  entityType String   // 'scene', 'performer', 'studio', 'tag', 'group', 'gallery', 'image', 'clip'
   entityId   String   // Stash entity ID
   instanceId String   @default("") // Stash instance ID for multi-instance scoping
 
@@ -564,18 +580,24 @@ model UserExcludedEntity {
   @@index([userId, entityType, reason]) // For groupBy stats queries
 }
 
-// Pre-computed visible counts (avoids expensive COUNT queries)
-model UserEntityStats {
-  id           Int      @id @default(autoincrement())
-  userId       Int
-  entityType   String   // 'scene', 'performer', 'studio', 'tag', 'group', 'gallery', 'image'
-  instanceId   String   @default("") // Stash instance ID for per-instance counts
-  visibleCount Int      // total - excluded
-  updatedAt    DateTime @updatedAt
+/// The viewer's excluded links per entity (B13b): a card's count is the
+/// live column minus the matching column here. Only entities with a
+/// nonzero column have a row; a user with no exclusions has none.
+model UserExcludedContentCount {
+  userId     Int
+  entityType String // performer, studio, tag, group, gallery
+  entityId   String
+  instanceId String
+  scenes     Int    @default(0)
+  images     Int    @default(0)
+  galleries  Int    @default(0)
+  groups     Int    @default(0)
+  performers Int    @default(0)
+  studios    Int    @default(0)
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  @@unique([userId, entityType, instanceId])
+  @@id([userId, entityType, entityId, instanceId])
 }
 
 // Track which data migrations have been applied
@@ -592,11 +614,19 @@ model StashInstance {
   name        String   @default("Default") // Display name only, can be renamed freely
   description String? // Helps users understand what content is on this instance
   url         String // GraphQL endpoint (e.g., http://stash:9999/graphql)
+  uiUrl      String? // Web UI URL for "View in Stash" links (e.g., https://stash.example.com). If not set, uses url field
   apiKey      String // API key for authentication
   enabled     Boolean  @default(true) // Can disable without deleting
   priority    Int      @default(0) // For ordering (lower = higher priority)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
+  // When the instance's last full pass ran to the end (every type tried, the
+  // post-sync steps done); the daily full pass reads it
+  lastFullPassAt DateTime?
+  // When the instance's first sync finished with its users' exclusions
+  // computed; until then nobody sees it (UserInstanceService). A new URL
+  // sets it back to null
+  firstSyncedAt DateTime?
 
   // Relations
   userSelections UserStashInstance[]
@@ -684,8 +714,10 @@ model StashScene {
   // === Caption metadata (for multi-language support) ===
   captions String? // JSON: [{language_code, caption_type}]
 
-  // === Stream data (small JSON array) ===
-  streams String? // JSON: [{url, mime_type, label}]
+  // === Stream choices (Stash's decisions, no URLs) ===
+  streamDirect      Boolean?
+  streamMkv         Boolean?
+  streamResolutions String? // comma list of Stash's StreamingResolutionEnum values, "" when Stash offered none
 
   // === Stash counter data ===
   oCounter     Int   @default(0) // Stash o_counter
@@ -699,7 +731,12 @@ model StashScene {
   deletedAt      DateTime?
 
   // === Inherited tags (denormalized for filtering) ===
-  inheritedTagIds String? // JSON array of tag IDs from performers, studio, groups
+  inheritedTagIds String? // JSON array of tag IDs from performers, studio, groups; filters read SceneInheritedTag
+
+  // === Sort keys, written by sync (SCENE_DERIVED_COLUMNS_SQL in StashSyncService) ===
+  titleSort      String? // the displayed title (title, else file name without extension), ASCII lower-cased
+  performerCount Int     @default(0) // ScenePerformer rows
+  tagCount       Int     @default(0) // SceneTag rows
 
   // === Fingerprint data (for merge detection) ===
   phash   String? // Primary perceptual hash (from first file)
@@ -707,10 +744,11 @@ model StashScene {
 
   // === Junction table relations ===
   performers ScenePerformer[]
-  tags       SceneTag[]
-  groups     SceneGroup[]
-  galleries  SceneGallery[]
-  clips      StashClip[]
+  tags          SceneTag[]
+  inheritedTags SceneInheritedTag[]
+  groups        SceneGroup[]
+  galleries     SceneGallery[]
+  clips         StashClip[]
 
   @@index([studioId])
   @@index([date])
@@ -718,16 +756,23 @@ model StashScene {
   @@index([stashUpdatedAt])
   @@index([rating100])
   @@index([duration])
-  @@index([deletedAt])
   @@index([oCounter])
   @@index([playCount])
   @@index([phash])
-  // Compound indexes for efficient browse queries (deletedAt filter + sort)
-  @@index([deletedAt, stashCreatedAt(sort: Desc)], map: "StashScene_browse_idx")
-  @@index([deletedAt, stashUpdatedAt(sort: Desc)], map: "StashScene_browse_updated_idx")
-  @@index([deletedAt, date(sort: Desc)], map: "StashScene_browse_date_idx")
-  @@index([deletedAt, title], map: "StashScene_browse_title_idx")
-  @@index([deletedAt, duration(sort: Desc)], map: "StashScene_browse_duration_idx")
+  // The list's sorts on an index: the deletedAt filter, the sort column,
+  // then the primary key every list order ends with, in the sort's
+  // direction, so the index serves the whole ORDER BY
+  @@index([deletedAt, stashCreatedAt(sort: Desc), id(sort: Desc), stashInstanceId(sort: Desc)], map: "StashScene_browse_idx")
+  @@index([deletedAt, stashUpdatedAt(sort: Desc), id(sort: Desc), stashInstanceId(sort: Desc)], map: "StashScene_browse_updated_idx")
+  @@index([deletedAt, date(sort: Desc), id(sort: Desc), stashInstanceId(sort: Desc)], map: "StashScene_browse_date_idx")
+  @@index([deletedAt, titleSort, id, stashInstanceId], map: "StashScene_browse_titleSort_idx")
+  @@index([deletedAt, performerCount, id, stashInstanceId], map: "StashScene_browse_performerCount_idx")
+  @@index([deletedAt, tagCount, id, stashInstanceId], map: "StashScene_browse_tagCount_idx")
+  @@index([deletedAt, duration(sort: Desc), id(sort: Desc), stashInstanceId(sort: Desc)], map: "StashScene_browse_duration_idx")
+  // A clip's scene by its key with deletedAt, so the clip list checks that
+  // the scene is live from the index alone
+  @@index([id, stashInstanceId, deletedAt])
+  @@index([stashInstanceId])
   @@id([id, stashInstanceId])
 }
 
@@ -762,11 +807,14 @@ model StashPerformer {
   weightKg     Int? // Weight in kg
   measurements String? // e.g., "34D-24-34"
   fakeTits     String? // Breast type: "Natural", "Augmented", etc.
+  penisLength  Float? // In cm
+  circumcised  String? // "CUT" or "UNCUT"
   tattoos      String?
   piercings    String?
   careerLength String?
   deathDate    String?
   url          String? // Homepage
+  urls         String? // JSON list of every link
 
   // === Stash paths (raw, transformed at read time) ===
   imagePath String? // Profile image path
@@ -789,6 +837,7 @@ model StashPerformer {
   @@index([rating100])
   @@index([stashUpdatedAt])
   @@index([deletedAt])
+  @@index([stashInstanceId])
   @@id([id, stashInstanceId])
 }
 
@@ -814,6 +863,7 @@ model StashStudio {
   // === Extended fields ===
   details String? // Studio description
   url     String? // Studio website
+  aliases String? // JSON list of alias strings
 
   // === Stash paths (raw, transformed at read time) ===
   imagePath String? // Logo image path
@@ -835,6 +885,7 @@ model StashStudio {
   @@index([rating100])
   @@index([stashUpdatedAt])
   @@index([deletedAt])
+  @@index([stashInstanceId])
   @@id([id, stashInstanceId])
 }
 
@@ -849,8 +900,10 @@ model StashTag {
   favorite Boolean @default(false)
   color    String? // Hex color from Stash (e.g., "#ff0000")
 
-  // === Counts (synced from Stash) ===
-  sceneCount       Int @default(0)
+  // === Counts: Peek's live link counts (LinkCountService; Stash's on
+  // insert only). imageCount includes gallery inheritance; the marker count
+  // stays Stash's ===
+  sceneCount       Int @default(0) // Live scenes tagged directly
   imageCount       Int @default(0)
   galleryCount     Int @default(0)
   performerCount   Int @default(0)
@@ -860,6 +913,7 @@ model StashTag {
 
   // === Computed counts (calculated after sync) ===
   sceneCountViaPerformers Int @default(0) // Scenes where a performer has this tag
+  sceneCountAll           Int @default(0) // The card's: live scenes tagged directly or inheriting the tag, each once
 
   // === Extended fields ===
   description String? // Tag description
@@ -891,6 +945,7 @@ model StashTag {
   @@index([favorite])
   @@index([stashUpdatedAt])
   @@index([deletedAt])
+  @@index([stashInstanceId])
   @@id([id, stashInstanceId])
 }
 
@@ -912,6 +967,7 @@ model StashGroup {
   director String?
   synopsis String?
   urls     String? // JSON array of URLs
+  aliases  String? // Stash's free text
 
   // === Stash paths (raw, transformed at read time) ===
   frontImagePath String? // Front cover image
@@ -926,6 +982,9 @@ model StashGroup {
   // === Relations ===
   scenes SceneGroup[]
   tags   GroupTag[]
+  // The collection hierarchy: this group's sub-groups, and the groups it is in
+  subGroupLinks        GroupRelation[] @relation("GroupSubGroups")
+  containingGroupLinks GroupRelation[] @relation("GroupContainingGroups")
 
   @@index([name])
   @@index([date])
@@ -933,6 +992,7 @@ model StashGroup {
   @@index([rating100])
   @@index([stashUpdatedAt])
   @@index([deletedAt])
+  @@index([stashInstanceId])
   @@id([id, stashInstanceId])
 }
 
@@ -956,10 +1016,12 @@ model StashGallery {
   code         String? // Gallery code
   photographer String?
   urls         String? // JSON array of URLs
+  organized    Boolean @default(false)
 
   // === File metadata ===
   folderPath   String? // Folder path if folder-based
   fileBasename String? // First file's basename (for zip galleries)
+  filePath     String? // A zip gallery's file path
 
   // === Stash paths (raw, transformed at read time) ===
   coverPath String? // Cover image path
@@ -984,6 +1046,8 @@ model StashGallery {
   @@index([stashUpdatedAt])
   @@index([deletedAt])
   @@index([coverImageId])
+  @@index([stashInstanceId])
+  @@index([studioId, deletedAt])
   @@id([id, stashInstanceId])
 }
 
@@ -1009,6 +1073,9 @@ model StashImage {
   height   Int?
   fileSize BigInt? // bytes
 
+  // === Derived by sync (IMAGE_DERIVED_COLUMNS_SQL in StashSyncService.ts) ===
+  titleSort String? // the displayed title (title, else file name without extension), ASCII lower-cased
+
   // === Stash paths (raw, transformed at read time) ===
   pathThumbnail String? // Thumbnail URL path
   pathPreview   String? // Preview URL path
@@ -1032,7 +1099,9 @@ model StashImage {
   @@index([stashUpdatedAt])
   @@index([deletedAt])
   @@index([title])
-  @@index([deletedAt, stashCreatedAt(sort: Desc)])
+  @@index([deletedAt, stashCreatedAt(sort: Desc), id(sort: Desc), stashInstanceId(sort: Desc)], map: "StashImage_browse_idx")
+  @@index([deletedAt, titleSort, id, stashInstanceId], map: "StashImage_browse_titleSort_idx")
+  @@index([stashInstanceId])
   @@id([id, stashInstanceId])
 }
 
@@ -1072,7 +1141,13 @@ model StashClip {
   @@index([sceneId])
   @@index([primaryTagId])
   @@index([isGenerated, deletedAt])
-  @@index([deletedAt, stashCreatedAt(sort: Desc)])
+  // The list's default sort (newest first) walks this index: the deletedAt
+  // filter, the sort column and the primary key (the whole ORDER BY), then
+  // the columns the list's filters read before the scene (the title for the
+  // search, generated, the scene's key), so a filter that holds few clips
+  // checks each from the index alone rather than reading its row
+  @@index([deletedAt, stashCreatedAt(sort: Desc), id(sort: Desc), stashInstanceId(sort: Desc), title, isGenerated, sceneId, sceneInstanceId], map: "StashClip_browse_idx")
+  @@index([stashInstanceId])
   @@id([id, stashInstanceId])
 }
 
@@ -1087,7 +1162,6 @@ model ClipTag {
 
   @@id([clipId, clipInstanceId, tagId, tagInstanceId])
   @@index([tagId, tagInstanceId])
-  @@index([clipId, clipInstanceId])
 }
 
 // Junction tables for efficient many-to-many queries
@@ -1103,7 +1177,6 @@ model ScenePerformer {
 
   @@id([sceneId, sceneInstanceId, performerId, performerInstanceId])
   @@index([performerId, performerInstanceId])
-  @@index([sceneId, sceneInstanceId])
 }
 
 model SceneTag {
@@ -1117,7 +1190,22 @@ model SceneTag {
 
   @@id([sceneId, sceneInstanceId, tagId, tagInstanceId])
   @@index([tagId, tagInstanceId])
-  @@index([sceneId, sceneInstanceId])
+}
+
+/// The scene's inherited tags (inheritedTagIds) as rows, written beside the
+/// JSON column by SceneTagInheritanceService, for the filters and counts to
+/// read by index. An inherited tag is on the scene's instance; no relation
+/// to StashTag.
+model SceneInheritedTag {
+  sceneId         String
+  sceneInstanceId String
+  tagId           String
+  tagInstanceId   String
+
+  scene StashScene @relation(fields: [sceneId, sceneInstanceId], references: [id, stashInstanceId], onDelete: Cascade)
+
+  @@id([sceneId, sceneInstanceId, tagId, tagInstanceId])
+  @@index([tagId, tagInstanceId])
 }
 
 model SceneGroup {
@@ -1132,7 +1220,6 @@ model SceneGroup {
 
   @@id([sceneId, sceneInstanceId, groupId, groupInstanceId])
   @@index([groupId, groupInstanceId])
-  @@index([sceneId, sceneInstanceId])
 }
 
 model SceneGallery {
@@ -1146,7 +1233,6 @@ model SceneGallery {
 
   @@id([sceneId, sceneInstanceId, galleryId, galleryInstanceId])
   @@index([galleryId, galleryInstanceId])
-  @@index([sceneId, sceneInstanceId])
 }
 
 model ImagePerformer {
@@ -1160,7 +1246,6 @@ model ImagePerformer {
 
   @@id([imageId, imageInstanceId, performerId, performerInstanceId])
   @@index([performerId, performerInstanceId])
-  @@index([imageId, imageInstanceId])
 }
 
 model ImageTag {
@@ -1174,7 +1259,6 @@ model ImageTag {
 
   @@id([imageId, imageInstanceId, tagId, tagInstanceId])
   @@index([tagId, tagInstanceId])
-  @@index([imageId, imageInstanceId])
 }
 
 model ImageGallery {
@@ -1188,7 +1272,6 @@ model ImageGallery {
 
   @@id([imageId, imageInstanceId, galleryId, galleryInstanceId])
   @@index([galleryId, galleryInstanceId])
-  @@index([imageId, imageInstanceId])
 }
 
 model GalleryPerformer {
@@ -1202,7 +1285,6 @@ model GalleryPerformer {
 
   @@id([galleryId, galleryInstanceId, performerId, performerInstanceId])
   @@index([performerId, performerInstanceId])
-  @@index([galleryId, galleryInstanceId])
 }
 
 model PerformerTag {
@@ -1216,7 +1298,6 @@ model PerformerTag {
 
   @@id([performerId, performerInstanceId, tagId, tagInstanceId])
   @@index([tagId, tagInstanceId])
-  @@index([performerId, performerInstanceId])
 }
 
 model StudioTag {
@@ -1230,7 +1311,6 @@ model StudioTag {
 
   @@id([studioId, studioInstanceId, tagId, tagInstanceId])
   @@index([tagId, tagInstanceId])
-  @@index([studioId, studioInstanceId])
 }
 
 model GalleryTag {
@@ -1244,7 +1324,6 @@ model GalleryTag {
 
   @@id([galleryId, galleryInstanceId, tagId, tagInstanceId])
   @@index([tagId, tagInstanceId])
-  @@index([galleryId, galleryInstanceId])
 }
 
 model GroupTag {
@@ -1258,13 +1337,31 @@ model GroupTag {
 
   @@id([groupId, groupInstanceId, tagId, tagInstanceId])
   @@index([tagId, tagInstanceId])
-  @@index([groupId, groupInstanceId])
+}
+
+// Stash's collection hierarchy: one row per edge from a containing group to
+// one of its sub-groups (Stash's groups_relations). containing_groups and
+// sub_groups are the same edges read from either end. Both instance columns
+// hold the same value, since relations stay within one Stash server.
+model GroupRelation {
+  containingId         String
+  containingInstanceId String
+  subId                String
+  subInstanceId        String
+  orderIndex           Int // the sub-group's place in the containing group's list
+  description          String? // Stash's description of the link, e.g. "Part 2"
+
+  containing StashGroup @relation("GroupSubGroups", fields: [containingId, containingInstanceId], references: [id, stashInstanceId], onDelete: Cascade)
+  sub        StashGroup @relation("GroupContainingGroups", fields: [subId, subInstanceId], references: [id, stashInstanceId], onDelete: Cascade)
+
+  @@id([containingId, containingInstanceId, subId, subInstanceId])
+  @@index([subId, subInstanceId])
 }
 
 // Sync state tracking per entity type
 model SyncState {
   id              Int     @id @default(autoincrement())
-  stashInstanceId String?
+  stashInstanceId String
   entityType      String // 'scene', 'performer', etc.
 
   // Raw timestamp strings from Stash's maxUpdatedAt - stored exactly as received
@@ -1290,7 +1387,6 @@ model SyncSettings {
   id                     Int     @id @default(1) // Singleton
   syncIntervalMinutes    Int     @default(60) // Default 60 min (current behavior)
   enableScanSubscription Boolean @default(true) // Subscribe to scanCompleteSubscribe
-  enablePluginWebhook    Boolean @default(false) // Accept webhook from Stash plugin
 
   updatedAt DateTime @updatedAt
 }

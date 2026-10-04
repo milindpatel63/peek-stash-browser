@@ -1,13 +1,15 @@
 import {
   LucideDatabase,
-  LucideFacebook,
   LucideFilm,
   LucideGlobe,
-  LucideInstagram,
   LucideLink,
-  LucideTwitter,
   LucideVideo,
 } from "lucide-react";
+import {
+  FacebookIcon,
+  InstagramIcon,
+  TwitterIcon,
+} from "../components/ui/icons/BrandIcons";
 
 /**
  * Site information for URL display
@@ -18,13 +20,13 @@ export const getSiteInfo = (url: string) => {
 
   // === Social Media ===
   if (urlLower.includes("twitter.com") || urlLower.includes("x.com")) {
-    return { name: "Twitter", icon: LucideTwitter, color: "#1DA1F2" };
+    return { name: "Twitter", icon: TwitterIcon, color: "#1DA1F2" };
   }
   if (urlLower.includes("instagram.com")) {
-    return { name: "Instagram", icon: LucideInstagram, color: "#E4405F" };
+    return { name: "Instagram", icon: InstagramIcon, color: "#E4405F" };
   }
   if (urlLower.includes("facebook.com")) {
-    return { name: "Facebook", icon: LucideFacebook, color: "#1877F2" };
+    return { name: "Facebook", icon: FacebookIcon, color: "#1877F2" };
   }
   if (urlLower.includes("onlyfans.com")) {
     return { name: "OnlyFans", icon: LucideVideo, color: "#00AFF0" };
@@ -100,7 +102,10 @@ export const getSiteInfo = (url: string) => {
   if (urlLower.includes("slayed.com")) {
     return { name: "Slayed", icon: LucideGlobe, color: "#8B0000" };
   }
-  if (urlLower.includes("bellesa.co") || urlLower.includes("bellesafilms.com")) {
+  if (
+    urlLower.includes("bellesa.co") ||
+    urlLower.includes("bellesafilms.com")
+  ) {
     return { name: "Bellesa", icon: LucideGlobe, color: "#FF6B9D" };
   }
   if (urlLower.includes("x-art.com")) {
@@ -113,7 +118,12 @@ export const getSiteInfo = (url: string) => {
   // === Unknown site - extract domain ===
   try {
     const domain = new URL(url).hostname.replace("www.", "");
-    return { name: domain, icon: LucideLink, color: "#95A5A6", useFavicon: true };
+    return {
+      name: domain,
+      icon: LucideLink,
+      color: "#95A5A6",
+      useFavicon: true,
+    };
   } catch {
     return { name: "Link", icon: LucideLink, color: "#95A5A6" };
   }

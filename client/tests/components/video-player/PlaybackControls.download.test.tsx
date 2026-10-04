@@ -1,0 +1,86 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { createAuthValue, must } from "@tests/testUtils";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { queryKeys } from "@/api/queryKeys";
+import type * as uiModule from "@/components/ui/index";
+import PlaybackControls from "@/components/video-player/PlaybackControls";
+import { AuthContext } from "@/contexts/AuthContextProvider";
+
+const mockApiPost = vi.fn();
+const mockGetMyPermissions = vi.fn();
+
+vi.mock("@/api", () => ({
+  apiPost: (...args: unknown[]) => mockApiPost(...args),
+  getMyPermissions: (...args: unknown[]) => mockGetMyPermissions(...args),
+  libraryApi: { updateRating: vi.fn(), updateFavorite: vi.fn() },
+}));
+
+vi.mock("@/contexts/ScenePlayerContext", () => ({
+  useScenePlayer: () => ({
+    scene: { id: "7", instanceId: "inst-b", title: "x" },
+    sceneLoading: false,
+    oCounter: 0,
+    dispatch: vi.fn(),
+  }),
+}));
+
+vi.mock("@/contexts/CardDisplaySettingsContext", () => ({
+  useCardDisplaySettings: () => ({
+    getSettings: () => ({
+      showRating: false,
+      showOCounter: false,
+      showFavorite: false,
+    }),
+  }),
+}));
+
+vi.mock("@/hooks/useRatingHotkeys", () => ({ useRatingHotkeys: vi.fn() }));
+// ThemedIcon reads the theme; no ThemeProvider here (as in SetupWizard.test).
+vi.mock("@/themes/useTheme", () => ({
+  useTheme: () => ({ theme: undefined }),
+}));
+
+// These two need a QueryClient; the download button doesn't.
+vi.mock("@/components/ui/index", async (importOriginal) => ({
+  ...(await importOriginal<typeof uiModule>()),
+  OCounterButton: () => null,
+  AddToPlaylistButton: () => null,
+}));
+
+describe("PlaybackControls download", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockGetMyPermissions.mockResolvedValue({
+      permissions: { canDownloadFiles: true },
+    });
+    mockApiPost.mockResolvedValue({ download: { id: 1, status: "PENDING" } });
+  });
+
+  it("sends the scene's instance with the download request", async () => {
+    const queryClient = new QueryClient();
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+    render(
+      <QueryClientProvider client={queryClient}>
+        <AuthContext.Provider
+          value={createAuthValue({ isAuthenticated: true })}
+        >
+          <PlaybackControls />
+        </AuthContext.Provider>
+      </QueryClientProvider>
+    );
+
+    const buttons = await screen.findAllByTitle("Download");
+    fireEvent.click(must(buttons[0]));
+
+    await waitFor(() => {
+      expect(mockApiPost).toHaveBeenCalledWith("/downloads/scene/7", {
+        instanceId: "inst-b",
+      });
+    });
+    // The Downloads page lists the new job on its next visit
+    expect(invalidate).toHaveBeenCalledWith({
+      queryKey: queryKeys.downloads.all(),
+    });
+  });
+});

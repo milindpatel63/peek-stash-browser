@@ -7,17 +7,35 @@
  * - Pagination param clearing on tab switch
  * - Loading states
  */
+import { MemoryRouter, useLocation } from "react-router-dom";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { MemoryRouter } from "react-router-dom";
-import TabNavigation, { TAB_COUNT_LOADING } from "../../../src/components/ui/TabNavigation";
+import { untrusted } from "@tests/helpers/untrusted";
+import { must } from "@tests/testUtils";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import TabNavigation, {
+  TAB_COUNT_LOADING,
+} from "../../../src/components/ui/TabNavigation";
+import { switchTabParams } from "../../../src/utils/urlParams";
+
+const CurrentSearch = () => (
+  <output data-testid="search">{useLocation().search}</output>
+);
 
 // We need to test URL updates, so we'll use a wrapper component
-const TabNavigationTestWrapper = ({ initialRoute = "/", ...props }: { initialRoute?: string } & React.ComponentProps<typeof TabNavigation>) => {
+const TabNavigationTestWrapper = ({
+  initialRoute = "/",
+  showSearch = false,
+  ...props
+}: {
+  initialRoute?: string;
+  /** Renders the URL's query string as `search` */
+  showSearch?: boolean;
+} & React.ComponentProps<typeof TabNavigation>) => {
   return (
     <MemoryRouter initialEntries={[initialRoute]}>
       <TabNavigation {...props} />
+      {showSearch && <CurrentSearch />}
     </MemoryRouter>
   );
 };
@@ -36,10 +54,7 @@ describe("TabNavigation", () => {
   describe("Rendering", () => {
     it("renders all visible tabs", () => {
       render(
-        <TabNavigationTestWrapper
-          tabs={defaultTabs}
-          defaultTab="scenes"
-        />
+        <TabNavigationTestWrapper tabs={defaultTabs} defaultTab="scenes" />
       );
 
       expect(screen.getByText("Scenes")).toBeInTheDocument();
@@ -49,10 +64,7 @@ describe("TabNavigation", () => {
 
     it("shows count badges for each tab", () => {
       render(
-        <TabNavigationTestWrapper
-          tabs={defaultTabs}
-          defaultTab="scenes"
-        />
+        <TabNavigationTestWrapper tabs={defaultTabs} defaultTab="scenes" />
       );
 
       expect(screen.getByText("50")).toBeInTheDocument();
@@ -62,10 +74,7 @@ describe("TabNavigation", () => {
 
     it("marks active tab with aria-current", () => {
       render(
-        <TabNavigationTestWrapper
-          tabs={defaultTabs}
-          defaultTab="scenes"
-        />
+        <TabNavigationTestWrapper tabs={defaultTabs} defaultTab="scenes" />
       );
 
       const scenesTab = screen.getByText("Scenes").closest("button");
@@ -77,10 +86,7 @@ describe("TabNavigation", () => {
 
     it("disables active tab button", () => {
       render(
-        <TabNavigationTestWrapper
-          tabs={defaultTabs}
-          defaultTab="scenes"
-        />
+        <TabNavigationTestWrapper tabs={defaultTabs} defaultTab="scenes" />
       );
 
       const scenesTab = screen.getByText("Scenes").closest("button");
@@ -97,10 +103,7 @@ describe("TabNavigation", () => {
       ];
 
       render(
-        <TabNavigationTestWrapper
-          tabs={tabsWithZero}
-          defaultTab="scenes"
-        />
+        <TabNavigationTestWrapper tabs={tabsWithZero} defaultTab="scenes" />
       );
 
       expect(screen.getByText("Scenes")).toBeInTheDocument();
@@ -115,10 +118,7 @@ describe("TabNavigation", () => {
       ];
 
       render(
-        <TabNavigationTestWrapper
-          tabs={tabsWithLoading}
-          defaultTab="scenes"
-        />
+        <TabNavigationTestWrapper tabs={tabsWithLoading} defaultTab="scenes" />
       );
 
       // Tab should be visible
@@ -136,10 +136,7 @@ describe("TabNavigation", () => {
       ];
 
       const { container } = render(
-        <TabNavigationTestWrapper
-          tabs={allZeroTabs}
-          defaultTab="scenes"
-        />
+        <TabNavigationTestWrapper tabs={allZeroTabs} defaultTab="scenes" />
       );
 
       expect(container.firstChild).toBeNull();
@@ -152,10 +149,7 @@ describe("TabNavigation", () => {
       ];
 
       const { container } = render(
-        <TabNavigationTestWrapper
-          tabs={singleTab}
-          defaultTab="scenes"
-        />
+        <TabNavigationTestWrapper tabs={singleTab} defaultTab="scenes" />
       );
 
       expect(container.firstChild).toBeNull();
@@ -192,7 +186,9 @@ describe("TabNavigation", () => {
         />
       );
 
-      const galleriesTab = screen.getByText("Galleries").closest("button")!;
+      const galleriesTab = must(
+        screen.getByText("Galleries").closest("button")
+      );
       await user.click(galleriesTab);
 
       expect(onTabChange).toHaveBeenCalledWith("galleries");
@@ -210,11 +206,62 @@ describe("TabNavigation", () => {
         />
       );
 
-      const scenesTab = screen.getByText("Scenes").closest("button")!;
+      const scenesTab = must(screen.getByText("Scenes").closest("button"));
       // Tab is disabled so click shouldn't do anything
       await user.click(scenesTab);
 
       expect(onTabChange).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("a tab switch starts the new tab clean", () => {
+    it("switching from Scenes to Galleries drops favorite, tagIds, view, page and folderPath and keeps instance and includeSubTags", async () => {
+      const user = userEvent.setup();
+      render(
+        <TabNavigationTestWrapper
+          showSearch
+          initialRoute="/tag/5?instance=a&includeSubTags=true&favorite=true&tagIds=1%3Aa&view=wall&page=7&folderPath=x&image=9%3Aa&sort=title&q=cat"
+          tabs={defaultTabs}
+          defaultTab="scenes"
+        />
+      );
+
+      await user.click(must(screen.getByText("Galleries").closest("button")));
+
+      const params = new URLSearchParams(
+        screen.getByTestId("search").textContent ?? ""
+      );
+      expect(Object.fromEntries(params)).toEqual({
+        instance: "a",
+        includeSubTags: "true",
+        tab: "galleries",
+      });
+    });
+
+    it("switching to the default tab drops the tab param", async () => {
+      const user = userEvent.setup();
+      render(
+        <TabNavigationTestWrapper
+          showSearch
+          initialRoute="/?instance=a&tab=galleries&page=3"
+          tabs={defaultTabs}
+          defaultTab="scenes"
+        />
+      );
+
+      await user.click(must(screen.getByText("Scenes").closest("button")));
+
+      expect(screen.getByTestId("search").textContent).toBe("?instance=a");
+    });
+  });
+
+  describe("switchTabParams", () => {
+    it("leaves the given params untouched and returns new ones", () => {
+      const params = new URLSearchParams("page=2&instance=a");
+      const next = switchTabParams(params, "images", "scenes");
+
+      expect(params.toString()).toBe("page=2&instance=a");
+      expect(next.toString()).toBe("instance=a&tab=images");
     });
   });
 
@@ -249,10 +296,12 @@ describe("TabNavigation", () => {
 
   describe("Edge Cases", () => {
     it("handles tabs with undefined count", () => {
-      const tabsWithUndefined = [
+      const tabsWithUndefined = untrusted<
+        React.ComponentProps<typeof TabNavigation>["tabs"]
+      >([
         { id: "scenes", label: "Scenes", count: 50 },
         { id: "settings", label: "Settings" }, // No count
-      ] as any[];
+      ]);
 
       render(
         <TabNavigationTestWrapper
@@ -270,10 +319,7 @@ describe("TabNavigation", () => {
 
     it("handles empty tabs array", () => {
       const { container } = render(
-        <TabNavigationTestWrapper
-          tabs={[]}
-          defaultTab="scenes"
-        />
+        <TabNavigationTestWrapper tabs={[]} defaultTab="scenes" />
       );
 
       expect(container.firstChild).toBeNull();

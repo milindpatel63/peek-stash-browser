@@ -1,22 +1,36 @@
-import { forwardRef, type ReactNode, type CSSProperties, type MouseEvent, type FocusEvent } from "react";
-import { useEntityImageAspectRatio } from "../../hooks/useEntityImageAspectRatio";
-import { useCardSelection } from "../../hooks/useCardSelection";
+import {
+  type CSSProperties,
+  type FocusEvent,
+  type MouseEvent,
+  type ReactNode,
+  forwardRef,
+} from "react";
+import { useNavigate } from "react-router-dom";
+import { isRatableEntityType } from "@peek/shared-types";
+import { useCardDisplaySettings } from "../../contexts/CardDisplaySettingsContext";
 import { useCardKeyboardNav } from "../../hooks/useCardKeyboardNav";
 import {
+  type ToggleSelectOptions,
+  useCardSelection,
+} from "../../hooks/useCardSelection";
+import { useEntityImageAspectRatio } from "../../hooks/useEntityImageAspectRatio";
+import {
+  type CardBadge,
   CardContainer,
   CardDescription,
+  CardHideMenu,
   CardImage,
   CardIndicators,
-  CardMenuRow,
   CardRatingRow,
   CardTitle,
 } from "./CardComponents";
-import EntityMenu from "./EntityMenu";
 
 export interface CardIndicator {
   type: string;
   count?: number;
   label?: string;
+  /** The count's tooltip text, in place of its type's label ("3 scenes") */
+  countLabel?: (count: number) => string;
   tooltipContent?: ReactNode;
   onClick?: () => void;
 }
@@ -24,13 +38,17 @@ export interface CardIndicator {
 export interface RatingControlsProps {
   entityType?: string;
   entityId: string;
-  instanceId?: string | null;
+  /** The entity's Stash instance: ratings, O presses and hides name it */
+  instanceId: string;
   entityTitle?: string;
   initialRating?: number | null;
   initialFavorite?: boolean;
   initialOCounter?: number;
-  onHideSuccess?: (entityId: string, entityType: string) => void;
-  onHideClick?: (hideInfo: Record<string, unknown>) => void;
+  onHideSuccess?: (
+    entityId: string,
+    entityType: string,
+    instanceId: string
+  ) => void;
   onOCounterChange?: (entityId: string, count: number) => void;
   onRatingChange?: (entityId: string, rating: number) => void;
   onFavoriteChange?: (entityId: string, value: boolean) => void;
@@ -39,6 +57,31 @@ export interface RatingControlsProps {
   showOCounter?: boolean;
   showMenu?: boolean;
 }
+
+/**
+ * What a card knows of the viewer's own data on an entity: a list row, a
+ * detail entity or a clip (which has none). The rating row reads it. The O
+ * count is `o_counter` on scenes, performers, studios and tags and
+ * `oCounter` on images.
+ */
+export interface RatingEntity {
+  id: string;
+  instanceId: string;
+  rating100?: number | null;
+  favorite?: boolean | null;
+  o_counter?: number | null;
+  oCounter?: number | null;
+}
+
+/** A card setting, when the stored value is a switch */
+const switchOf = (value: unknown): boolean | undefined =>
+  typeof value === "boolean" ? value : undefined;
+
+/** The fields set to a value: an `undefined` field leaves the default alone */
+const definedFields = <T extends object>(fields: T): Partial<T> =>
+  Object.fromEntries(
+    Object.entries(fields).filter(([, value]) => value !== undefined)
+  ) as Partial<T>;
 
 export interface BaseCardProps {
   entityType: string;
@@ -50,9 +93,21 @@ export interface BaseCardProps {
   linkTo?: string;
   selectionMode?: boolean;
   isSelected?: boolean;
-  onToggleSelect?: (entity: Record<string, unknown> | undefined) => void;
+  onToggleSelect?: (
+    entity: Record<string, unknown> | undefined,
+    options?: ToggleSelectOptions
+  ) => void;
   indicators?: CardIndicator[];
-  ratingControlsProps?: RatingControlsProps;
+  /** A text label shown before the count indicators, such as a resolution */
+  indicatorBadge?: CardBadge;
+  /**
+   * The entity the rating row shows: its ids, rating, favorite and O count,
+   * with the entity type's card settings, build the row. A card with none
+   * has no row and no menu.
+   */
+  ratingEntity?: RatingEntity;
+  /** Fields that win over what `ratingEntity` and the card settings give */
+  ratingControlsProps?: Partial<RatingControlsProps>;
   displayPreferences?: { showDescription?: boolean };
   hideDescription?: boolean;
   hideSubtitle?: boolean;
@@ -61,14 +116,17 @@ export interface BaseCardProps {
   renderOverlay?: () => ReactNode;
   renderImageContent?: () => ReactNode;
   renderAfterTitle?: () => ReactNode;
-  onClick?: (e: MouseEvent<HTMLDivElement>) => void;
-  onNavigate?: (e: MouseEvent<HTMLElement>) => void;
+  /** A click on the card; Enter on the focused card calls it with no event */
+  onClick?: (e?: MouseEvent<HTMLDivElement>) => void;
+  /** Replaces link navigation; Enter on the focused card calls it with no event */
+  onNavigate?: (e?: MouseEvent<HTMLElement>) => void;
   className?: string;
   fromPageTitle?: string;
   linkState?: Record<string, unknown>;
   tabIndex?: number;
   style?: CSSProperties;
   onFocus?: (e: FocusEvent<HTMLDivElement>) => void;
+  onBlur?: (e: FocusEvent<HTMLDivElement>) => void;
 }
 
 /**
@@ -94,7 +152,9 @@ export const BaseCard = forwardRef<HTMLDivElement, BaseCardProps>(
 
       // Indicators & Rating
       indicators = [],
-      ratingControlsProps,
+      indicatorBadge,
+      ratingEntity,
+      ratingControlsProps: explicitControls,
 
       // Display preferences
       displayPreferences = {},
@@ -119,11 +179,38 @@ export const BaseCard = forwardRef<HTMLDivElement, BaseCardProps>(
       tabIndex,
       style,
       onFocus,
+      onBlur,
       ...rest
     },
     ref
   ) => {
     const aspectRatio = useEntityImageAspectRatio(entityType);
+
+    // The rating row: the entity's data and the card settings, then what the
+    // card set itself
+    const { getSettings } = useCardDisplaySettings();
+    const cardSettings = getSettings(
+      explicitControls?.entityType ?? entityType
+    );
+    const entityId = explicitControls?.entityId ?? ratingEntity?.id;
+    const controlsInstanceId =
+      explicitControls?.instanceId ?? ratingEntity?.instanceId;
+    const ratingControlsProps: RatingControlsProps | undefined =
+      entityId !== undefined && controlsInstanceId !== undefined
+        ? {
+            entityId,
+            instanceId: controlsInstanceId,
+            initialRating: ratingEntity?.rating100,
+            initialFavorite: ratingEntity?.favorite ?? false,
+            initialOCounter:
+              ratingEntity?.o_counter ?? ratingEntity?.oCounter ?? undefined,
+            showRating: switchOf(cardSettings.showRating),
+            showFavorite: switchOf(cardSettings.showFavorite),
+            showOCounter: switchOf(cardSettings.showOCounter),
+            showMenu: switchOf(cardSettings.showMenu),
+            ...definedFields(explicitControls ?? {}),
+          }
+        : undefined;
 
     // Selection hook
     const { selectionHandlers, handleNavigationClick } = useCardSelection({
@@ -136,23 +223,37 @@ export const BaseCard = forwardRef<HTMLDivElement, BaseCardProps>(
     const wrappedNavigationClick = (e: MouseEvent<HTMLElement>) => {
       // First let selection hook handle its logic
       handleNavigationClick(e);
-      // If selection hook didn't prevent default and we have a custom navigate handler
-      if (!e.defaultPrevented && onNavigate) {
-        e.preventDefault();
-        onNavigate(e);
+      // Selection took the click, or there is no custom navigate handler
+      if (e.defaultPrevented || !onNavigate) return;
+      // Leave modified and non-primary clicks (new tab, new window) to the browser
+      if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) {
+        return;
       }
+      e.preventDefault();
+      onNavigate(e);
     };
 
-    // Keyboard navigation hook
+    const navigate = useNavigate();
+
+    // Enter or Space on the focused card does what a click on it does
     const { onKeyDown } = useCardKeyboardNav({
-      linkTo,
-      onCustomAction: selectionMode ? () => onToggleSelect?.(entity) : undefined,
+      onActivate: () => {
+        if (selectionMode) {
+          onToggleSelect?.(entity);
+        } else if (onNavigate) {
+          onNavigate();
+        } else if (onClick) {
+          onClick();
+        } else if (linkTo) {
+          void navigate(linkTo, { state: { fromPageTitle, ...linkState } });
+        }
+      },
     });
 
     // Merge display preferences with explicit props (props take precedence)
     // When hideDescription is explicitly true, respect it
     // Otherwise, check displayPreferences.showDescription (default: true)
-    const shouldShowDescription = hideDescription === true
+    const shouldShowDescription = hideDescription
       ? false
       : (displayPreferences.showDescription ?? true);
 
@@ -174,6 +275,7 @@ export const BaseCard = forwardRef<HTMLDivElement, BaseCardProps>(
         style={{ ...style, ...selectionStyle }}
         onKeyDown={onKeyDown}
         onFocus={onFocus}
+        onBlur={onBlur}
         {...selectionHandlers}
         {...rest}
       >
@@ -188,6 +290,8 @@ export const BaseCard = forwardRef<HTMLDivElement, BaseCardProps>(
           fromPageTitle={fromPageTitle}
           linkState={linkState}
           onClickOverride={wrappedNavigationClick}
+          // A card's own image content (a preview) draws the image
+          mediaInChildren={renderImageContent !== undefined}
         >
           {/* Custom image content (e.g., sprite preview) */}
           {renderImageContent?.()}
@@ -198,7 +302,9 @@ export const BaseCard = forwardRef<HTMLDivElement, BaseCardProps>(
         {/* Title Section - navigable when linkTo provided */}
         <CardTitle
           title={title}
-          subtitle={hideSubtitle ? null : (typeof subtitle === 'string' ? subtitle : null)}
+          subtitle={
+            hideSubtitle ? null : typeof subtitle === "string" ? subtitle : null
+          }
           linkTo={linkTo}
           fromPageTitle={fromPageTitle}
           linkState={linkState}
@@ -220,28 +326,36 @@ export const BaseCard = forwardRef<HTMLDivElement, BaseCardProps>(
             Menu placement logic:
             1. If rating controls visible → menu in rating row
             2. If rating controls hidden but indicators visible → menu in indicators row
-            3. If indicators hidden but showMenu enabled → standalone CardMenuRow
-            4. If everything hidden → no extra row
+            3. If everything hidden → no extra row
         */}
         {(() => {
           // Extract settings from ratingControlsProps
-          const hasRatingControls = ratingControlsProps && (
-            ratingControlsProps.showRating ||
-            ratingControlsProps.showFavorite ||
-            ratingControlsProps.showOCounter
-          );
+          const ratingType = ratingControlsProps?.entityType || entityType;
+          // A clip has nothing to rate: no row, only the menu
+          const hasRatingControls =
+            ratingControlsProps &&
+            isRatableEntityType(ratingType) &&
+            (ratingControlsProps.showRating ||
+              ratingControlsProps.showFavorite ||
+              ratingControlsProps.showOCounter);
           const showMenu = ratingControlsProps?.showMenu ?? true;
-          const hasIndicators = indicators.length > 0;
+          const hasIndicators = indicators.length > 0 || !!indicatorBadge;
+          // What the hide dialog and toast call the entity
+          const entityTitle =
+            ratingControlsProps?.entityTitle ??
+            (typeof title === "string" ? title : undefined);
 
           // Build menu component for indicators row (when needed)
-          const menuForIndicators = !hasRatingControls && showMenu && ratingControlsProps ? (
-            <EntityMenu
-              entityType={ratingControlsProps.entityType || entityType}
-              entityId={ratingControlsProps.entityId}
-              entityName={ratingControlsProps.entityTitle ?? ""}
-              onHide={ratingControlsProps.onHideClick as ((payload: { entityType: string; entityId: string; entityName: string }) => void) | undefined}
-            />
-          ) : null;
+          const menuForIndicators =
+            !hasRatingControls && showMenu && ratingControlsProps ? (
+              <CardHideMenu
+                entityType={ratingControlsProps.entityType || entityType}
+                entityId={ratingControlsProps.entityId}
+                instanceId={ratingControlsProps.instanceId}
+                entityTitle={entityTitle}
+                onHideSuccess={ratingControlsProps.onHideSuccess}
+              />
+            ) : null;
 
           return (
             <>
@@ -249,6 +363,7 @@ export const BaseCard = forwardRef<HTMLDivElement, BaseCardProps>(
               {(hasIndicators || menuForIndicators) && (
                 <CardIndicators
                   indicators={indicators}
+                  badge={indicatorBadge}
                   menuComponent={menuForIndicators}
                 />
               )}
@@ -256,31 +371,25 @@ export const BaseCard = forwardRef<HTMLDivElement, BaseCardProps>(
               {/* Rating Controls - only render if has visible controls */}
               {ratingControlsProps && hasRatingControls && (
                 <CardRatingRow
-                  entityType={ratingControlsProps.entityType || entityType}
+                  entityType={ratingType}
                   entityId={ratingControlsProps.entityId}
                   instanceId={ratingControlsProps.instanceId}
-                  entityTitle={ratingControlsProps.entityTitle}
+                  entityTitle={entityTitle}
                   initialRating={ratingControlsProps.initialRating ?? null}
                   initialFavorite={ratingControlsProps.initialFavorite ?? false}
                   initialOCounter={ratingControlsProps.initialOCounter ?? 0}
                   onHideSuccess={ratingControlsProps.onHideSuccess}
                   onOCounterChange={ratingControlsProps.onOCounterChange}
-                  onRatingChange={ratingControlsProps.onRatingChange as ((entityId: string, rating: number | null) => void) | undefined}
+                  onRatingChange={
+                    ratingControlsProps.onRatingChange as
+                      | ((entityId: string, rating: number | null) => void)
+                      | undefined
+                  }
                   onFavoriteChange={ratingControlsProps.onFavoriteChange}
                   showRating={ratingControlsProps.showRating}
                   showFavorite={ratingControlsProps.showFavorite}
                   showOCounter={ratingControlsProps.showOCounter}
                   showMenu={ratingControlsProps.showMenu}
-                />
-              )}
-
-              {/* Standalone menu row - only if no indicators and no rating controls but menu enabled */}
-              {!hasIndicators && !hasRatingControls && showMenu && ratingControlsProps && (
-                <CardMenuRow
-                  entityType={ratingControlsProps.entityType || entityType}
-                  entityId={ratingControlsProps.entityId}
-                  entityTitle={ratingControlsProps.entityTitle}
-                  onHideSuccess={ratingControlsProps.onHideSuccess}
                 />
               )}
             </>

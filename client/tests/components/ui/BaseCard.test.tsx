@@ -1,12 +1,31 @@
-import { describe, it, expect, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
-import { createElement } from "react";
-import { MemoryRouter } from "react-router-dom";
-import { BaseCard, type BaseCardProps } from "../../../src/components/ui/BaseCard";
+import {
+  MemoryRouter,
+  RouterProvider,
+  createMemoryRouter,
+} from "react-router-dom";
+import { fireEvent, render, screen } from "@testing-library/react";
+import { createQueryWrapper, must } from "@tests/testUtils";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  BaseCard,
+  type BaseCardProps,
+} from "../../../src/components/ui/BaseCard";
 
-// Cast for createElement usage since BaseCard is a forwardRef component
- 
-const BaseCardComponent = BaseCard as any;
+vi.mock("../../../src/hooks/useHiddenEntities", () => ({
+  useHiddenEntities: () => ({
+    hideEntity: vi.fn(),
+    hideConfirmationDisabled: true,
+  }),
+}));
+
+// The card settings the card under test reads; a test sets them
+let cardSettings: Record<string, unknown> = {};
+vi.mock("../../../src/contexts/CardDisplaySettingsContext", () => ({
+  useCardDisplaySettings: () => ({ getSettings: () => cardSettings }),
+}));
+afterEach(() => {
+  cardSettings = {};
+});
 
 describe("BaseCard", () => {
   const defaultProps = {
@@ -20,170 +39,56 @@ describe("BaseCard", () => {
     expect(BaseCard.displayName).toBe("BaseCard");
   });
 
-  it("renders title", () => {
-    const element = createElement(BaseCard, defaultProps);
-    expect(element).toBeDefined();
-    expect(element.props.title).toBe("Test Title");
-  });
-
-  it("renders subtitle when provided", () => {
-    const element = createElement(BaseCardComponent, {
-      ...defaultProps,
-      subtitle: "Test Subtitle",
-    });
-    expect(element.props.subtitle).toBe("Test Subtitle");
-  });
-
-  it("hides subtitle when hideSubtitle is true", () => {
-    const element = createElement(BaseCardComponent, {
-      ...defaultProps,
-      subtitle: "Test Subtitle",
-      hideSubtitle: true,
-    });
-    expect(element.props.hideSubtitle).toBe(true);
-    expect(element.props.subtitle).toBe("Test Subtitle");
-  });
-
-  it("renders description when provided", () => {
-    const element = createElement(BaseCardComponent, {
-      ...defaultProps,
-      description: "Test Description",
-    });
-    expect(element.props.description).toBe("Test Description");
-  });
-
-  it("hides description when hideDescription is true", () => {
-    const element = createElement(BaseCardComponent, {
-      ...defaultProps,
-      description: "Test Description",
-      hideDescription: true,
-    });
-    expect(element.props.hideDescription).toBe(true);
-    expect(element.props.description).toBe("Test Description");
-  });
-
-  it("accepts linkTo prop", () => {
-    const element = createElement(BaseCardComponent, {
-      ...defaultProps,
-      linkTo: "/test-path",
-    });
-    expect(element.props.linkTo).toBe("/test-path");
-  });
-
-  it("accepts indicators prop", () => {
-    const indicators = [
-      { label: "Scenes", count: 5, icon: "scene" },
-      { label: "Images", count: 10, icon: "image" },
-    ];
-    const element = createElement(BaseCardComponent, {
-      ...defaultProps,
-      indicators,
-    });
-    expect(element.props.indicators).toEqual(indicators);
-  });
-
-  it("calls renderOverlay slot when provided", () => {
-    const renderOverlay = vi.fn(() => createElement("div", {}, "Custom Overlay"));
-    const element = createElement(BaseCardComponent, {
-      ...defaultProps,
-      renderOverlay,
-    });
-    expect(element.props.renderOverlay).toBe(renderOverlay);
-  });
-
-  it("calls renderAfterTitle slot when provided", () => {
-    const renderAfterTitle = vi.fn(() =>
-      createElement("div", {}, "After Title Content")
+  const renderCard = (props: Partial<BaseCardProps> = {}) =>
+    render(
+      <MemoryRouter>
+        <BaseCard {...defaultProps} {...props} />
+      </MemoryRouter>
     );
-    const element = createElement(BaseCardComponent, {
-      ...defaultProps,
-      renderAfterTitle,
-    });
-    expect(element.props.renderAfterTitle).toBe(renderAfterTitle);
+
+  it("renders its title and subtitle, and hideSubtitle drops the subtitle", () => {
+    const { unmount } = renderCard({ subtitle: "Test Subtitle" });
+    expect(screen.getByText("Test Title")).toBeInTheDocument();
+    expect(screen.getByText("Test Subtitle")).toBeInTheDocument();
+    unmount();
+
+    renderCard({ subtitle: "Test Subtitle", hideSubtitle: true });
+    expect(screen.queryByText("Test Subtitle")).toBeNull();
   });
 
-  it("accepts className prop", () => {
-    const element = createElement(BaseCardComponent, {
-      ...defaultProps,
-      className: "custom-class",
-    });
-    expect(element.props.className).toBe("custom-class");
+  it("renders the description, and hideDescription drops it", () => {
+    const { unmount } = renderCard({ description: "Test Description" });
+    expect(screen.getByText("Test Description")).toBeInTheDocument();
+    unmount();
+
+    renderCard({ description: "Test Description", hideDescription: true });
+    expect(screen.queryByText("Test Description")).toBeNull();
   });
 
-  it("accepts onClick prop", () => {
+  it("links its title to linkTo", () => {
+    renderCard({ linkTo: "/test-path" });
+    expect(screen.getByText("Test Title").closest("a")).toHaveAttribute(
+      "href",
+      "/test-path"
+    );
+  });
+
+  it("renders the overlay and after-title slots", () => {
+    renderCard({
+      renderOverlay: () => <div>Custom Overlay</div>,
+      renderAfterTitle: () => <div>After Title Content</div>,
+    });
+    expect(screen.getByText("Custom Overlay")).toBeInTheDocument();
+    expect(screen.getByText("After Title Content")).toBeInTheDocument();
+  });
+
+  it("puts className on the card and calls onClick when it is clicked", () => {
     const onClick = vi.fn();
-    const element = createElement(BaseCardComponent, {
-      ...defaultProps,
-      onClick,
-    });
-    expect(element.props.onClick).toBe(onClick);
-  });
-
-  it("accepts ratingControlsProps", () => {
-    const ratingControlsProps = {
-      entityId: "scene123",
-      initialRating: 80,
-      initialFavorite: true,
-      initialOCounter: 5,
-      entityTitle: "Test Scene",
-    };
-    const element = createElement(BaseCardComponent, {
-      ...defaultProps,
-      ratingControlsProps,
-    });
-    expect(element.props.ratingControlsProps).toEqual(ratingControlsProps);
-  });
-
-  it("accepts maxTitleLines prop", () => {
-    const element = createElement(BaseCardComponent, {
-      ...defaultProps,
-      maxTitleLines: 3,
-    });
-    expect(element.props.maxTitleLines).toBe(3);
-  });
-
-  it("accepts maxDescriptionLines prop", () => {
-    const element = createElement(BaseCardComponent, {
-      ...defaultProps,
-      maxDescriptionLines: 5,
-    });
-    expect(element.props.maxDescriptionLines).toBe(5);
-  });
-
-  it("accepts fromPageTitle prop", () => {
-    const element = createElement(BaseCardComponent, {
-      ...defaultProps,
-      fromPageTitle: "Galleries",
-    });
-    expect(element.props.fromPageTitle).toBe("Galleries");
-  });
-
-  it("accepts tabIndex prop", () => {
-    const element = createElement(BaseCardComponent, {
-      ...defaultProps,
-      tabIndex: 0,
-    });
-    expect(element.props.tabIndex).toBe(0);
-  });
-
-  it("accepts style prop", () => {
-    const style = { backgroundColor: "red" };
-    const element = createElement(BaseCardComponent, {
-      ...defaultProps,
-      style,
-    });
-    expect(element.props.style).toEqual(style);
-  });
-
-  it("accepts renderImageContent slot", () => {
-    const renderImageContent = vi.fn(() =>
-      createElement("div", {}, "Image Content")
-    );
-    const element = createElement(BaseCardComponent, {
-      ...defaultProps,
-      renderImageContent,
-    });
-    expect(element.props.renderImageContent).toBe(renderImageContent);
+    renderCard({ className: "custom-class", onClick });
+    const card = screen.getByLabelText("Scene");
+    expect(card).toHaveClass("custom-class");
+    fireEvent.click(card);
+    expect(onClick).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -231,56 +136,221 @@ describe("BaseCard selection mode", () => {
 });
 
 describe("BaseCard menu placement logic", () => {
-  it("accepts showMenu setting in ratingControlsProps", () => {
-    const ratingControlsProps = {
-      entityId: "scene123",
-      initialRating: 80,
-      showRating: true,
-      showFavorite: true,
-      showOCounter: false,
-      showMenu: true,
-    };
-    const element = createElement(BaseCardComponent, {
-      entityType: "scene",
-      imagePath: "/test.jpg",
-      title: "Test",
-      ratingControlsProps,
-    });
-    expect(element.props.ratingControlsProps!.showMenu).toBe(true);
+  const controls = {
+    entityId: "scene123",
+    instanceId: "inst-1",
+    showRating: false,
+    showFavorite: false,
+    showOCounter: false,
+  };
+  const renderCard = (
+    ratingControlsProps: BaseCardProps["ratingControlsProps"],
+    indicators: BaseCardProps["indicators"] = []
+  ) =>
+    render(
+      <MemoryRouter>
+        <BaseCard
+          entityType="scene"
+          title="Test"
+          indicators={indicators}
+          ratingControlsProps={ratingControlsProps}
+        />
+      </MemoryRouter>,
+      // A scene's rating row offers Remove last O, a TanStack mutation
+      { wrapper: createQueryWrapper() }
+    );
+
+  it("shows one menu when only the menu is on, with or without indicators", () => {
+    const { unmount } = renderCard({ ...controls, showMenu: true });
+    expect(screen.getAllByLabelText("More options")).toHaveLength(1);
+    unmount();
+
+    renderCard({ ...controls, showMenu: true }, [{ type: "SCENES", count: 3 }]);
+    expect(screen.getAllByLabelText("More options")).toHaveLength(1);
   });
 
-  it("accepts showMenu=false to hide menu", () => {
-    const ratingControlsProps = {
-      entityId: "scene123",
-      showRating: true,
-      showFavorite: true,
-      showOCounter: false,
-      showMenu: false,
-    };
-    const element = createElement(BaseCardComponent, {
-      entityType: "scene",
-      imagePath: "/test.jpg",
-      title: "Test",
-      ratingControlsProps,
-    });
-    expect(element.props.ratingControlsProps!.showMenu).toBe(false);
+  it("shows no menu with showMenu=false", () => {
+    renderCard({ ...controls, showMenu: false }, [
+      { type: "SCENES", count: 3 },
+    ]);
+    expect(screen.queryByLabelText("More options")).toBeNull();
   });
 
-  it("defaults showMenu to true when not specified", () => {
-    const ratingControlsProps = {
-      entityId: "scene123",
-      showRating: true,
-      showFavorite: true,
-      showOCounter: false,
-      // showMenu not specified - should default to true
-    };
-    const element = createElement(BaseCardComponent, {
-      entityType: "scene",
-      imagePath: "/test.jpg",
-      title: "Test",
-      ratingControlsProps,
+  it("puts the menu in the rating row, once, when rating controls are on", () => {
+    renderCard({ ...controls, showRating: true });
+    expect(screen.getAllByLabelText("More options")).toHaveLength(1);
+  });
+
+  it("defaults showMenu to on", () => {
+    renderCard({ ...controls, showRating: true });
+    expect(screen.getByLabelText("More options")).toBeInTheDocument();
+  });
+});
+
+describe("BaseCard navigation", () => {
+  const renderCard = (onNavigate: (e: unknown) => void) => {
+    const router = createMemoryRouter(
+      [
+        {
+          path: "/scenes",
+          element: (
+            <BaseCard
+              entityType="scene"
+              entity={{ id: "1" }}
+              title="Test Title"
+              linkTo="/scene/1"
+              onNavigate={onNavigate}
+            />
+          ),
+        },
+        { path: "/scene/:id", element: <div>scene page</div> },
+      ],
+      { initialEntries: ["/scenes"] }
+    );
+    render(<RouterProvider router={router} />);
+    const titleLink = must(screen.getByText("Test Title").closest("a"));
+    return { router, titleLink };
+  };
+
+  // happy-dom follows an unprevented link click by changing window.location
+  const startUrl = window.location.href;
+  afterEach(() => {
+    window.history.replaceState(null, "", startUrl);
+  });
+
+  it("a plain click on the title calls onNavigate once and keeps the Link from navigating", () => {
+    const onNavigate = vi.fn();
+    const { router, titleLink } = renderCard(onNavigate);
+
+    fireEvent.click(titleLink);
+
+    expect(onNavigate).toHaveBeenCalledTimes(1);
+    expect(router.state.location.pathname).toBe("/scenes");
+  });
+
+  it("a ctrl, meta or shift click leaves the link to the browser and skips onNavigate", () => {
+    const onNavigate = vi.fn();
+    const { router, titleLink } = renderCard(onNavigate);
+
+    const notPrevented = (["ctrlKey", "metaKey", "shiftKey"] as const).map(
+      (modifier) => fireEvent.click(titleLink, { [modifier]: true })
+    );
+
+    expect(onNavigate).not.toHaveBeenCalled();
+    // Not prevented: the browser's own new-tab or new-window handling runs
+    expect(notPrevented).toEqual([true, true, true]);
+    expect(router.state.location.pathname).toBe("/scenes");
+  });
+});
+
+describe("BaseCard rating controls from the entity", () => {
+  const allOn = {
+    showRating: true,
+    showFavorite: true,
+    showOCounter: true,
+    showMenu: true,
+  };
+  const renderCard = (
+    props: Partial<BaseCardProps>,
+    settings: Record<string, unknown> = allOn
+  ) => {
+    cardSettings = settings;
+    return render(
+      <MemoryRouter>
+        <BaseCard entityType="scene" title="Test" {...props} />
+      </MemoryRouter>,
+      { wrapper: createQueryWrapper() }
+    );
+  };
+
+  it("the rating row reads the entity's rating, favorite and O count", () => {
+    renderCard({
+      ratingEntity: {
+        id: "s1",
+        instanceId: "inst-1",
+        rating100: 80,
+        favorite: true,
+        o_counter: 4,
+      },
     });
-    // showMenu should be undefined in props, but BaseCard logic defaults it to true
-    expect((element.props.ratingControlsProps as any)?.showMenu).toBeUndefined();
+    expect(screen.getByLabelText("Rating: 8.0")).toBeInTheDocument();
+    expect(screen.getByLabelText("Remove from favorites")).toBeInTheDocument();
+    expect(
+      screen.getByLabelText("Increment O counter (current: 4)")
+    ).toBeInTheDocument();
+  });
+
+  it("an image's oCounter is read the same way", () => {
+    renderCard(
+      {
+        entityType: "image",
+        ratingEntity: {
+          id: "i1",
+          instanceId: "inst-1",
+          rating100: null,
+          favorite: false,
+          oCounter: 2,
+        },
+      },
+      allOn
+    );
+    expect(screen.getByLabelText("Not rated")).toBeInTheDocument();
+    expect(
+      screen.getByLabelText("Increment O counter (current: 2)")
+    ).toBeInTheDocument();
+  });
+
+  it("a card setting that hides the rating hides it", () => {
+    renderCard(
+      {
+        ratingEntity: {
+          id: "s1",
+          instanceId: "inst-1",
+          rating100: 80,
+          favorite: true,
+          o_counter: 4,
+        },
+      },
+      { ...allOn, showRating: false }
+    );
+    expect(screen.queryByLabelText("Rating: 8.0")).toBeNull();
+    expect(screen.getByLabelText("Remove from favorites")).toBeInTheDocument();
+  });
+
+  it("explicit ratingControlsProps fields win", () => {
+    renderCard({
+      ratingEntity: {
+        id: "s1",
+        instanceId: "inst-1",
+        rating100: 80,
+        favorite: true,
+        o_counter: 4,
+      },
+      ratingControlsProps: { showRating: false, initialOCounter: 9 },
+    });
+    expect(screen.queryByLabelText("Rating: 8.0")).toBeNull();
+    expect(
+      screen.getByLabelText("Increment O counter (current: 9)")
+    ).toBeInTheDocument();
+  });
+
+  it("a gallery card has no O counter to press", () => {
+    renderCard({
+      entityType: "gallery",
+      ratingEntity: {
+        id: "g1",
+        instanceId: "inst-1",
+        rating100: 20,
+        favorite: false,
+      },
+    });
+    expect(screen.queryByLabelText(/Increment O counter/)).toBeNull();
+    expect(screen.getByLabelText("O Counter: 0")).toBeInTheDocument();
+  });
+
+  it("no ratingEntity and no ids in the props means no rating row", () => {
+    renderCard({});
+    expect(screen.queryByLabelText("Not rated")).toBeNull();
+    expect(screen.queryByLabelText("More options")).toBeNull();
   });
 });

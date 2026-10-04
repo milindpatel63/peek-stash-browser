@@ -1,33 +1,51 @@
 /**
  * Utility functions for working with Stash URLs
  */
-
 import { stashInstanceManager } from "../services/StashInstanceManager.js";
 
 /**
- * Gets the base Stash URL from the current instance configuration
- * @returns Base Stash URL (e.g., http://localhost:9999)
+ * The Stash UI address of an instance, for "View in Stash" links: its uiUrl
+ * when set, else its url. Null when the instance is not loaded (disabled,
+ * deleted, or "" from a row stored before instances were carried).
+ * @param instanceId - The entity's instance
+ * @returns UI Stash URL (e.g., http://localhost:9999 or https://stash.example.com)
  */
-export function getStashBaseUrl(): string | null {
+export function getStashUiUrl(instanceId: string): string | null {
   try {
-    return stashInstanceManager.getBaseUrl();
+    return stashInstanceManager.getUiUrl(instanceId);
   } catch {
-    // No instance configured
     return null;
   }
 }
 
 /**
- * Builds a Stash entity URL
+ * Builds a Stash entity URL for "View in Stash" links
+ * Uses the uiUrl if configured, otherwise falls back to the base url
  * @param entityType - Type of entity (scene, performer, studio, tag, group, gallery, image)
  * @param entityId - ID of the entity
- * @returns Full URL to the entity in Stash, or null if stashBaseUrl is not available
+ * @param instanceId - The entity's instance; no link when it is not loaded
+ * @param viewer - The requesting user. Stash's address is internal, so only
+ *   admins get a link; everyone else, and a missing viewer, gets null.
+ * @returns Full URL to the entity in Stash, or null
  */
 export function buildStashEntityUrl(
-  entityType: 'scene' | 'performer' | 'studio' | 'tag' | 'group' | 'gallery' | 'image',
-  entityId: string | number
+  entityType:
+    | "scene"
+    | "performer"
+    | "studio"
+    | "tag"
+    | "group"
+    | "gallery"
+    | "image",
+  entityId: string | number,
+  instanceId: string,
+  viewer: { role: string } | undefined
 ): string | null {
-  const baseUrl = getStashBaseUrl();
+  if (viewer?.role !== "ADMIN") {
+    return null;
+  }
+
+  const baseUrl = getStashUiUrl(instanceId);
 
   if (!baseUrl) {
     return null;
@@ -35,13 +53,13 @@ export function buildStashEntityUrl(
 
   // Map entity types to Stash URL paths
   const pathMap: Record<string, string> = {
-    scene: 'scenes',
-    performer: 'performers',
-    studio: 'studios',
-    tag: 'tags',
-    group: 'groups',
-    gallery: 'galleries',
-    image: 'images',
+    scene: "scenes",
+    performer: "performers",
+    studio: "studios",
+    tag: "tags",
+    group: "groups",
+    gallery: "galleries",
+    image: "images",
   };
 
   const path = pathMap[entityType];

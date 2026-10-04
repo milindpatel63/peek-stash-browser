@@ -1,5 +1,5 @@
 // client/src/components/timeline/TimelineMobileSheet.tsx
-import { memo, useState, useRef, useCallback, type ReactNode } from "react";
+import { type ReactNode, memo, useCallback, useRef, useState } from "react";
 import { ChevronUp } from "lucide-react";
 
 const MINIMIZED_HEIGHT = 48; // Just handle + selection info
@@ -39,36 +39,45 @@ function TimelineMobileSheet({
 
   // Touch handlers for swipe gestures
   const handleTouchStart = useCallback((e: React.TouchEvent) => {
-    touchStartY.current = e.touches[0].clientY;
+    const touch = e.touches[0];
+    if (!touch) return;
+    touchStartY.current = touch.clientY;
     touchStartTime.current = Date.now();
   }, []);
 
-  const handleTouchEnd = useCallback((e: React.TouchEvent) => {
-    if (touchStartY.current === null || touchStartTime.current === null) return;
+  const handleTouchEnd = useCallback(
+    (e: React.TouchEvent) => {
+      if (touchStartY.current === null || touchStartTime.current === null)
+        return;
 
-    const touchEndY = e.changedTouches[0].clientY;
-    const deltaY = touchEndY - touchStartY.current;
-    const deltaTime = Date.now() - touchStartTime.current;
+      const touch = e.changedTouches[0];
+      if (!touch) return;
+      const touchEndY = touch.clientY;
+      const deltaY = touchEndY - touchStartY.current;
+      const deltaTime = Date.now() - touchStartTime.current;
 
-    // Check if swipe was fast enough or long enough
-    const isValidSwipe = Math.abs(deltaY) > SWIPE_THRESHOLD ||
-      (Math.abs(deltaY) > 20 && deltaTime < 300);
+      // Check if swipe was fast enough or long enough
+      const isValidSwipe =
+        Math.abs(deltaY) > SWIPE_THRESHOLD ||
+        (Math.abs(deltaY) > 20 && deltaTime < 300);
 
-    if (isValidSwipe) {
-      if (deltaY > 0 && isExpanded) {
-        // Swipe down while expanded -> minimize
-        setIsExpanded(false);
-        e.preventDefault();
-      } else if (deltaY < 0 && !isExpanded) {
-        // Swipe up while minimized -> expand
-        setIsExpanded(true);
-        e.preventDefault();
+      if (isValidSwipe) {
+        if (deltaY > 0 && isExpanded) {
+          // Swipe down while expanded -> minimize
+          setIsExpanded(false);
+          e.preventDefault();
+        } else if (deltaY < 0 && !isExpanded) {
+          // Swipe up while minimized -> expand
+          setIsExpanded(true);
+          e.preventDefault();
+        }
       }
-    }
 
-    touchStartY.current = null;
-    touchStartTime.current = null;
-  }, [isExpanded]);
+      touchStartY.current = null;
+      touchStartTime.current = null;
+    },
+    [isExpanded]
+  );
 
   if (!isOpen) {
     return null;
@@ -82,7 +91,9 @@ function TimelineMobileSheet({
         backgroundColor: "var(--bg-primary)",
         borderTop: "1px solid var(--border-color)",
         // Only set fixed height when minimized; expanded uses auto height
-        ...(isExpanded ? {} : { height: `${MINIMIZED_HEIGHT}px`, overflow: "hidden" }),
+        ...(isExpanded
+          ? {}
+          : { height: `${MINIMIZED_HEIGHT}px`, overflow: "hidden" }),
       }}
     >
       {/* Tappable/swipeable header with drag handle */}
@@ -99,7 +110,10 @@ function TimelineMobileSheet({
         {/* Left: Selection info when minimized */}
         <div className="flex items-center gap-2 text-sm">
           {!isExpanded && selectedPeriod && (
-            <span className="font-medium" style={{ color: "var(--text-primary)" }}>
+            <span
+              className="font-medium"
+              style={{ color: "var(--text-primary)" }}
+            >
               {selectedPeriod.label}
             </span>
           )}
@@ -130,11 +144,7 @@ function TimelineMobileSheet({
       </button>
 
       {/* Timeline content - visible when expanded */}
-      {isExpanded && (
-        <div className="overflow-hidden pb-4">
-          {children}
-        </div>
-      )}
+      {isExpanded && <div className="overflow-hidden pb-4">{children}</div>}
     </div>
   );
 }

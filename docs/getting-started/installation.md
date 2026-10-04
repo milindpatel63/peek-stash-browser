@@ -50,8 +50,10 @@ https://raw.githubusercontent.com/carrotwaxr/peek-stash-browser/main/unraid-temp
 1. Go to Docker tab → Add Container
 2. Select "Peek" from User Templates dropdown
 3. Configure required settings:
-   - **JWT Secret**: Generate with `openssl rand -hex 32` in unRAID terminal
    - **App Data Directory**: Path for Peek data (e.g., `/mnt/user/appdata/peek-stash-browser`)
+   - Under "Show more settings" (advanced, all optional):
+     - **JWT Secret Key**: leave empty and Peek generates one in `/app/data/.jwt-secret` on first start
+     - **PUID** / **PGID**: the user and group that own the App Data Directory. They default to `99` and `100` (unRAID's `nobody:users`), which suits a folder under `/mnt/user/appdata`. See [File ownership](#file-ownership-puidpgid)
 4. Click Apply
 5. Access at `http://your-unraid-ip:6969`
 6. Complete the Setup Wizard to connect to your Stash server
@@ -68,15 +70,12 @@ https://raw.githubusercontent.com/carrotwaxr/peek-stash-browser/main/unraid-temp
 # Pull the latest image
 docker pull carrotwaxr/peek-stash-browser:latest
 
-# Generate JWT secret
-export JWT_SECRET=$(openssl rand -base64 32)
-
 # Run Peek
 docker run -d \
   --name peek-stash-browser \
   -p 6969:80 \
   -v peek-data:/app/data \
-  -e JWT_SECRET="${JWT_SECRET}" \
+  --restart unless-stopped \
   carrotwaxr/peek-stash-browser:latest
 ```
 
@@ -84,9 +83,27 @@ docker run -d \
 
 - `peek-data` - Database and app data (Docker named volume)
 
-**Required Environment Variables**:
+**Environment Variables**: none are required.
 
-- `JWT_SECRET` - Secret for JWT authentication (recommended to set manually)
+- `JWT_SECRET` (optional) - Signs login sessions. When unset, Peek generates one on first start and keeps it in `/app/data/.jwt-secret`
+- `PUID` / `PGID` (optional) - The user and group that own `/app/data`, default `99` and `100`. See [File ownership](#file-ownership-puidpgid)
+
+!!! tip "Bind mounts you manage from the host"
+    If you mount a host directory instead of a named volume (`-v /home/you/peek:/app/data`), add `-e PUID=$(id -u) -e PGID=$(id -g)` to the `docker run` command so the files stay owned by you. In Docker Compose, the same goes under `environment:`:
+
+    ```yaml
+    services:
+      peek:
+        image: carrotwaxr/peek-stash-browser:latest
+        ports:
+          - "6969:80"
+        volumes:
+          - /home/you/peek:/app/data
+        environment:
+          - PUID=1000 # the output of id -u
+          - PGID=1000 # the output of id -g
+        restart: unless-stopped
+    ```
 
 > **Note**: Stash URL and API key are configured via the Setup Wizard on first access - no environment variables needed!
 
@@ -98,18 +115,12 @@ See [Configuration Guide](configuration.md) for all environment variables.
 # Pull the latest image from Docker Hub
 docker pull carrotwaxr/peek-stash-browser:latest
 
-# Generate JWT secret (one-time)
-$rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
-$bytes = New-Object byte[] 32
-$rng.GetBytes($bytes)
-$jwt = [Convert]::ToBase64String($bytes)
-
 # Run Peek
 docker run -d `
     --name peek-stash-browser `
     -p 6969:80 `
     -v peek-data:/app/data `
-    -e JWT_SECRET=$jwt `
+    --restart unless-stopped `
     carrotwaxr/peek-stash-browser:latest
 ```
 
@@ -144,15 +155,12 @@ docker pull carrotwaxr/peek-stash-browser:latest
 # Pull the latest image from Docker Hub
 docker pull carrotwaxr/peek-stash-browser:latest
 
-# Generate a secure random JWT secret
-export JWT_SECRET=$(openssl rand -base64 32)
-
 # Run Peek
 docker run -d \
     --name peek-stash-browser \
     -p 6969:80 \
     -v peek-data:/app/data \
-    -e JWT_SECRET="${JWT_SECRET}" \
+    --restart unless-stopped \
     carrotwaxr/peek-stash-browser:latest
 ```
 
@@ -184,6 +192,18 @@ docker pull carrotwaxr/peek-stash-browser:latest
 !!! success "Data persists across updates!"
     Your database and configuration are saved in the `peek-data` volume and won't be lost when updating.
 
+## File ownership (PUID/PGID)
+
+Peek does not run as root. The container starts as root only long enough to set up its app user, then runs the server as `PUID:PGID`:
+
+- `PUID` and `PGID` default to `99` and `100`, unRAID's `nobody:users`. With a named volume, nothing else is needed.
+- On every start, the entrypoint gives `/app/data` to `PUID:PGID`. It changes only files with a different owner, so later starts are quick, and it keeps file modes (`0600` on `.jwt-secret`).
+- If you set `CONFIG_DIR` to a directory outside `/app/data`, that directory is given to `PUID:PGID` too.
+- nginx's master process stays root to listen on port 80; its workers run as `PUID:PGID`.
+- If the data directory cannot change owner (NFS with root squash, SMB/CIFS, a read-only mount) and `PUID:PGID` cannot write to it, the container stops with `[entrypoint] ERROR: /app/data is not writable by UID:GID`. Set `PUID`/`PGID` to the owner that `ls -ln` shows for the directory.
+- `PUID=0` keeps the server running as root. Use it only where the data directory cannot change owner, such as rootless Docker or Podman. Peek logs a warning at every start.
+- `docker run --user` (or `user:` in Compose) is refused: the container exits with `this image manages its own user`. Remove it and set `PUID`/`PGID` instead.
+
 ## First Access & Setup Wizard
 
 After installation, access Peek in your browser for the first-time setup:
@@ -191,7 +211,7 @@ After installation, access Peek in your browser for the first-time setup:
 1. Navigate to `http://localhost:6969` (or your server IP)
 2. **Complete the 4-step setup wizard**:
    - **Welcome**: Introduction to Peek
-   - **Create Admin**: Set your admin username and password
+   - **Create Admin User**: The username is `admin`; choose a password
    - **Connect to Stash**: Enter your Stash URL and API key
    - **Complete**: Setup finished!
 3. **Login** with your newly created admin credentials
@@ -202,9 +222,9 @@ After installation, access Peek in your browser for the first-time setup:
 
 Peek includes a built-in update checker:
 
-1. Navigate to **Settings → Server Settings**
+1. Navigate to **Settings → Server Settings → Server Configuration**
 2. Scroll to the **Version Information** section
-3. Click **Check for Updates**
+3. Peek checks for a newer release when you open it; click **Check for Updates** to check again
 
 The system will query GitHub for new releases and notify you if an update is available.
 
@@ -229,7 +249,7 @@ To update your Docker container to the latest version:
       --name peek-stash-browser \
       -p 6969:80 \
       -v peek-data:/app/data \
-      -e JWT_SECRET="${JWT_SECRET}" \
+      --restart unless-stopped \
       carrotwaxr/peek-stash-browser:latest
     ```
 
@@ -247,7 +267,7 @@ To update your Docker container to the latest version:
       --name peek-stash-browser `
       -p 6969:80 `
       -v peek-data:/app/data `
-      -e JWT_SECRET=$jwt `
+      --restart unless-stopped `
       carrotwaxr/peek-stash-browser:latest
     ```
 
@@ -260,8 +280,8 @@ To use a specific version instead of `:latest`:
 
 ```bash
 # Pull and use specific version
-docker pull carrotwaxr/peek-stash-browser:1.0.0
-docker run ... carrotwaxr/peek-stash-browser:1.0.0
+docker pull carrotwaxr/peek-stash-browser:3.3.8
+docker run ... carrotwaxr/peek-stash-browser:3.3.8
 ```
 
 Available versions: [GitHub Releases](https://github.com/carrotwaxr/peek-stash-browser/releases)

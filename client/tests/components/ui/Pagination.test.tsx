@@ -9,21 +9,11 @@
  */
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { must } from "@tests/testUtils";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import Pagination from "../../../src/components/ui/Pagination";
 
-// Mock TV mode hook
-vi.mock("../../../src/hooks/useTVMode", () => ({
-  useTVMode: () => ({ isTVMode: false }),
-}));
-
-// Mock horizontal navigation hook
-vi.mock("../../../src/hooks/useHorizontalNavigation", () => ({
-  useHorizontalNavigation: () => ({
-    setItemRef: () => {},
-    isFocused: () => false,
-  }),
-}));
+// No TVModeProvider: Pagination reads no TV mode (TV focus is TVNavigator's)
 
 describe("Pagination", () => {
   const defaultProps = {
@@ -40,6 +30,12 @@ describe("Pagination", () => {
   });
 
   describe("Rendering", () => {
+    it("renders outside a TVModeProvider", () => {
+      render(<Pagination {...defaultProps} />);
+
+      expect(screen.getByLabelText("Next Page")).toBeInTheDocument();
+    });
+
     it("renders navigation buttons", () => {
       render(<Pagination {...defaultProps} />);
 
@@ -71,34 +67,60 @@ describe("Pagination", () => {
     });
 
     it("shows record info when showInfo is true", () => {
-      render(<Pagination {...defaultProps} currentPage={1} perPage={24} totalCount={240} />);
+      render(
+        <Pagination
+          {...defaultProps}
+          currentPage={1}
+          perPage={24}
+          totalCount={240}
+        />
+      );
 
       expect(screen.getByText(/Showing 1-24 of 240/)).toBeInTheDocument();
     });
 
     it("calculates correct record range for middle pages", () => {
-      render(<Pagination {...defaultProps} currentPage={5} perPage={24} totalCount={240} />);
+      render(
+        <Pagination
+          {...defaultProps}
+          currentPage={5}
+          perPage={24}
+          totalCount={240}
+        />
+      );
 
       // Page 5: records 97-120
       expect(screen.getByText(/Showing 97-120 of 240/)).toBeInTheDocument();
     });
 
     it("shows correct range on last page with partial results", () => {
-      render(<Pagination {...defaultProps} currentPage={10} perPage={24} totalCount={230} />);
+      render(
+        <Pagination
+          {...defaultProps}
+          currentPage={10}
+          perPage={24}
+          totalCount={230}
+        />
+      );
 
       // Page 10: records 217-230 (not 217-240)
       expect(screen.getByText(/Showing 217-230 of 230/)).toBeInTheDocument();
     });
 
     it("does not render when totalPages is 0", () => {
-      const { container } = render(<Pagination {...defaultProps} totalPages={0} />);
+      const { container } = render(
+        <Pagination {...defaultProps} totalPages={0} />
+      );
 
       expect(container.firstChild).toBeNull();
     });
 
     it("does not render when totalPages is undefined", () => {
       const { container } = render(
-        <Pagination {...defaultProps} totalPages={undefined as unknown as number} />
+        <Pagination
+          {...defaultProps}
+          totalPages={undefined as unknown as number}
+        />
       );
 
       expect(container.firstChild).toBeNull();
@@ -109,7 +131,13 @@ describe("Pagination", () => {
     it("calls onPageChange with page 1 when First button clicked", async () => {
       const user = userEvent.setup();
       const onPageChange = vi.fn();
-      render(<Pagination {...defaultProps} currentPage={5} onPageChange={onPageChange} />);
+      render(
+        <Pagination
+          {...defaultProps}
+          currentPage={5}
+          onPageChange={onPageChange}
+        />
+      );
 
       await user.click(screen.getByLabelText("First Page"));
 
@@ -119,7 +147,13 @@ describe("Pagination", () => {
     it("calls onPageChange with previous page when Previous button clicked", async () => {
       const user = userEvent.setup();
       const onPageChange = vi.fn();
-      render(<Pagination {...defaultProps} currentPage={5} onPageChange={onPageChange} />);
+      render(
+        <Pagination
+          {...defaultProps}
+          currentPage={5}
+          onPageChange={onPageChange}
+        />
+      );
 
       await user.click(screen.getByLabelText("Previous Page"));
 
@@ -129,7 +163,13 @@ describe("Pagination", () => {
     it("calls onPageChange with next page when Next button clicked", async () => {
       const user = userEvent.setup();
       const onPageChange = vi.fn();
-      render(<Pagination {...defaultProps} currentPage={5} onPageChange={onPageChange} />);
+      render(
+        <Pagination
+          {...defaultProps}
+          currentPage={5}
+          onPageChange={onPageChange}
+        />
+      );
 
       await user.click(screen.getByLabelText("Next Page"));
 
@@ -140,7 +180,12 @@ describe("Pagination", () => {
       const user = userEvent.setup();
       const onPageChange = vi.fn();
       render(
-        <Pagination {...defaultProps} currentPage={5} totalPages={10} onPageChange={onPageChange} />
+        <Pagination
+          {...defaultProps}
+          currentPage={5}
+          totalPages={10}
+          onPageChange={onPageChange}
+        />
       );
 
       await user.click(screen.getByLabelText("Last Page"));
@@ -191,11 +236,17 @@ describe("Pagination", () => {
     it("calls onPageChange when page selected from dropdown", async () => {
       const user = userEvent.setup();
       const onPageChange = vi.fn();
-      render(<Pagination {...defaultProps} currentPage={1} onPageChange={onPageChange} />);
+      render(
+        <Pagination
+          {...defaultProps}
+          currentPage={1}
+          onPageChange={onPageChange}
+        />
+      );
 
       // Find dropdown and select page 5
       const comboboxes = screen.getAllByRole("combobox");
-      const pageSelect = comboboxes[0]; // First combobox is page selector
+      const pageSelect = must(comboboxes[0]); // First combobox is page selector
       await user.selectOptions(pageSelect, "5");
 
       expect(onPageChange).toHaveBeenCalledWith(5);
@@ -218,7 +269,13 @@ describe("Pagination", () => {
     it("calls onPerPageChange when preset selected from dropdown", async () => {
       const user = userEvent.setup();
       const onPerPageChange = vi.fn();
-      render(<Pagination {...defaultProps} perPage={24} onPerPageChange={onPerPageChange} />);
+      render(
+        <Pagination
+          {...defaultProps}
+          perPage={24}
+          onPerPageChange={onPerPageChange}
+        />
+      );
 
       const perPageSelect = screen.getByLabelText("Per Page:");
       await user.selectOptions(perPageSelect, "48");
@@ -234,20 +291,26 @@ describe("Pagination", () => {
       await user.selectOptions(perPageSelect, "custom");
 
       // Custom input should now be visible
-      expect(screen.getByPlaceholderText("1-500")).toBeInTheDocument();
+      expect(screen.getByPlaceholderText("1-250")).toBeInTheDocument();
     });
 
     it("calls onPerPageChange with custom value on blur", async () => {
       const user = userEvent.setup();
       const onPerPageChange = vi.fn();
-      render(<Pagination {...defaultProps} perPage={24} onPerPageChange={onPerPageChange} />);
+      render(
+        <Pagination
+          {...defaultProps}
+          perPage={24}
+          onPerPageChange={onPerPageChange}
+        />
+      );
 
       // Select custom option first
       const perPageSelect = screen.getByLabelText("Per Page:");
       await user.selectOptions(perPageSelect, "custom");
 
       // Type in custom input and blur
-      const customInput = screen.getByPlaceholderText("1-500");
+      const customInput = screen.getByPlaceholderText("1-250");
       await user.clear(customInput);
       await user.type(customInput, "100");
       await user.tab();
@@ -258,14 +321,20 @@ describe("Pagination", () => {
     it("calls onPerPageChange with custom value on Enter", async () => {
       const user = userEvent.setup();
       const onPerPageChange = vi.fn();
-      render(<Pagination {...defaultProps} perPage={24} onPerPageChange={onPerPageChange} />);
+      render(
+        <Pagination
+          {...defaultProps}
+          perPage={24}
+          onPerPageChange={onPerPageChange}
+        />
+      );
 
       // Select custom option first
       const perPageSelect = screen.getByLabelText("Per Page:");
       await user.selectOptions(perPageSelect, "custom");
 
       // Type in custom input and press Enter
-      const customInput = screen.getByPlaceholderText("1-500");
+      const customInput = screen.getByPlaceholderText("1-250");
       await user.clear(customInput);
       await user.type(customInput, "75{Enter}");
 
@@ -285,20 +354,26 @@ describe("Pagination", () => {
       const perPageSelect = screen.getByLabelText("Per Page:");
       expect(perPageSelect).toHaveValue("custom");
       // Custom input should show the current value
-      expect(screen.getByPlaceholderText("1-500")).toHaveValue("100");
+      expect(screen.getByPlaceholderText("1-250")).toHaveValue("100");
     });
 
     it("resets custom input on invalid value", async () => {
       const user = userEvent.setup();
       const onPerPageChange = vi.fn();
-      render(<Pagination {...defaultProps} perPage={24} onPerPageChange={onPerPageChange} />);
+      render(
+        <Pagination
+          {...defaultProps}
+          perPage={24}
+          onPerPageChange={onPerPageChange}
+        />
+      );
 
       // Select custom option
       const perPageSelect = screen.getByLabelText("Per Page:");
       await user.selectOptions(perPageSelect, "custom");
 
       // Type invalid value and blur
-      const customInput = screen.getByPlaceholderText("1-500");
+      const customInput = screen.getByPlaceholderText("1-250");
       await user.clear(customInput);
       await user.type(customInput, "0");
       await user.tab();
@@ -309,11 +384,55 @@ describe("Pagination", () => {
       expect(customInput).toHaveValue("24");
     });
 
+    it("the custom per-page input refuses 251", async () => {
+      const user = userEvent.setup();
+      const onPerPageChange = vi.fn();
+      render(
+        <Pagination
+          {...defaultProps}
+          perPage={24}
+          onPerPageChange={onPerPageChange}
+        />
+      );
+
+      await user.selectOptions(screen.getByLabelText("Per Page:"), "custom");
+      const customInput = screen.getByRole("textbox");
+      await user.clear(customInput);
+      await user.type(customInput, "251");
+      await user.tab();
+
+      expect(onPerPageChange).not.toHaveBeenCalled();
+      expect(customInput).toHaveValue("24");
+    });
+
+    it("the custom per-page input accepts 250", async () => {
+      const user = userEvent.setup();
+      const onPerPageChange = vi.fn();
+      render(
+        <Pagination
+          {...defaultProps}
+          perPage={24}
+          onPerPageChange={onPerPageChange}
+        />
+      );
+
+      await user.selectOptions(screen.getByLabelText("Per Page:"), "custom");
+      const customInput = screen.getByRole("textbox");
+      await user.clear(customInput);
+      await user.type(customInput, "250");
+      await user.tab();
+
+      expect(onPerPageChange).toHaveBeenCalledWith(250);
+    });
+
     it("has preset options 12, 24, 48, 96, 120", () => {
       render(<Pagination {...defaultProps} perPage={24} />);
 
-      const perPageSelect = screen.getByLabelText("Per Page:") as HTMLSelectElement;
-      const options = Array.from(perPageSelect.options).map((o: HTMLOptionElement) => o.value);
+      const perPageSelect =
+        screen.getByLabelText<HTMLSelectElement>("Per Page:");
+      const options = Array.from(perPageSelect.options).map(
+        (o: HTMLOptionElement) => o.value
+      );
 
       expect(options).toContain("12");
       expect(options).toContain("24");
@@ -371,7 +490,13 @@ describe("Pagination", () => {
     it("does not call onPageChange when undefined", async () => {
       const user = userEvent.setup();
       // Should not throw when onPageChange is undefined
-      render(<Pagination {...defaultProps} onPageChange={undefined} currentPage={5} />);
+      render(
+        <Pagination
+          {...defaultProps}
+          onPageChange={undefined}
+          currentPage={5}
+        />
+      );
 
       // Click should not throw
       await user.click(screen.getByLabelText("Next Page"));

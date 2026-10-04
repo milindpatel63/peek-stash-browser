@@ -1,6 +1,12 @@
-import { describe, it, expect, beforeAll } from "vitest";
-import { adminClient, guestClient, selectTestInstanceOnly } from "../helpers/testClient.js";
-import { TEST_ENTITIES, TEST_ADMIN } from "../fixtures/testEntities.js";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { must } from "../../tests/helpers/must.js";
+import { TEST_ADMIN, TEST_ENTITIES } from "../fixtures/testEntities.js";
+import {
+  adminClient,
+  guestClient,
+  restoreInstanceSelection,
+  selectTestInstanceOnly,
+} from "../helpers/testClient.js";
 
 // Response type for /api/library/groups
 interface FindGroupsResponse {
@@ -10,7 +16,11 @@ interface FindGroupsResponse {
       name: string;
       tags?: Array<{ id: string; name: string; image_path: string | null }>;
       studio?: { id: string; name: string; image_path: string | null } | null;
-      performers?: Array<{ id: string; name: string; image_path: string | null }>;
+      performers?: Array<{
+        id: string;
+        name: string;
+        image_path: string | null;
+      }>;
       galleries?: Array<{ id: string; title: string; cover: string | null }>;
     }>;
     count: number;
@@ -24,6 +34,8 @@ describe("Group API", () => {
     await selectTestInstanceOnly();
   });
 
+  afterAll(restoreInstanceSelection);
+
   describe("POST /api/library/groups", () => {
     it("rejects unauthenticated requests", async () => {
       const response = await guestClient.post("/api/library/groups", {});
@@ -31,10 +43,12 @@ describe("Group API", () => {
     });
 
     it("returns groups with pagination", async () => {
-      const response = await adminClient.post<FindGroupsResponse>("/api/library/groups", {
-        page: 1,
-        per_page: 10,
-      });
+      const response = await adminClient.post<FindGroupsResponse>(
+        "/api/library/groups",
+        {
+          filter: { page: 1, per_page: 10 },
+        }
+      );
 
       expect(response.ok).toBe(true);
       expect(response.data.findGroups).toBeDefined();
@@ -44,53 +58,72 @@ describe("Group API", () => {
     });
 
     it("returns group by ID", async () => {
-      const response = await adminClient.post<FindGroupsResponse>("/api/library/groups", {
-        ids: [TEST_ENTITIES.groupWithScenes],
-      });
+      const response = await adminClient.post<FindGroupsResponse>(
+        "/api/library/groups",
+        {
+          ids: [TEST_ENTITIES.groupWithScenes],
+        }
+      );
 
       expect(response.ok).toBe(true);
       expect(response.data.findGroups.groups).toHaveLength(1);
-      expect(response.data.findGroups.groups[0].id).toBe(TEST_ENTITIES.groupWithScenes);
+      expect(must(response.data.findGroups.groups[0]).id).toBe(
+        TEST_ENTITIES.groupWithScenes
+      );
     });
 
-    it("returns group with tooltip entity data (tags, studio, performers, galleries)", async () => {
-      const response = await adminClient.post<FindGroupsResponse>("/api/library/groups", {
-        ids: [TEST_ENTITIES.groupWithScenes],
-      });
+    it("returns group with tooltip entity data (tags, performers, galleries)", async () => {
+      const response = await adminClient.post<FindGroupsResponse>(
+        "/api/library/groups",
+        {
+          ids: [TEST_ENTITIES.groupWithScenes],
+        }
+      );
 
       expect(response.ok).toBe(true);
-      const group = response.data.findGroups.groups[0];
+      const group = must(response.data.findGroups.groups[0]);
 
       // Tags should have image_path
-      expect(group).toHaveProperty('tags');
-      if (group.tags && group.tags.length > 0) {
-        expect(group.tags[0]).toHaveProperty('id');
-        expect(group.tags[0]).toHaveProperty('name');
-        expect(group.tags[0]).toHaveProperty('image_path');
-      }
-
-      // Studio should have image_path
-      if (group.studio) {
-        expect(group.studio).toHaveProperty('id');
-        expect(group.studio).toHaveProperty('name');
-        expect(group.studio).toHaveProperty('image_path');
-      }
+      expect(group).toHaveProperty("tags");
+      const firstTag = must(group.tags?.[0], "group.tags[0]");
+      expect(firstTag).toHaveProperty("id");
+      expect(firstTag).toHaveProperty("name");
+      expect(firstTag).toHaveProperty("image_path");
 
       // Performers should exist with tooltip data
-      expect(group).toHaveProperty('performers');
-      if (group.performers && group.performers.length > 0) {
-        expect(group.performers[0]).toHaveProperty('id');
-        expect(group.performers[0]).toHaveProperty('name');
-        expect(group.performers[0]).toHaveProperty('image_path');
-      }
+      expect(group).toHaveProperty("performers");
+      const firstPerformer = must(group.performers?.[0], "group.performers[0]");
+      expect(firstPerformer).toHaveProperty("id");
+      expect(firstPerformer).toHaveProperty("name");
+      expect(firstPerformer).toHaveProperty("image_path");
 
       // Galleries should exist with tooltip data
-      expect(group).toHaveProperty('galleries');
-      if (group.galleries && group.galleries.length > 0) {
-        expect(group.galleries[0]).toHaveProperty('id');
-        expect(group.galleries[0]).toHaveProperty('title');
-        expect(group.galleries[0]).toHaveProperty('cover');
-      }
+      expect(group).toHaveProperty("galleries");
+      const firstGallery = must(group.galleries?.[0], "group.galleries[0]");
+      expect(firstGallery).toHaveProperty("id");
+      expect(firstGallery).toHaveProperty("title");
+      expect(firstGallery).toHaveProperty("cover");
+    });
+
+    // The studio is optional: the test skips when groupWithScenes has none,
+    // rather than passing without checking anything
+    it("returns group studio with tooltip data", async ({ skip }) => {
+      const response = await adminClient.post<FindGroupsResponse>(
+        "/api/library/groups",
+        {
+          ids: [TEST_ENTITIES.groupWithScenes],
+        }
+      );
+
+      expect(response.ok).toBe(true);
+      const group = must(response.data.findGroups.groups[0]);
+      skip(!group.studio, "groupWithScenes has no studio");
+
+      // Studio should have image_path
+      const groupStudio = must(group.studio, "group.studio");
+      expect(groupStudio).toHaveProperty("id");
+      expect(groupStudio).toHaveProperty("name");
+      expect(groupStudio).toHaveProperty("image_path");
     });
   });
 

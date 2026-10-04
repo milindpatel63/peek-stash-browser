@@ -1,27 +1,52 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { EventEmitter } from "events";
 import http from "http";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ClipPreviewProber } from "../../services/ClipPreviewProber.js";
-import crypto from "crypto";
+import { logger } from "../../utils/logger.js";
 
 describe("ClipPreviewProber", () => {
   describe("probePreviewUrl", () => {
     it("should return false for invalid URLs", async () => {
       const prober = new ClipPreviewProber({ timeoutMs: 1000 });
-      const result = await prober.probePreviewUrl("http://localhost:99999/nonexistent");
+      const result = await prober.probePreviewUrl(
+        "http://localhost:99999/nonexistent"
+      );
       expect(result).toBe(false);
+    });
+
+    it("never logs the API key when a probe fails", async () => {
+      const debugSpy = vi.spyOn(logger, "debug");
+      try {
+        const prober = new ClipPreviewProber({ timeoutMs: 1000 });
+        // Port 1: connection refused, which logs the URL it probed
+        const result = await prober.probePreviewUrl(
+          "http://127.0.0.1:1/scene/1/preview?apikey=SECRETKEY"
+        );
+
+        expect(result).toBe(false);
+        expect(debugSpy).toHaveBeenCalled();
+        expect(JSON.stringify(debugSpy.mock.calls)).not.toContain("SECRETKEY");
+      } finally {
+        debugSpy.mockRestore();
+      }
     });
 
     it("should return false on timeout", async () => {
       const prober = new ClipPreviewProber({ timeoutMs: 1 });
       // This will timeout since we're using a very short timeout
-      const result = await prober.probePreviewUrl("http://httpbin.org/delay/10");
+      const result = await prober.probePreviewUrl(
+        "http://httpbin.org/delay/10"
+      );
       expect(result).toBe(false);
     });
   });
 
   describe("probeBatch", () => {
     it("should process all URLs and return results map", async () => {
-      const prober = new ClipPreviewProber({ maxConcurrent: 2, timeoutMs: 1000 });
+      const prober = new ClipPreviewProber({
+        maxConcurrent: 2,
+        timeoutMs: 1000,
+      });
       const urls = [
         "http://localhost:99999/fake1",
         "http://localhost:99999/fake2",
@@ -46,19 +71,17 @@ describe("ClipPreviewProber", () => {
     let server: http.Server;
     let port: number;
 
-    // Known placeholder values
+    // Known placeholder size
     const PLACEHOLDER_SIZE = 1199;
-    const PLACEHOLDER_MD5 = "c4a2e6b6547057dd0ef0c7d7e3c420d4";
 
-    // Create a fake placeholder content that matches the MD5
-    // Since we don't have the actual placeholder, we'll test the logic with mock content
+    // Placeholder-sized mock content (the real placeholder, and so its MD5,
+    // is not available here)
     const mockPlaceholder = Buffer.alloc(PLACEHOLDER_SIZE, 0);
-    const mockPlaceholderHash = crypto.createHash("md5").update(mockPlaceholder).digest("hex");
 
     beforeEach(() => {
       return new Promise<void>((resolve) => {
         server = http.createServer((req, res) => {
-          const url = req.url || "";
+          const url = req.url ?? "";
 
           if (url === "/large-preview") {
             // Large file - definitely generated
@@ -68,9 +91,11 @@ describe("ClipPreviewProber", () => {
                 "Content-Range": `bytes 0-0/${content.length}`,
                 "Content-Length": "1",
               });
-              res.end(content.slice(0, 1));
+              res.end(content.subarray(0, 1));
             } else {
-              res.writeHead(200, { "Content-Length": content.length.toString() });
+              res.writeHead(200, {
+                "Content-Length": content.length.toString(),
+              });
               res.end(content);
             }
           } else if (url === "/small-preview") {
@@ -81,9 +106,11 @@ describe("ClipPreviewProber", () => {
                 "Content-Range": `bytes 0-0/${content.length}`,
                 "Content-Length": "1",
               });
-              res.end(content.slice(0, 1));
+              res.end(content.subarray(0, 1));
             } else {
-              res.writeHead(200, { "Content-Length": content.length.toString() });
+              res.writeHead(200, {
+                "Content-Length": content.length.toString(),
+              });
               res.end(content);
             }
           } else if (url === "/placeholder-size-real") {
@@ -94,9 +121,11 @@ describe("ClipPreviewProber", () => {
                 "Content-Range": `bytes 0-0/${content.length}`,
                 "Content-Length": "1",
               });
-              res.end(content.slice(0, 1));
+              res.end(content.subarray(0, 1));
             } else {
-              res.writeHead(200, { "Content-Length": content.length.toString() });
+              res.writeHead(200, {
+                "Content-Length": content.length.toString(),
+              });
               res.end(content);
             }
           } else if (url === "/placeholder-size-fake") {
@@ -107,9 +136,11 @@ describe("ClipPreviewProber", () => {
                 "Content-Range": `bytes 0-0/${mockPlaceholder.length}`,
                 "Content-Length": "1",
               });
-              res.end(mockPlaceholder.slice(0, 1));
+              res.end(mockPlaceholder.subarray(0, 1));
             } else {
-              res.writeHead(200, { "Content-Length": mockPlaceholder.length.toString() });
+              res.writeHead(200, {
+                "Content-Length": mockPlaceholder.length.toString(),
+              });
               res.end(mockPlaceholder);
             }
           } else if (url === "/404") {
@@ -139,27 +170,66 @@ describe("ClipPreviewProber", () => {
 
     it("should return true for large previews (>= 5KB)", async () => {
       const prober = new ClipPreviewProber({ timeoutMs: 5000 });
-      const result = await prober.probePreviewUrl(`http://localhost:${port}/large-preview`);
+      const result = await prober.probePreviewUrl(
+        `http://localhost:${port}/large-preview`
+      );
       expect(result).toBe(true);
     });
 
     it("should return false for small previews (< 5KB, not placeholder size)", async () => {
       const prober = new ClipPreviewProber({ timeoutMs: 5000 });
-      const result = await prober.probePreviewUrl(`http://localhost:${port}/small-preview`);
+      const result = await prober.probePreviewUrl(
+        `http://localhost:${port}/small-preview`
+      );
       expect(result).toBe(false);
     });
 
     it("should return true for 1199-byte file with different hash (real small clip)", async () => {
       const prober = new ClipPreviewProber({ timeoutMs: 5000 });
-      const result = await prober.probePreviewUrl(`http://localhost:${port}/placeholder-size-real`);
+      const result = await prober.probePreviewUrl(
+        `http://localhost:${port}/placeholder-size-real`
+      );
       // This should be TRUE because even though it's 1199 bytes, the hash doesn't match placeholder
       expect(result).toBe(true);
     });
 
     it("should return false for 404 responses", async () => {
       const prober = new ClipPreviewProber({ timeoutMs: 5000 });
-      const result = await prober.probePreviewUrl(`http://localhost:${port}/404`);
+      const result = await prober.probePreviewUrl(
+        `http://localhost:${port}/404`
+      );
       expect(result).toBe(false);
+    });
+  });
+
+  describe("getPreviewSize", () => {
+    it("an empty content-length reads as 0", async () => {
+      // A server that ignores Range and sends an empty Content-Length
+      const request = vi.spyOn(http, "request").mockImplementation(((
+        _options: unknown,
+        callback: unknown
+      ) => {
+        const req = new EventEmitter() as EventEmitter & {
+          end: () => void;
+        };
+        req.end = () => {
+          (callback as (res: unknown) => void)({
+            statusCode: 200,
+            headers: { "content-length": "" },
+            resume: () => undefined,
+          });
+        };
+        return req;
+      }) as unknown as typeof http.request);
+      try {
+        const prober = new ClipPreviewProber({ timeoutMs: 5000 });
+        const size = await prober["getPreviewSize"](
+          "http://localhost:1/preview"
+        );
+        expect(size).toBe(0);
+      } finally {
+        request.mockRestore();
+      }
     });
   });
 });

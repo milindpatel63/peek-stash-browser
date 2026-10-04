@@ -18,7 +18,8 @@ export const useNavigationState = () => {
   const navigate = useNavigate();
 
   // Get the title of the page we came from
-  const fromPageTitle = location.state?.fromPageTitle;
+  const state = location.state as { fromPageTitle?: string } | null;
+  const fromPageTitle = state?.fromPageTitle;
 
   // Generate back button text with graceful fallback
   const backButtonText =
@@ -28,7 +29,7 @@ export const useNavigationState = () => {
 
   // Go back using browser history
   const goBack = useCallback(() => {
-    navigate(-1);
+    void navigate(-1);
   }, [navigate]);
 
   return {

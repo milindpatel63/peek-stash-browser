@@ -1,5 +1,5 @@
-import { type ReactNode } from 'react';
-import { GridLayout } from './layouts/GridLayout';
+import { type ReactNode } from "react";
+import { GridLayout } from "./layouts/GridLayout";
 
 interface Props {
   layoutType?: "grid" | "list" | "compact";
@@ -14,7 +14,7 @@ interface Props {
 }
 
 export const LayoutRenderer = ({
-  layoutType = 'grid',
+  layoutType = "grid",
   entityType,
   density = "medium",
   items,
@@ -51,7 +51,10 @@ export const LayoutRenderer = ({
     //     />
     //   );
 
-    case 'grid':
+    // "list" and "compact" render the grid until their layouts exist
+    case "list":
+    case "compact":
+    case "grid":
     default:
       return (
         <GridLayout

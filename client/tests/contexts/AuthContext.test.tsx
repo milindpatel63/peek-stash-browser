@@ -1,9 +1,13 @@
-import { waitFor, act } from "@testing-library/react";
-import { renderHook } from "@testing-library/react";
-import { describe, it, expect, vi, beforeEach } from "vitest";
 import React from "react";
+import { act, waitFor } from "@testing-library/react";
+import { renderHook } from "@testing-library/react";
+import { untrusted } from "@tests/helpers/untrusted";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { REDIRECT_STORAGE_KEY } from "../../src/api";
+import { queryClient } from "../../src/api/queryClient";
 import { AuthProvider } from "../../src/contexts/AuthContext";
 import { useAuth } from "../../src/hooks/useAuth";
+import { actAsync, must } from "../testUtils";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -32,14 +36,19 @@ function okResponse(body: unknown) {
 }
 
 /**
- * Creates a non-ok Response-like object for mocking fetch.
+ * A non-ok Response for mocking fetch.
  */
-function errorResponse(status = 401, body = {}) {
-  return Promise.resolve({
-    ok: false,
-    status,
-    json: () => Promise.resolve(body),
-  });
+function errorResponse(
+  status = 401,
+  body = {},
+  headers: Record<string, string> = {}
+) {
+  return Promise.resolve(
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { "Content-Type": "application/json", ...headers },
+    })
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -106,12 +115,12 @@ describe("AuthProvider", () => {
   // 4. Loading state
   it("starts with isLoading=true and transitions to false after auth check", async () => {
     // Use a deferred promise so we can observe the loading state
-    let resolveAuth: (value: unknown) => void;
+    let resolveAuth: ((value: unknown) => void) | undefined;
     globalThis.fetch = vi.fn().mockImplementation(
       () =>
         new Promise((resolve) => {
           resolveAuth = resolve;
-        }),
+        })
     );
 
     const { result } = renderWithAuth();
@@ -121,8 +130,11 @@ describe("AuthProvider", () => {
     expect(result.current.isAuthenticated).toBe(false);
 
     // Resolve the auth check
-    await act(async () => {
-      resolveAuth!({
+    await actAsync(() => {
+      must(
+        resolveAuth,
+        "the auth check's resolver"
+      )({
         ok: true,
         json: () => Promise.resolve({ user: mockUser }),
       });
@@ -139,13 +151,18 @@ describe("login()", () => {
   it("calls /api/auth/login, sets user and isAuthenticated, returns success", async () => {
     const credentials = { username: "testuser", password: "secret" };
     const loginUser = { id: "1", username: "testuser", role: "USER" };
+    const landingPagePreference = { pages: ["scenes"], randomize: false };
 
     globalThis.fetch = vi.fn().mockImplementation((url) => {
       if (url === "/api/auth/check") {
         return errorResponse(401);
       }
       if (url === "/api/auth/login") {
-        return okResponse({ user: loginUser });
+        return okResponse({
+          success: true,
+          user: loginUser,
+          landingPagePreference,
+        });
       }
       return errorResponse(404);
     });
@@ -164,7 +181,11 @@ describe("login()", () => {
       loginResult = await result.current.login(credentials);
     });
 
-    expect(loginResult).toEqual({ success: true, user: loginUser });
+    expect(loginResult).toEqual({
+      success: true,
+      user: loginUser,
+      landingPagePreference,
+    });
     expect(result.current.isAuthenticated).toBe(true);
     expect(result.current.user).toEqual(loginUser);
 
@@ -242,54 +263,172 @@ describe("login()", () => {
   });
 });
 
-describe("logout()", () => {
-  // 8. Successful logout
-  it("calls /api/auth/logout and clears user and isAuthenticated", async () => {
-    // Start authenticated
-    const { result } = renderWithAuth();
+describe("login() refused for a while", () => {
+  async function loginAnswered(response: () => Promise<Response>) {
+    globalThis.fetch = vi.fn().mockImplementation((url) => {
+      if (url === "/api/auth/check") {
+        return errorResponse(401);
+      }
+      if (url === "/api/auth/login") {
+        return response();
+      }
+      return errorResponse(404);
+    });
 
+    const { result } = renderWithAuth();
     await waitFor(() => {
       expect(result.current.isLoading).toBe(false);
     });
 
-    expect(result.current.isAuthenticated).toBe(true);
-    expect(result.current.user).toEqual(mockUser);
+    let loginResult;
+    await act(async () => {
+      loginResult = await result.current.login({
+        username: "x",
+        password: "y",
+      });
+    });
+    return loginResult;
+  }
 
-    // Mock the logout call
+  it("a locked account's message names the retry time", async () => {
+    const loginResult = await loginAnswered(() =>
+      errorResponse(
+        423,
+        {
+          error: "Account temporarily locked due to too many failed attempts",
+          retryAfterSeconds: 900,
+        },
+        { "Retry-After": "900" }
+      )
+    );
+
+    expect(loginResult).toEqual({
+      success: false,
+      error:
+        "Account temporarily locked due to too many failed attempts. Try again in 15 minutes.",
+    });
+  });
+
+  it("a rate-limited login names the retry time from Retry-After", async () => {
+    const loginResult = await loginAnswered(() =>
+      errorResponse(
+        429,
+        { error: "Too many authentication attempts, please try again later" },
+        { "Retry-After": "840" }
+      )
+    );
+
+    expect(loginResult).toEqual({
+      success: false,
+      error:
+        "Too many authentication attempts, please try again later. Try again in 14 minutes.",
+    });
+  });
+});
+
+describe("logout()", () => {
+  const assign = vi.fn();
+
+  beforeEach(() => {
+    assign.mockReset();
+    vi.stubGlobal("location", { assign });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    sessionStorage.clear();
+    queryClient.clear();
+  });
+
+  it("sign-out clears the post-login redirect and the query cache, then loads /login", async () => {
+    const { result } = renderWithAuth();
+    await waitFor(() => {
+      expect(result.current.isLoading).toBe(false);
+    });
+    sessionStorage.setItem(REDIRECT_STORAGE_KEY, "/scenes?q=private");
+    queryClient.setQueryData(["scenes", "a", "list", {}], { scenes: [1, 2] });
     globalThis.fetch = vi.fn().mockImplementation(() => okResponse({}));
 
     await act(async () => {
       await result.current.logout();
     });
 
-    expect(result.current.isAuthenticated).toBe(false);
-    expect(result.current.user).toBeNull();
-    expect(globalThis.fetch).toHaveBeenCalledWith("/api/auth/logout", {
-      method: "POST",
-      credentials: "include",
-    });
+    expect(sessionStorage.getItem(REDIRECT_STORAGE_KEY)).toBeNull();
+    expect(queryClient.getQueryCache().getAll()).toHaveLength(0);
+    expect(assign).toHaveBeenCalledExactlyOnceWith("/login");
   });
 
-  // 9. Logout with network error clears state regardless
-  it("clears auth state even when logout fetch throws", async () => {
-    // Start authenticated
+  it("sign-out forgets every tab-scoped key", async () => {
     const { result } = renderWithAuth();
-
     await waitFor(() => {
       expect(result.current.isLoading).toBe(false);
     });
+    sessionStorage.setItem("peek:scroll:abc", "1200");
+    sessionStorage.setItem("peek:scratch", "true");
+    globalThis.fetch = vi.fn().mockImplementation(() => okResponse({}));
 
-    expect(result.current.isAuthenticated).toBe(true);
+    await act(async () => {
+      await result.current.logout();
+    });
 
-    // Mock the logout call to throw
+    expect(sessionStorage.length).toBe(0);
+  });
+
+  it("sign-out forgets the page and the cache even when the request fails", async () => {
+    const { result } = renderWithAuth();
+    await waitFor(() => {
+      expect(result.current.isLoading).toBe(false);
+    });
+    sessionStorage.setItem(REDIRECT_STORAGE_KEY, "/scenes");
+    queryClient.setQueryData(["user", "stats"], { stats: true });
     globalThis.fetch = vi.fn().mockRejectedValue(new Error("Network error"));
 
     await act(async () => {
       await result.current.logout();
     });
 
-    expect(result.current.isAuthenticated).toBe(false);
-    expect(result.current.user).toBeNull();
+    expect(sessionStorage.getItem(REDIRECT_STORAGE_KEY)).toBeNull();
+    expect(queryClient.getQueryCache().getAll()).toHaveLength(0);
+    expect(assign).toHaveBeenCalledExactlyOnceWith("/login");
+  });
+
+  // The full load of /login resets all in-memory state. Flipping the auth
+  // state first would make the route guard navigate in-app to /login and race
+  // the full load (an E2E page.goto in between is interrupted).
+  it("navigates once: leaves the auth state alone so no in-app redirect races the full load", async () => {
+    const { result } = renderWithAuth();
+    await waitFor(() => {
+      expect(result.current.isLoading).toBe(false);
+    });
+    expect(result.current.isAuthenticated).toBe(true);
+    globalThis.fetch = vi.fn().mockImplementation(() => okResponse({}));
+
+    await act(async () => {
+      await result.current.logout();
+    });
+
+    expect(globalThis.fetch).toHaveBeenCalledWith("/api/auth/logout", {
+      method: "POST",
+      credentials: "include",
+    });
+    expect(result.current.isAuthenticated).toBe(true);
+    expect(result.current.user).toEqual(mockUser);
+    expect(assign).toHaveBeenCalledExactlyOnceWith("/login");
+  });
+
+  it("navigates once even when the logout request throws", async () => {
+    const { result } = renderWithAuth();
+    await waitFor(() => {
+      expect(result.current.isLoading).toBe(false);
+    });
+    globalThis.fetch = vi.fn().mockRejectedValue(new Error("Network error"));
+
+    await act(async () => {
+      await result.current.logout();
+    });
+
+    expect(result.current.isAuthenticated).toBe(true);
+    expect(assign).toHaveBeenCalledExactlyOnceWith("/login");
   });
 });
 
@@ -305,7 +444,7 @@ describe("updateUser()", () => {
     expect(result.current.user).toEqual(mockUser);
 
     act(() => {
-      result.current.updateUser({ displayName: "New Name" } as any);
+      result.current.updateUser(untrusted({ displayName: "New Name" }));
     });
 
     expect(result.current.user).toEqual({
@@ -327,7 +466,7 @@ describe("updateUser()", () => {
     expect(result.current.user).toBeNull();
 
     act(() => {
-      result.current.updateUser({ displayName: "New Name" } as any);
+      result.current.updateUser(untrusted({ displayName: "New Name" }));
     });
 
     expect(result.current.user).toBeNull();

@@ -1,8 +1,37 @@
 /**
  * Utility functions for persisting filter/sort state to URL query parameters
  */
-import { makeCompositeKey } from "./compositeKey";
+import {
+  type ListKind,
+  PANEL_FIELDS,
+  PER_PAGE_MAX,
+  type PanelField,
+  Q_MAX_LENGTH,
+} from "@peek/shared-types";
 import type { FilterOption } from "./filterConfig";
+import {
+  codecOf,
+  entityParamFor,
+  isFilterUrlKey,
+  isStaleFilterUrlKey,
+  readTreeUrl,
+  urlKeysOf,
+  writeTreeUrl,
+} from "./filterFields";
+
+export { entityParamFor };
+
+const DEFAULT_PER_PAGE = 24;
+
+/**
+ * Reads `per_page` from the URL: above the maximum it becomes the maximum;
+ * missing, zero, negative or not a number it becomes the default.
+ */
+const parsePerPage = (value: string | null): number => {
+  const num = parseInt(value ?? "", 10);
+  if (isNaN(num) || num < 1) return DEFAULT_PER_PAGE;
+  return Math.min(num, PER_PAGE_MAX);
+};
 
 interface SearchState {
   searchText: string;
@@ -18,175 +47,123 @@ interface SearchState {
   timelinePeriod: string | null;
 }
 
-const filtersToUrlParams = (filters: Record<string, unknown>, filterOptions: FilterOption[]) => {
-  const params = new URLSearchParams();
+/** The editor each option type is drawn by, for an option no panel row stands behind */
+const EDITOR_OF_TYPE: Readonly<Record<string, PanelField["editor"]>> = {
+  "searchable-select": "ref",
+  range: "number",
+  "imperial-height-range": "number",
+  "date-range": "date",
+  text: "text",
+  select: "enum",
+  checkbox: "toggle",
+};
 
-  filterOptions.forEach(({ key, type, multi, modifierKey, hierarchyKey }) => {
-    const value = filters[key] as unknown;
+const rowsByKey = new Map<ListKind, ReadonlyMap<string, PanelField>>();
 
-    if (value === undefined || value === "" || value === false) {
-      return; // Skip empty values
-    }
-
-    switch (type) {
-      case "checkbox":
-        if (value === true) {
-          params.set(key, "true");
-        }
-        break;
-
-      case "select":
-      case "text":
-        if (value) {
-          params.set(key, String(value));
-        }
-        break;
-
-      case "searchable-select":
-        if (multi) {
-          // Multi-select: serialize array as comma-separated string
-          if (Array.isArray(value) && value.length > 0) {
-            params.set(key, value.join(","));
-          }
-        } else {
-          // Single select: just set the value
-          if (value) {
-            params.set(key, String(value));
-          }
-        }
-        // Serialize modifier if present
-        if (modifierKey && filters[modifierKey]) {
-          params.set(modifierKey, String(filters[modifierKey]));
-        }
-        // Serialize hierarchy depth if present
-        if (hierarchyKey && filters[hierarchyKey] !== undefined) {
-          params.set(hierarchyKey, String(filters[hierarchyKey]));
-        }
-        break;
-
-      case "range": {
-        const rangeVal = value as Record<string, string> | null;
-        if (rangeVal?.min) params.set(`${key}_min`, rangeVal.min);
-        if (rangeVal?.max) params.set(`${key}_max`, rangeVal.max);
-        break;
-      }
-
-      case "date-range": {
-        const dateVal = value as Record<string, string> | null;
-        if (dateVal?.start) params.set(`${key}_start`, dateVal.start);
-        if (dateVal?.end) params.set(`${key}_end`, dateVal.end);
-        break;
-      }
-    }
-  });
-
-  return params;
+/** A list's panel rows by key */
+const rowsOf = (entity: ListKind) => {
+  let rows = rowsByKey.get(entity);
+  if (rows === undefined) {
+    rows = new Map(PANEL_FIELDS[entity].map((row) => [row.key, row]));
+    rowsByKey.set(entity, rows);
+  }
+  return rows;
 };
 
 /**
- * Deserialize URL query parameters to filter state
+ * The rows a page's options draw: the list's panel row of each option key
+ * (the page's own options, the locked ones left out). Options no row
+ * stands behind (a caller's own list) read as a row of the option's
+ * editor, holding its key, companions, offered modifiers and `multi` (a
+ * playlist picker's as a playlist row, its ids never joined).
+ */
+function fieldsOf(
+  filterOptions: readonly FilterOption[],
+  entity: ListKind | undefined
+): PanelField[] {
+  const fields: PanelField[] = [];
+  for (const option of filterOptions) {
+    const editor = EDITOR_OF_TYPE[option.type];
+    if (editor === undefined) continue;
+    const row =
+      entity === undefined ? undefined : rowsOf(entity).get(option.key);
+    fields.push(
+      row ??
+        // The options carry what the URL needs of a row
+        ({
+          key: option.key,
+          field: option.key,
+          label: option.label ?? option.key,
+          group: "other",
+          editor,
+          multi: option.multi === true,
+          ...(option.modifierKey === undefined
+            ? {}
+            : { modifierKey: option.modifierKey }),
+          ...(option.hierarchyKey === undefined
+            ? {}
+            : { hierarchyKey: option.hierarchyKey }),
+          ...(option.excludeKey === undefined
+            ? {}
+            : { excludeKey: option.excludeKey }),
+          modifiers: (option.modifierOptions ?? []).map(({ value }) => value),
+          // Playlist ids are Peek's, never joined with the page's instance
+          ...(option.entityType === "playlists" ? { source: "playlists" } : {}),
+        } as unknown as PanelField)
+    );
+  }
+  return fields;
+}
+
+/**
+ * The filters' URL parameters. A list's go through its tree codec: groups,
+ * repeated rows and the root's match under their prefixes (`g1.`, `2.`,
+ * `match`), in canonical order. Without a list (a carousel's link) each
+ * option's row writes its keys as they are.
+ */
+const filtersToUrlParams = (
+  filters: Record<string, unknown>,
+  filterOptions: readonly FilterOption[],
+  entity?: ListKind
+) => {
+  const params = new URLSearchParams();
+  const fields = fieldsOf(filterOptions, entity);
+  if (entity !== undefined) {
+    writeTreeUrl(entity, fields, filters, params);
+    return params;
+  }
+  for (const field of fields) {
+    codecOf(field).writeUrl(field, filters, params);
+  }
+  return params;
+};
+
+/** The URL param that names the open image on a list, as "id:instanceId" */
+export const IMAGE_PARAM = "image";
+
+/**
+ * Deserialize URL query parameters to filter state. Only the page's own
+ * options are read: a param for a filter the page does not have is ignored.
+ * A list's filters are read through its tree codec (groups and repeated rows
+ * under their prefixes, canonical, at most 20 rows).
  *
  * @param {URLSearchParams} searchParams - URL search params
  * @param {Array} filterOptions - Filter configuration from filterConfig.js
  * @returns {Object} Filter state object
  */
-const urlParamsToFilters = (searchParams: URLSearchParams, filterOptions: FilterOption[]) => {
+const urlParamsToFilters = (
+  searchParams: URLSearchParams,
+  filterOptions: readonly FilterOption[],
+  entity?: ListKind
+) => {
+  const fields = fieldsOf(filterOptions, entity);
+  // A list's filters may hold groups and repeated rows (`readTreeUrl`)
+  if (entity !== undefined)
+    return { ...readTreeUrl(entity, fields, searchParams) };
   const filters: Record<string, unknown> = {};
-
-  // Handle singular entity ID params from card indicator clicks
-  // (e.g., /scenes?performerId=82&instance=abc-123 → performerIds: ["82:abc-123"])
-  const instanceParam = searchParams.get("instance");
-  const singularToPlural: Record<string, string> = {
-    performerId: "performerIds",
-    studioId: "studioId", // studioId is already the correct key (single-select)
-    tagId: "tagIds",
-    groupId: "groupIds",
-    galleryId: "galleryIds",
-  };
-
-  const singularProcessedKeys = new Set<string>();
-  for (const [singular, pluralKey] of Object.entries(singularToPlural)) {
-    if (searchParams.has(singular)) {
-      const rawId = searchParams.get(singular)!;
-      const compositeId = makeCompositeKey(rawId, instanceParam);
-
-      // Check if the plural key is multi-select or single-select
-      const filterOption = filterOptions.find((opt: FilterOption) => opt.key === pluralKey);
-      if (filterOption?.multi) {
-        filters[pluralKey] = [compositeId];
-      } else {
-        filters[pluralKey] = compositeId;
-      }
-      singularProcessedKeys.add(pluralKey);
-    }
+  for (const field of fields) {
+    Object.assign(filters, codecOf(field).readUrl(field, searchParams));
   }
-
-  filterOptions.forEach(({ key, type, multi, modifierKey, hierarchyKey }) => {
-    // Skip keys already handled by singular-to-plural mapping above
-    if (singularProcessedKeys.has(key)) return;
-
-    switch (type) {
-      case "checkbox":
-        if (searchParams.has(key)) {
-          filters[key] = searchParams.get(key) === "true";
-        }
-        break;
-
-      case "select":
-      case "text":
-        if (searchParams.has(key)) {
-          filters[key] = searchParams.get(key);
-        }
-        break;
-
-      case "searchable-select":
-        if (searchParams.has(key)) {
-          const value = searchParams.get(key);
-          if (multi) {
-            // Multi-select: deserialize comma-separated string to array
-            // Keep as strings (Stash uses string IDs)
-            filters[key] = value!.split(",").filter(Boolean);
-          } else {
-            // Single select: just set the value
-            filters[key] = value;
-          }
-        }
-        // Deserialize modifier if present
-        if (modifierKey && searchParams.has(modifierKey)) {
-          filters[modifierKey] = searchParams.get(modifierKey);
-        }
-        // Deserialize hierarchy depth if present
-        if (hierarchyKey && searchParams.has(hierarchyKey)) {
-          filters[hierarchyKey] = parseInt(searchParams.get(hierarchyKey)!, 10);
-        }
-        break;
-
-      case "range": {
-        const min = searchParams.get(`${key}_min`);
-        const max = searchParams.get(`${key}_max`);
-        if (min || max) {
-          const rangeObj: Record<string, string> = {};
-          if (min) rangeObj.min = min;
-          if (max) rangeObj.max = max;
-          filters[key] = rangeObj;
-        }
-        break;
-      }
-
-      case "date-range": {
-        const start = searchParams.get(`${key}_start`);
-        const end = searchParams.get(`${key}_end`);
-        if (start || end) {
-          const dateObj: Record<string, string> = {};
-          if (start) dateObj.start = start;
-          if (end) dateObj.end = end;
-          filters[key] = dateObj;
-        }
-        break;
-      }
-    }
-  });
-
   return filters;
 };
 
@@ -224,10 +201,11 @@ export const buildSearchParams = ({
   if (sortField) params.set("sort", sortField);
   if (sortDirection) params.set("dir", sortDirection);
   if (currentPage > 1) params.set("page", currentPage.toString());
-  if (perPage !== 24) params.set("per_page", perPage.toString());
+  if (perPage !== DEFAULT_PER_PAGE) params.set("per_page", perPage.toString());
   if (viewMode && viewMode !== "grid") params.set("view", viewMode);
   if (zoomLevel && zoomLevel !== "medium") params.set("zoom", zoomLevel);
-  if (gridDensity && gridDensity !== "medium") params.set("grid_density", gridDensity);
+  if (gridDensity && gridDensity !== "medium")
+    params.set("grid_density", gridDensity);
   if (timelinePeriod) params.set("timeline_period", timelinePeriod);
 
   return params;
@@ -251,14 +229,300 @@ export const parseSearchParams = (
     sortField: searchParams.get("sort") || defaults.sortField || "o_counter",
     sortDirection: searchParams.get("dir") || defaults.sortDirection || "DESC",
     currentPage: parseInt(searchParams.get("page") || "1", 10),
-    perPage: parseInt(searchParams.get("per_page") || "24", 10),
+    perPage: parsePerPage(searchParams.get("per_page")),
     viewMode: searchParams.get("view") || defaults.viewMode || "grid",
     zoomLevel: searchParams.get("zoom") || defaults.zoomLevel || "medium",
-    gridDensity: searchParams.get("grid_density") || defaults.gridDensity || "medium",
-    timelinePeriod: searchParams.get("timeline_period") || defaults.timelinePeriod || null,
+    gridDensity:
+      searchParams.get("grid_density") || defaults.gridDensity || "medium",
+    timelinePeriod:
+      searchParams.get("timeline_period") || defaults.timelinePeriod || null,
     filters: {
       ...defaults.filters,
       ...urlParamsToFilters(searchParams, filterOptions),
     },
   };
+};
+
+// ── List state in the URL (useListUrlState) ───────────────────────────────
+
+/** A list the URL holds the state of: the seven entity lists and clips */
+export type ListEntity = ListKind;
+
+/**
+ * `filters=none`: the user cleared the filters, so the default preset's
+ * filters stay off. Written by a filter change that leaves no filter, dropped
+ * by the next one that sets any; never sent to the server.
+ */
+const NO_FILTERS_KEY = "filters";
+const NO_FILTERS_VALUE = "none";
+
+/**
+ * `savedView=<id>`: the View the list shows (a loaded one, or the default
+ * View once a filter or sort changes). List-owned, never a filter key and
+ * never sent: an id the user does not have names nothing.
+ */
+const SAVED_VIEW_KEY = "savedView";
+
+/** The keys every list owns beside its filters */
+const LIST_STATE_KEYS = [
+  NO_FILTERS_KEY,
+  "q",
+  "sort",
+  "dir",
+  "page",
+  "per_page",
+  "view",
+  "zoom",
+  "grid_density",
+  "timeline_period",
+  "folderPath",
+  SAVED_VIEW_KEY,
+] as const;
+
+const filterKeysCache = new Map<ListEntity, readonly string[]>();
+
+/**
+ * The URL keys a list's filters take at the root: each panel row's key and
+ * its modifier, depth and exclude companions (what its editor's codec
+ * holds), the singular form a card count links with (`tagId`) and the range
+ * and date forms (`rating_min`). The same keys under a row prefix (`g1.`,
+ * `2.`), `match` and `gN` are filter keys too (`isFilterUrlKey`).
+ */
+const listFilterKeys = (entity: ListEntity): readonly string[] => {
+  const cached = filterKeysCache.get(entity);
+  if (cached) return cached;
+  const list = [
+    ...new Set(PANEL_FIELDS[entity].flatMap((field) => urlKeysOf(field))),
+  ];
+  filterKeysCache.set(entity, list);
+  return list;
+};
+
+/**
+ * Every URL key a list writes at the root: its filter keys, `q`, sort,
+ * paging and presentation, the timeline period, the folder path and the
+ * active View (`savedView`). A list rewrites only these, the prefixed
+ * filter keys, `match` and `gN` (`isListOwnedKey`), and keeps every other
+ * key (`tab`, `instance`, `includeSubTags`, `includeSubStudios`, `image`).
+ */
+export const listOwnedKeys = (entity: ListEntity): readonly string[] => [
+  ...listFilterKeys(entity),
+  ...LIST_STATE_KEYS,
+];
+
+const LIST_STATE_KEY_SET: ReadonlySet<string> = new Set(LIST_STATE_KEYS);
+
+/**
+ * A URL key the list owns: a filter key (prefixed ones, `match` and `gN`
+ * included) or one of the list's own state keys
+ */
+export const isListOwnedKey = (entity: ListEntity, key: string): boolean =>
+  LIST_STATE_KEY_SET.has(key) || isFilterUrlKey(entity, key);
+
+const LIST_ENTITIES = Object.keys(PANEL_FIELDS) as ListEntity[];
+
+/**
+ * The root keys any list owns (the static list); `isListOwnedKey` also
+ * names the prefixed ones
+ */
+export const LIST_OWNED_KEYS: readonly string[] = [
+  ...new Set(LIST_ENTITIES.flatMap((entity) => listOwnedKeys(entity))),
+];
+
+/**
+ * The URL a detail page's tab switch goes to: every key a list owns
+ * (filters, prefixed ones included, search, sort, paging, presentation,
+ * folder path, the active View) and the open image go, since each tab is its own list; `tab`
+ * is set, or removed for the default tab; every other key (`instance`,
+ * `includeSubTags`, `includeSubStudios`) stays. Returns a new object.
+ */
+export const switchTabParams = (
+  params: URLSearchParams,
+  tabId: string,
+  defaultTab: string
+): URLSearchParams => {
+  const next = new URLSearchParams(params);
+  for (const key of [...new Set(next.keys())]) {
+    if (LIST_ENTITIES.some((entity) => isListOwnedKey(entity, key))) {
+      next.delete(key);
+    }
+  }
+  next.delete(IMAGE_PARAM);
+  if (tabId === defaultTab) {
+    next.delete("tab");
+  } else {
+    next.set("tab", tabId);
+  }
+  return next;
+};
+
+/** A list's state as the URL holds it; a field the URL lacks is null */
+export interface ListUrlParams {
+  /** The page's filters the URL names (panel shape) */
+  filters: Record<string, unknown>;
+  /**
+   * The URL names a filter, a search or `filters=none`, so the default
+   * preset's filters stay off
+   */
+  hasFilters: boolean;
+  /** At most Q_MAX_LENGTH characters */
+  q: string | null;
+  sort: string | null;
+  dir: string | null;
+  /** 1 when missing or below 1 */
+  page: number;
+  /** Clamped to 1 to PER_PAGE_MAX */
+  perPage: number | null;
+  view: string | null;
+  zoom: string | null;
+  gridDensity: string | null;
+  timelinePeriod: string | null;
+  folderPath: string[];
+  /** The active View's id (`savedView`), unchecked: the hook resolves it */
+  savedView: string | null;
+}
+
+/**
+ * Reads a list's state from the URL, each field with its presence. The
+ * filters go through the one parser (`urlParamsToFilters`); "the URL has
+ * filters" means it holds one of the entity's filter keys (a prefixed one,
+ * `match` or `gN` included), `q` or `filters=none`.
+ */
+export const readListParams = (
+  searchParams: URLSearchParams,
+  entity: ListEntity,
+  filterOptions: readonly FilterOption[]
+): ListUrlParams => {
+  // A key present but empty reads as missing
+  const param = (key: string) => {
+    const value = searchParams.get(key);
+    return value === null || value === "" ? null : value;
+  };
+  const q = param("q")?.slice(0, Q_MAX_LENGTH) ?? null;
+  const page = parseInt(searchParams.get("page") ?? "", 10);
+  const folderPath = param("folderPath");
+  return {
+    filters: urlParamsToFilters(searchParams, filterOptions, entity),
+    hasFilters:
+      q !== null ||
+      searchParams.get(NO_FILTERS_KEY) === NO_FILTERS_VALUE ||
+      [...searchParams.keys()].some((key) => isFilterUrlKey(entity, key)),
+    q,
+    sort: param("sort"),
+    dir: param("dir"),
+    page: isNaN(page) || page < 1 ? 1 : page,
+    perPage: searchParams.has("per_page")
+      ? parsePerPage(searchParams.get("per_page"))
+      : null,
+    view: param("view"),
+    zoom: param("zoom"),
+    gridDensity: param("grid_density"),
+    timelinePeriod: param("timeline_period"),
+    folderPath: folderPath ? folderPath.split(",").filter(Boolean) : [],
+    savedView: param(SAVED_VIEW_KEY),
+  };
+};
+
+/** The fields a list setter changes; a field left out keeps its URL keys */
+export interface ListParamsPatch {
+  /** The panel's filters (permanent filters never go in the URL) */
+  filters?: Record<string, unknown>;
+  q?: string;
+  /** The URL's `sort` value: a field, or `random_<seed>` */
+  sort?: string;
+  direction?: string;
+  page?: number;
+  perPage?: number;
+  viewMode?: string;
+  zoomLevel?: string;
+  gridDensity?: string;
+  timelinePeriod?: string | null;
+  folderPath?: readonly string[];
+  /** The active View's id, or null to name none */
+  savedView?: string | null;
+}
+
+export interface WriteListContext {
+  entity: ListEntity;
+  filterOptions: readonly FilterOption[];
+  /**
+   * What the page shows without a presentation key: the default preset's
+   * value, else the entity default. A key equal to it is left out.
+   */
+  shown: {
+    perPage: number;
+    viewMode: string;
+    zoomLevel: string;
+    gridDensity: string;
+  };
+}
+
+/** Sets a key, or deletes it when the value is empty or what the page shows anyway */
+const setOrDelete = (
+  params: URLSearchParams,
+  key: string,
+  value: string | null,
+  shown: string | null = null
+) => {
+  if (value === null || value === "" || value === shown) params.delete(key);
+  else params.set(key, value);
+};
+
+/**
+ * The next URL for a list change: rewrites only the keys of the fields the
+ * patch names, all of them the entity's list-owned keys (a filter write
+ * also drops filter keys under a prefix past the limits), and keeps every
+ * other key. Presentation keys are written only when they differ from what
+ * the page shows without them; `page` is left out at 1. Filters that leave
+ * no filter key write `filters=none`, so the default preset stays off.
+ */
+export const writeListParams = (
+  prev: URLSearchParams,
+  patch: ListParamsPatch,
+  { entity, filterOptions, shown }: WriteListContext
+): URLSearchParams => {
+  const next = new URLSearchParams(prev);
+  if (patch.filters !== undefined) {
+    for (const key of [...new Set(next.keys())]) {
+      if (isFilterUrlKey(entity, key) || isStaleFilterUrlKey(entity, key)) {
+        next.delete(key);
+      }
+    }
+    next.delete(NO_FILTERS_KEY);
+    const written = filtersToUrlParams(patch.filters, filterOptions, entity);
+    written.forEach((value, key) => {
+      next.set(key, value);
+    });
+    if (written.toString() === "") next.set(NO_FILTERS_KEY, NO_FILTERS_VALUE);
+  }
+  if (patch.q !== undefined) {
+    setOrDelete(next, "q", patch.q.slice(0, Q_MAX_LENGTH));
+  }
+  if (patch.sort !== undefined) setOrDelete(next, "sort", patch.sort);
+  if (patch.direction !== undefined) setOrDelete(next, "dir", patch.direction);
+  if (patch.page !== undefined) {
+    setOrDelete(next, "page", patch.page > 1 ? String(patch.page) : null);
+  }
+  if (patch.perPage !== undefined) {
+    setOrDelete(next, "per_page", String(patch.perPage), String(shown.perPage));
+  }
+  if (patch.viewMode !== undefined) {
+    setOrDelete(next, "view", patch.viewMode, shown.viewMode);
+  }
+  if (patch.zoomLevel !== undefined) {
+    setOrDelete(next, "zoom", patch.zoomLevel, shown.zoomLevel);
+  }
+  if (patch.gridDensity !== undefined) {
+    setOrDelete(next, "grid_density", patch.gridDensity, shown.gridDensity);
+  }
+  if (patch.timelinePeriod !== undefined) {
+    setOrDelete(next, "timeline_period", patch.timelinePeriod);
+  }
+  if (patch.folderPath !== undefined) {
+    setOrDelete(next, "folderPath", patch.folderPath.join(","));
+  }
+  if (patch.savedView !== undefined) {
+    setOrDelete(next, SAVED_VIEW_KEY, patch.savedView);
+  }
+  return next;
 };

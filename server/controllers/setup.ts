@@ -1,35 +1,52 @@
 import bcrypt from "bcryptjs";
-import { Request } from "express";
-import { StashClient } from "../graphql/StashClient.js";
+import type { Request } from "express";
+import { StashClient, describeStashError } from "../graphql/StashClient.js";
+import {
+  USERNAME_MAX_LENGTH,
+  generateToken,
+  setTokenCookie,
+} from "../middleware/auth.js";
+import { ConflictError, ValidationError } from "../middleware/errorHandler.js";
 import prisma from "../prisma/singleton.js";
-import { stashSyncService } from "../services/StashSyncService.js";
+import { exclusionComputationService } from "../services/ExclusionComputationService.js";
+import { bumpLibrary } from "../services/LibraryStamp.js";
 import { stashInstanceManager } from "../services/StashInstanceManager.js";
+import {
+  LastEnabledInstanceError,
+  SyncBusyError,
+  stashSyncService,
+} from "../services/StashSyncService.js";
+import { syncScheduler } from "../services/SyncScheduler.js";
+import { getUsersSelecting } from "../services/UserInstanceService.js";
 import type {
-  TypedRequest,
-  TypedResponse,
   ApiErrorResponse,
-  GetSetupStatusResponse,
+  CarouselPreference,
   CreateFirstAdminRequest,
   CreateFirstAdminResponse,
-  TestStashConnectionRequest,
-  TestStashConnectionResponse,
   CreateFirstStashInstanceRequest,
   CreateFirstStashInstanceResponse,
-  GetStashInstanceResponse,
-  ResetSetupRequest,
-  ResetSetupResponse,
-  // Multi-instance types
-  GetAllStashInstancesResponse,
   CreateStashInstanceRequest,
   CreateStashInstanceResponse,
+  DeleteStashInstanceParams,
+  DeleteStashInstanceResponse,
+  // Multi-instance types
+  GetAllStashInstancesResponse,
+  GetSetupStatusResponse,
+  GetStashInstanceResponse,
+  TestSavedStashInstanceParams,
+  TestSavedStashInstanceRequest,
+  TestStashConnectionRequest,
+  TestStashConnectionResponse,
+  TypedRequest,
+  TypedResponse,
   UpdateStashInstanceParams,
   UpdateStashInstanceRequest,
   UpdateStashInstanceResponse,
-  DeleteStashInstanceParams,
-  DeleteStashInstanceResponse,
-  CarouselPreference,
 } from "../types/api/index.js";
+import { dbWriteTransaction } from "../utils/dbWrite.js";
 import { logger } from "../utils/logger.js";
+import { validatePassword } from "../utils/passwordValidation.js";
+import { emptyToNull } from "../utils/sqlHelpers.js";
 
 // Default carousel preferences for new users
 const getDefaultCarouselPreferences = (): CarouselPreference[] => [
@@ -45,323 +62,484 @@ const getDefaultCarouselPreferences = (): CarouselPreference[] => [
 
 /**
  * Check setup status (for determining if wizard is needed)
- * Checks for both user existence and Stash instance configuration
+ * Checks for both user existence and Stash instance configuration. Public:
+ * it answers only whether each exists, and how many instances are enabled.
  */
 export const getSetupStatus = async (
   req: Request,
   res: TypedResponse<GetSetupStatusResponse | ApiErrorResponse>
 ) => {
-  try {
-    // Check if at least one user exists
-    const userCount = await prisma.user.count();
-    const hasUsers = userCount > 0;
+  const hasUsers = (await prisma.user.count()) > 0;
 
-    // Check if at least one Stash instance is configured
-    const stashInstanceCount = await prisma.stashInstance.count({
-      where: { enabled: true },
-    });
-    const hasStashInstance = stashInstanceCount > 0;
+  // Any instance, disabled included, means setup is done: the wizard can
+  // only add a first instance, so a disabled one would lock everyone into it
+  const hasStashInstance = (await prisma.stashInstance.count()) > 0;
 
-    // Setup is complete if both users and Stash instance exist
-    const setupComplete = hasUsers && hasStashInstance;
+  // The client's multi-instance links read the enabled count
+  const stashInstanceCount = await prisma.stashInstance.count({
+    where: { enabled: true },
+  });
 
-    res.json({
-      setupComplete,
-      hasUsers,
-      hasStashInstance,
-      userCount,
-      stashInstanceCount,
-    });
-  } catch (error) {
-    logger.error("Failed to get setup status", { error });
-    res.status(500).json({
-      error: "Failed to get setup status",
-      message: error instanceof Error ? error.message : String(error),
-    });
-  }
+  res.json({
+    setupComplete: hasUsers && hasStashInstance,
+    hasUsers,
+    hasStashInstance,
+    stashInstanceCount,
+  });
 };
 
+/** What the admin reads when a change would leave no enabled instance */
+const LAST_ENABLED_INSTANCE_MESSAGE =
+  "Peek needs an enabled Stash instance. Add another instance first, or change this one's address under Edit.";
+
 /**
- * Create first admin user (public endpoint for setup wizard)
- * Only works if NO users exist yet
+ * Create first admin user (public, rate-limited endpoint for setup wizard)
+ * Only works if NO users exist yet. Signs the new admin in, so the wizard
+ * holds the admin session for its Stash step.
  */
 export const createFirstAdmin = async (
   req: TypedRequest<CreateFirstAdminRequest>,
   res: TypedResponse<CreateFirstAdminResponse | ApiErrorResponse>
 ) => {
-  try {
-    // Check if any users already exist
-    const userCount = await prisma.user.count();
+  // Check if any users already exist
+  const userCount = await prisma.user.count();
 
-    if (userCount > 0) {
-      return res.status(403).json({
-        error:
-          "Users already exist. Use the regular user management to create additional users.",
-      });
-    }
-
-    const { username, password } = req.body;
-
-    if (!username || !password) {
-      return res.status(400).json({
-        error: "Username and password are required",
-      });
-    }
-
-    if (password.length < 6) {
-      return res.status(400).json({
-        error: "Password must be at least 6 characters",
-      });
-    }
-
-    // Hash password
-    const hashedPassword = await bcrypt.hash(password, 10);
-
-    // Create first admin user with default carousel preferences
-    const newUser = await prisma.user.create({
-      data: {
-        username,
-        password: hashedPassword,
-        role: "ADMIN",
-        carouselPreferences: getDefaultCarouselPreferences() as never,
-      },
-      select: {
-        id: true,
-        username: true,
-        role: true,
-        createdAt: true,
-      },
+  if (userCount > 0) {
+    res.status(403).json({
+      error:
+        "Users already exist. Use the regular user management to create additional users.",
     });
+    return;
+  }
 
-    logger.info("First admin user created via setup wizard", {
+  const { username, password } = req.body;
+
+  if (
+    typeof username !== "string" ||
+    typeof password !== "string" ||
+    !username ||
+    !password ||
+    username.length > USERNAME_MAX_LENGTH
+  ) {
+    res.status(400).json({
+      error: "Username and password are required",
+    });
+    return;
+  }
+
+  const passwordCheck = validatePassword(password);
+  if (!passwordCheck.valid) {
+    res.status(400).json({ error: passwordCheck.errors.join(". ") });
+    return;
+  }
+
+  // Hash password
+  const hashedPassword = await bcrypt.hash(password, 10);
+
+  // Create first admin user with default carousel preferences
+  const newUser = await prisma.user.create({
+    data: {
+      username,
+      password: hashedPassword,
+      role: "ADMIN",
+      carouselPreferences: getDefaultCarouselPreferences() as never,
+    },
+    select: {
+      id: true,
+      username: true,
+      role: true,
+      createdAt: true,
+    },
+  });
+
+  logger.info("First admin user created via setup wizard", {
+    username: newUser.username,
+  });
+
+  setTokenCookie(
+    res,
+    generateToken({
+      id: newUser.id,
       username: newUser.username,
+      role: newUser.role,
+    })
+  );
+
+  res.status(201).json({
+    success: true,
+    user: { ...newUser, createdAt: newUser.createdAt.toISOString() },
+  });
+};
+
+/** What a caller without the admin session learns about a failed connection test. */
+export const CONNECTION_TEST_FAILED =
+  "Could not connect to Stash. Check that the URL ends in /graphql, that Stash is running and reachable from the Peek server, and that the API key is correct.";
+
+/** A Stash answer is only trusted once it carries a configuration. */
+const hasConfiguration = (result: unknown): boolean =>
+  typeof result === "object" &&
+  result !== null &&
+  "configuration" in result &&
+  Boolean(result.configuration);
+
+const INVALID_URL_MESSAGE =
+  "Invalid URL format. Expected: http://hostname:port/graphql";
+
+/** What `probeStashConnection` learned: a version on success, else why not. */
+type StashProbe =
+  | { success: true; version: string | undefined }
+  | { success: false; reason: "empty-configuration" }
+  | { success: false; reason: "error"; friendly: string; details: string };
+
+/**
+ * Connect to a Stash server with `url` and `apiKey` and read its configuration
+ * and version. The caller decides what of the result its reader may see; the
+ * log gets the full error, and the key's length only, never its characters.
+ */
+const probeStashConnection = async (
+  url: string,
+  apiKey: string
+): Promise<StashProbe> => {
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(url);
+  } catch {
+    return {
+      success: false,
+      reason: "error",
+      friendly: INVALID_URL_MESSAGE,
+      details: INVALID_URL_MESSAGE,
+    };
+  }
+
+  logger.info("Testing Stash connection", {
+    url,
+    urlLength: url.length,
+    hostname: parsedUrl.hostname,
+    port: parsedUrl.port,
+    apiKeyLength: apiKey.length,
+  });
+
+  // Try to connect to Stash
+  logger.debug("Initializing StashApp with provided credentials");
+  const testStash = new StashClient({ url, apiKey });
+  logger.debug("StashApp initialized, calling configuration()");
+
+  try {
+    const result = await testStash.configuration();
+
+    if (!hasConfiguration(result)) {
+      logger.error("Stash connection test got an empty configuration");
+      return { success: false, reason: "empty-configuration" };
+    }
+
+    // Also fetch the version
+    let versionString: string | undefined;
+    try {
+      const versionResult = await testStash.version();
+      versionString = emptyToNull(versionResult.version.version) ?? undefined;
+    } catch (versionError) {
+      // Version fetch failed, but connection is still valid
+      logger.warn("Failed to fetch Stash version", { error: versionError });
+    }
+
+    logger.info("Stash connection test successful", {
+      version: versionString,
+    });
+    return { success: true, version: versionString };
+  } catch (error) {
+    // Get the full error details including cause
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const errorCause =
+      error instanceof Error && (error as Error & { cause?: unknown }).cause
+        ? String((error as Error & { cause?: unknown }).cause)
+        : "";
+    const fullError = errorCause
+      ? `${errorMessage}: ${errorCause}`
+      : errorMessage;
+
+    logger.error("Stash connection test failed", {
+      error: errorMessage,
+      cause: errorCause,
+      fullError,
     });
 
-    res.status(201).json({
-      success: true,
-      user: newUser,
-    });
-  } catch (error) {
-    logger.error("Failed to create first admin user", { error });
-    res.status(500).json({
-      error: "Failed to create admin user",
-      message: error instanceof Error ? error.message : String(error),
-    });
+    // Provide user-friendly error messages
+    let friendlyMessage = "Connection failed";
+    const checkString = fullError.toLowerCase();
+
+    if (checkString.includes("econnrefused")) {
+      friendlyMessage = "Connection refused. Is Stash running?";
+    } else if (
+      checkString.includes("enotfound") ||
+      checkString.includes("getaddrinfo")
+    ) {
+      friendlyMessage = "Host not found. Check the hostname.";
+    } else if (
+      checkString.includes("401") ||
+      checkString.includes("unauthorized")
+    ) {
+      friendlyMessage = "Authentication failed. Check your API key.";
+    } else if (checkString.includes("404")) {
+      friendlyMessage = "Endpoint not found. Make sure URL ends with /graphql";
+    } else if (checkString.includes("etimedout")) {
+      friendlyMessage = "Connection timed out. Check network connectivity.";
+    } else if (checkString.includes("fetch failed")) {
+      // Generic fetch error - try to give more context
+      friendlyMessage =
+        "Network error connecting to Stash. Check the URL and ensure Stash is accessible from the server.";
+    }
+
+    return {
+      success: false,
+      reason: "error",
+      friendly: friendlyMessage,
+      details: describeStashError(error),
+    };
   }
 };
 
 /**
  * Test connection to a Stash server
  * POST /api/setup/test-stash-connection
+ *
+ * Public only before any user or instance exists (setupGuards.ts). Only an
+ * admin gets the reason for a failure and the Stash version; everyone else
+ * gets pass or fail. The full error stays in the log.
  */
 export const testStashConnection = async (
   req: TypedRequest<TestStashConnectionRequest>,
   res: TypedResponse<TestStashConnectionResponse | ApiErrorResponse>
 ) => {
-  try {
-    const { url, apiKey } = req.body;
+  const { url, apiKey } = req.body;
+  const isAdmin = req.user?.role === "ADMIN";
 
-    if (!url || !apiKey) {
-      return res.status(400).json({
-        error: "URL and API key are required",
-      });
-    }
-
-    // Validate URL format
-    let parsedUrl: URL;
-    try {
-      parsedUrl = new URL(url);
-    } catch {
-      return res.status(400).json({
-        error: "Invalid URL format. Expected: http://hostname:port/graphql",
-      });
-    }
-
-    logger.info("Testing Stash connection", {
-      url,
-      urlLength: url?.length,
-      hostname: parsedUrl.hostname,
-      port: parsedUrl.port,
-      apiKeyLength: apiKey?.length,
-      apiKeyPreview: apiKey ? `${apiKey.substring(0, 20)}...` : "NOT SET",
+  if (!url || !apiKey) {
+    res.status(400).json({
+      error: "URL and API key are required",
     });
-
-    // Try to connect to Stash
-    logger.debug("Initializing StashApp with provided credentials");
-    const testStash = new StashClient({ url, apiKey });
-    logger.debug("StashApp initialized, calling configuration()");
-
-    try {
-      const result = await testStash.configuration();
-
-      if (result && result.configuration) {
-        // Also fetch the version
-        let versionString: string | undefined;
-        try {
-          const versionResult = await testStash.version();
-          versionString = versionResult.version.version || undefined;
-        } catch (versionError) {
-          // Version fetch failed, but connection is still valid
-          logger.warn("Failed to fetch Stash version", { error: versionError });
-        }
-
-        logger.info("Stash connection test successful", { version: versionString });
-        res.json({
-          success: true,
-          message: "Connection successful",
-          version: versionString,
-        });
-      } else {
-        res.status(500).json({
-          success: false,
-          error: "Connected but received empty configuration",
-        });
-      }
-    } catch (error) {
-      // Get the full error details including cause
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      const errorCause = error instanceof Error && (error as Error & { cause?: unknown }).cause ? String((error as Error & { cause?: unknown }).cause) : "";
-      const fullError = errorCause ? `${errorMessage}: ${errorCause}` : errorMessage;
-
-      logger.error("Stash connection test failed", {
-        error: errorMessage,
-        cause: errorCause,
-        fullError
-      });
-
-      // Provide user-friendly error messages
-      let friendlyMessage = "Connection failed";
-      const checkString = fullError.toLowerCase();
-
-      if (checkString.includes("econnrefused")) {
-        friendlyMessage = "Connection refused. Is Stash running?";
-      } else if (checkString.includes("enotfound") || checkString.includes("getaddrinfo")) {
-        friendlyMessage = "Host not found. Check the hostname.";
-      } else if (checkString.includes("401") || checkString.includes("unauthorized")) {
-        friendlyMessage = "Authentication failed. Check your API key.";
-      } else if (checkString.includes("404")) {
-        friendlyMessage = "Endpoint not found. Make sure URL ends with /graphql";
-      } else if (checkString.includes("etimedout")) {
-        friendlyMessage = "Connection timed out. Check network connectivity.";
-      } else if (checkString.includes("fetch failed")) {
-        // Generic fetch error - try to give more context
-        friendlyMessage = "Network error connecting to Stash. Check the URL and ensure Stash is accessible from the server.";
-      }
-
-      res.status(400).json({
-        success: false,
-        error: friendlyMessage,
-        details: fullError,
-      });
-    }
-  } catch (error) {
-    logger.error("Error testing Stash connection", { error });
-    res.status(500).json({
-      error: "Internal server error",
-      message: error instanceof Error ? error.message : String(error),
-    });
+    return;
   }
+
+  // Validate URL format
+  try {
+    new URL(url);
+  } catch {
+    res.status(400).json({ error: INVALID_URL_MESSAGE });
+    return;
+  }
+
+  const probe = await probeStashConnection(url, apiKey);
+
+  if (probe.success) {
+    res.json({
+      success: true,
+      message: "Connection successful",
+      ...(isAdmin && probe.version !== undefined && { version: probe.version }),
+    });
+    return;
+  }
+
+  const reason =
+    probe.reason === "empty-configuration"
+      ? "Connected but received empty configuration"
+      : probe.friendly;
+  res.status(400).json({
+    success: false,
+    error: isAdmin ? reason : CONNECTION_TEST_FAILED,
+  });
 };
 
 /**
- * Create first Stash instance (public endpoint for setup wizard)
- * Only works if NO Stash instances exist yet
+ * Test a saved Stash instance with its stored API key
+ * POST /api/setup/stash-instance/:id/test-connection
+ *
+ * Admin only. The edit form never holds the key, so it tests by id: no body
+ * tests the stored address and key, a `url` tests that address with the
+ * stored key, an `apiKey` tests a replacement the admin typed. The answer
+ * carries the reason and Stash's own error text for the admin, the version on
+ * success, and never a key.
+ */
+export const testSavedStashInstance = async (
+  req: TypedRequest<
+    TestSavedStashInstanceRequest,
+    TestSavedStashInstanceParams
+  >,
+  res: TypedResponse<TestStashConnectionResponse | ApiErrorResponse>
+) => {
+  const { id } = req.params;
+
+  const existing = await prisma.stashInstance.findUnique({
+    where: { id },
+    select: { url: true, apiKey: true },
+  });
+  if (!existing) {
+    res.status(404).json({ error: "Stash instance not found" });
+    return;
+  }
+
+  // Express 5 leaves `req.body` undefined for a request with no body
+  const body = req.body as TestSavedStashInstanceRequest | undefined;
+  const url = emptyToNull(body?.url) ?? existing.url;
+  const apiKey = emptyToNull(body?.apiKey) ?? existing.apiKey;
+
+  try {
+    new URL(url);
+  } catch {
+    res.status(400).json({ error: INVALID_URL_MESSAGE });
+    return;
+  }
+
+  const probe = await probeStashConnection(url, apiKey);
+
+  if (probe.success) {
+    res.json({
+      success: true,
+      message: "Connection successful",
+      ...(probe.version !== undefined && { version: probe.version }),
+    });
+    return;
+  }
+
+  res.status(400).json(
+    probe.reason === "empty-configuration"
+      ? {
+          success: false,
+          error: "Connected but received empty configuration",
+        }
+      : { success: false, error: probe.friendly, details: probe.details }
+  );
+};
+
+/**
+ * Create first Stash instance (setup wizard)
+ * Only works if NO Stash instances exist yet. Public only before any user or
+ * instance exists (setupGuards.ts), admin session otherwise.
  * POST /api/setup/create-stash-instance
  */
 export const createFirstStashInstance = async (
   req: TypedRequest<CreateFirstStashInstanceRequest>,
   res: TypedResponse<CreateFirstStashInstanceResponse | ApiErrorResponse>
 ) => {
+  // Check if any Stash instances already exist
+  const instanceCount = await prisma.stashInstance.count();
+
+  if (instanceCount > 0) {
+    res.status(403).json({
+      error:
+        "A Stash instance already exists. Use Server Settings to manage instances.",
+    });
+    return;
+  }
+
+  const { name, url, uiUrl, apiKey } = req.body;
+
+  if (!url || !apiKey) {
+    res.status(400).json({
+      error: "URL and API key are required",
+    });
+    return;
+  }
+
+  // Validate URL format
   try {
-    // Check if any Stash instances already exist
-    const instanceCount = await prisma.stashInstance.count();
+    new URL(url);
+  } catch {
+    res.status(400).json({
+      error: "Invalid URL format. Expected: http://hostname:port/graphql",
+    });
+    return;
+  }
 
-    if (instanceCount > 0) {
-      return res.status(403).json({
-        error:
-          "A Stash instance already exists. Use Server Settings to manage instances.",
-      });
-    }
-
-    const { name, url, apiKey } = req.body;
-
-    if (!url || !apiKey) {
-      return res.status(400).json({
-        error: "URL and API key are required",
-      });
-    }
-
-    // Validate URL format
+  // Validate uiUrl format if provided (optional)
+  if (uiUrl) {
     try {
-      new URL(url);
+      new URL(uiUrl);
     } catch {
-      return res.status(400).json({
-        error: "Invalid URL format. Expected: http://hostname:port/graphql",
+      res.status(400).json({
+        error: "Invalid UI URL format. Expected: https://hostname:port",
       });
+      return;
     }
+  }
 
-    // Test connection before saving (skip in test environment for E2E setup)
-    if (process.env.NODE_ENV !== "test") {
-      const testStash = new StashClient({ url, apiKey });
-      try {
-        await testStash.configuration();
-      } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        logger.error("Stash connection validation failed", { error: errorMessage });
-        return res.status(400).json({
-          error: "Could not connect to Stash server",
-          details: errorMessage,
-        });
-      }
+  // Test connection before saving (skip in test environment for E2E setup)
+  if (process.env.NODE_ENV !== "test") {
+    const testStash = new StashClient({ url, apiKey });
+    try {
+      await testStash.configuration();
+    } catch (error) {
+      // No reason here: this is public until the first user exists, and the
+      // reason would tell an anonymous caller what a probed address answers
+      logger.error("Stash connection validation failed", {
+        error: describeStashError(error),
+      });
+      throw new ValidationError("Could not connect to Stash server");
     }
+  }
 
-    // Create Stash instance
-    const instance = await prisma.stashInstance.create({
-      data: {
-        name: name || "Default",
-        url,
-        apiKey,
-        enabled: true,
-        priority: 0,
-      },
-      select: {
-        id: true,
-        name: true,
-        url: true,
-        enabled: true,
-        createdAt: true,
-      },
-    });
+  // Create Stash instance
+  const instance = await prisma.stashInstance.create({
+    data: {
+      name: emptyToNull(name) ?? "Default",
+      url,
+      uiUrl: emptyToNull(uiUrl),
+      apiKey,
+      enabled: true,
+      priority: 0,
+    },
+    select: {
+      id: true,
+      name: true,
+      url: true,
+      uiUrl: true,
+      enabled: true,
+      createdAt: true,
+    },
+  });
 
-    logger.info("First Stash instance created via setup wizard", {
-      instanceId: instance.id,
-      instanceName: instance.name,
-    });
+  logger.info("First Stash instance created via setup wizard", {
+    instanceId: instance.id,
+    instanceName: instance.name,
+  });
 
-    // Reload the StashInstanceManager to pick up the new instance
-    await stashInstanceManager.reload();
+  // Reload the StashInstanceManager to pick up the new instance
+  await stashInstanceManager.reload();
+  bumpLibrary();
 
-    // Initialize the Stash cache now that we have an instance
-    // This runs in the background - we don't want to block the response
-    logger.info("Triggering Stash cache initialization...");
-    stashSyncService.fullSync().catch((err) => {
-      logger.error("Failed to initialize Stash cache after instance creation", {
+  // Start the scheduler, which the boot left stopped with no instance: its
+  // startup sync is a full sync (nothing has synced yet), and it then keeps
+  // syncing on the interval. In the background: the answer does not wait.
+  // One still running for an earlier instance (disabled, then deleted)
+  // syncs the new one through the queue instead.
+  if (syncScheduler.isRunning()) {
+    stashSyncService.queueFullSync(instance.id);
+  } else {
+    logger.info("Starting the sync scheduler for the first instance");
+    syncScheduler.start().catch((err: unknown) => {
+      logger.error("Failed to start the sync scheduler after setup", {
         error: err instanceof Error ? err.message : String(err),
       });
     });
-
-    res.status(201).json({
-      success: true,
-      instance,
-    });
-  } catch (error) {
-    logger.error("Failed to create Stash instance", { error });
-    res.status(500).json({
-      error: "Failed to create Stash instance",
-      message: error instanceof Error ? error.message : String(error),
-    });
   }
+
+  res.status(201).json({
+    success: true,
+    instance: { ...instance, createdAt: instance.createdAt.toISOString() },
+  });
 };
+
+/** A Stash instance row as the responses send it: dates as ISO strings */
+function toStashInstanceData<
+  T extends { createdAt: Date; updatedAt: Date; firstSyncedAt: Date | null },
+>(instance: T) {
+  return {
+    ...instance,
+    createdAt: instance.createdAt.toISOString(),
+    updatedAt: instance.updatedAt.toISOString(),
+    firstSyncedAt: instance.firstSyncedAt?.toISOString() ?? null,
+  };
+}
 
 /**
  * Get current Stash instance info (for Server Settings display)
@@ -372,108 +550,31 @@ export const getStashInstance = async (
   req: Request,
   res: TypedResponse<GetStashInstanceResponse | ApiErrorResponse>
 ) => {
-  try {
-    const instances = await prisma.stashInstance.findMany({
-      select: {
-        id: true,
-        name: true,
-        url: true,
-        enabled: true,
-        priority: true,
-        createdAt: true,
-        updatedAt: true,
-      },
-      orderBy: { priority: "asc" },
-    });
+  const instances = await prisma.stashInstance.findMany({
+    select: {
+      id: true,
+      name: true,
+      url: true,
+      uiUrl: true,
+      enabled: true,
+      priority: true,
+      createdAt: true,
+      updatedAt: true,
+    },
+    orderBy: { priority: "asc" },
+  });
 
-    // For commit 1, we only support one instance
-    const instance = instances[0] || null;
+  // For commit 1, we only support one instance
+  const instance = instances[0] ?? null;
 
-    res.json({
-      instance,
-      instanceCount: instances.length,
-    });
-  } catch (error) {
-    logger.error("Failed to get Stash instance", { error });
-    res.status(500).json({
-      error: "Failed to get Stash instance",
-      message: error instanceof Error ? error.message : String(error),
-    });
-  }
-};
-
-/**
- * Reset setup state for recovery from partial setup
- * Deletes all users and Stash instances to allow fresh setup
- * POST /api/setup/reset
- *
- * SECURITY: Only works if setup is incomplete AND there's at most 1 user.
- * This prevents accidental data loss on systems with multiple users.
- */
-export const resetSetup = async (
-  req: TypedRequest<ResetSetupRequest>,
-  res: TypedResponse<ResetSetupResponse | ApiErrorResponse>
-) => {
-  try {
-    // Require explicit confirmation to prevent accidental resets
-    const { confirm } = req.body;
-    if (confirm !== "RESET_SETUP") {
-      return res.status(400).json({
-        error: "Confirmation required",
-        message:
-          "Send { confirm: 'RESET_SETUP' } to confirm this destructive action",
-      });
-    }
-
-    // Check current setup state
-    const userCount = await prisma.user.count();
-    const stashInstanceCount = await prisma.stashInstance.count();
-    const setupComplete = userCount > 0 && stashInstanceCount > 0;
-
-    // Strict guard: multiple users means the system is in use
-    if (userCount > 1) {
-      return res.status(403).json({
-        error: "Cannot reset: multiple users exist. This system appears to be in use.",
-      });
-    }
-
-    // Only allow reset if setup is incomplete
-    if (setupComplete) {
-      return res.status(403).json({
-        error: "Cannot reset a fully configured system. Use Server Settings to manage configuration.",
-      });
-    }
-
-    // Log BEFORE deleting for audit trail
-    logger.warn("Setup reset initiated - deleting all data", {
-      userCount,
-      stashInstanceCount,
-    });
-
-    // Delete all users and stash instances
-    await prisma.user.deleteMany({});
-    await prisma.stashInstance.deleteMany({});
-
-    logger.info("Setup state reset complete", {
-      deletedUsers: userCount,
-      deletedInstances: stashInstanceCount,
-    });
-
-    res.json({
-      success: true,
-      message: "Setup state has been reset. You can now start fresh.",
-      deleted: {
-        users: userCount,
-        stashInstances: stashInstanceCount,
-      },
-    });
-  } catch (error) {
-    logger.error("Failed to reset setup state", { error });
-    res.status(500).json({
-      error: "Failed to reset setup state",
-      message: error instanceof Error ? error.message : String(error),
-    });
-  }
+  res.json({
+    instance: instance && {
+      ...instance,
+      createdAt: instance.createdAt.toISOString(),
+      updatedAt: instance.updatedAt.toISOString(),
+    },
+    instanceCount: instances.length,
+  });
 };
 
 // =============================================================================
@@ -489,29 +590,23 @@ export const getAllStashInstances = async (
   req: Request,
   res: TypedResponse<GetAllStashInstancesResponse | ApiErrorResponse>
 ) => {
-  try {
-    const instances = await prisma.stashInstance.findMany({
-      select: {
-        id: true,
-        name: true,
-        description: true,
-        url: true,
-        enabled: true,
-        priority: true,
-        createdAt: true,
-        updatedAt: true,
-      },
-      orderBy: { priority: "asc" },
-    });
+  const instances = await prisma.stashInstance.findMany({
+    select: {
+      id: true,
+      name: true,
+      description: true,
+      url: true,
+      uiUrl: true,
+      enabled: true,
+      priority: true,
+      createdAt: true,
+      updatedAt: true,
+      firstSyncedAt: true,
+    },
+    orderBy: { priority: "asc" },
+  });
 
-    res.json({ instances });
-  } catch (error) {
-    logger.error("Failed to get Stash instances", { error });
-    res.status(500).json({
-      error: "Failed to get Stash instances",
-      message: error instanceof Error ? error.message : String(error),
-    });
-  }
+  res.json({ instances: instances.map(toStashInstanceData) });
 };
 
 /**
@@ -523,98 +618,108 @@ export const createStashInstance = async (
   req: TypedRequest<CreateStashInstanceRequest>,
   res: TypedResponse<CreateStashInstanceResponse | ApiErrorResponse>
 ) => {
+  const {
+    name,
+    description,
+    url,
+    uiUrl,
+    apiKey,
+    enabled = true,
+    priority,
+  } = req.body;
+
+  if (!name || !url || !apiKey) {
+    res.status(400).json({
+      error: "Name, URL, and API key are required",
+    });
+    return;
+  }
+
+  // Validate URL format
   try {
-    const { name, description, url, apiKey, enabled = true, priority } = req.body;
+    new URL(url);
+  } catch {
+    res.status(400).json({
+      error: "Invalid URL format. Expected: http://hostname:port/graphql",
+    });
+    return;
+  }
 
-    if (!name || !url || !apiKey) {
-      return res.status(400).json({
-        error: "Name, URL, and API key are required",
-      });
-    }
-
-    // Validate URL format
+  // Validate uiUrl format if provided (optional)
+  if (uiUrl) {
     try {
-      new URL(url);
+      new URL(uiUrl);
     } catch {
-      return res.status(400).json({
-        error: "Invalid URL format. Expected: http://hostname:port/graphql",
+      res.status(400).json({
+        error: "Invalid UI URL format. Expected: https://hostname:port",
       });
+      return;
     }
+  }
 
-    // Test connection before saving
-    const testStash = new StashClient({ url, apiKey });
-    try {
-      await testStash.configuration();
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      logger.error("Stash connection validation failed", { error: errorMessage });
-      return res.status(400).json({
-        error: "Could not connect to Stash server",
-        details: errorMessage,
-      });
-    }
-
-    // Get next priority if not specified
-    let instancePriority = priority;
-    if (instancePriority === undefined) {
-      const maxPriority = await prisma.stashInstance.aggregate({
-        _max: { priority: true },
-      });
-      instancePriority = (maxPriority._max.priority ?? -1) + 1;
-    }
-
-    // Create Stash instance
-    const instance = await prisma.stashInstance.create({
-      data: {
-        name,
-        description: description || null,
-        url,
-        apiKey,
-        enabled,
-        priority: instancePriority,
-      },
-      select: {
-        id: true,
-        name: true,
-        description: true,
-        url: true,
-        enabled: true,
-        priority: true,
-        createdAt: true,
-        updatedAt: true,
-      },
-    });
-
-    logger.info("Stash instance created", {
-      instanceId: instance.id,
-      instanceName: instance.name,
-    });
-
-    // Reload the StashInstanceManager to pick up the new instance
-    await stashInstanceManager.reload();
-
-    // Trigger sync for the new instance in background
-    if (enabled) {
-      logger.info("Triggering sync for new Stash instance...");
-      stashSyncService.fullSync(instance.id).catch((err) => {
-        logger.error("Failed to sync new Stash instance", {
-          instanceId: instance.id,
-          error: err instanceof Error ? err.message : String(err),
-        });
-      });
-    }
-
-    res.status(201).json({
-      success: true,
-      instance,
-    });
+  // Test connection before saving
+  const testStash = new StashClient({ url, apiKey });
+  try {
+    await testStash.configuration();
   } catch (error) {
-    logger.error("Failed to create Stash instance", { error });
-    res.status(500).json({
-      error: "Failed to create Stash instance",
-      message: error instanceof Error ? error.message : String(error),
+    throw new ValidationError("Could not connect to Stash server", {
+      details: describeStashError(error),
     });
   }
+
+  // Get next priority if not specified
+  let instancePriority = priority;
+  if (instancePriority === undefined) {
+    const maxPriority = await prisma.stashInstance.aggregate({
+      _max: { priority: true },
+    });
+    instancePriority = (maxPriority._max.priority ?? -1) + 1;
+  }
+
+  // Create Stash instance
+  const instance = await prisma.stashInstance.create({
+    data: {
+      name,
+      description: emptyToNull(description),
+      url,
+      uiUrl: emptyToNull(uiUrl),
+      apiKey,
+      enabled,
+      priority: instancePriority,
+    },
+    select: {
+      id: true,
+      name: true,
+      description: true,
+      url: true,
+      uiUrl: true,
+      enabled: true,
+      priority: true,
+      createdAt: true,
+      updatedAt: true,
+      firstSyncedAt: true,
+    },
+  });
+
+  logger.info("Stash instance created", {
+    instanceId: instance.id,
+    instanceName: instance.name,
+  });
+
+  // Reload the StashInstanceManager to pick up the new instance
+  await stashInstanceManager.reload();
+  // Open tabs refetch: the setup status names one more server
+  bumpLibrary();
+
+  // Sync the new instance in the background, once a running sync ends:
+  // the instance is saved, so refusing would only lose its sync
+  const sync = enabled ? stashSyncService.queueFullSync(instance.id) : "none";
+
+  res.status(201).json({
+    success: true,
+    instance: toStashInstanceData(instance),
+    sync,
+  });
 };
 
 /**
@@ -626,96 +731,141 @@ export const updateStashInstance = async (
   req: TypedRequest<UpdateStashInstanceRequest, UpdateStashInstanceParams>,
   res: TypedResponse<UpdateStashInstanceResponse | ApiErrorResponse>
 ) => {
-  try {
-    const { id } = req.params;
-    const { name, description, url, apiKey, enabled, priority } = req.body;
+  const { id } = req.params;
+  const { name, description, url, uiUrl, apiKey, enabled, priority } = req.body;
 
-    // Check instance exists
-    const existing = await prisma.stashInstance.findUnique({
-      where: { id },
+  // Check instance exists
+  const existing = await prisma.stashInstance.findUnique({
+    where: { id },
+  });
+
+  if (!existing) {
+    res.status(404).json({
+      error: "Stash instance not found",
     });
+    return;
+  }
 
-    if (!existing) {
-      return res.status(404).json({
-        error: "Stash instance not found",
+  // Track if connection details changed (requires re-sync)
+  const urlChanged = Boolean(url) && url !== existing.url;
+  const connectionChanged =
+    urlChanged || (Boolean(apiKey) && apiKey !== existing.apiKey);
+  // Enabling or disabling changes what its users can see
+  const enabledChanged = enabled !== undefined && enabled !== existing.enabled;
+
+  // Only a changed address or key can fail a save for want of a connection:
+  // a rename, a priority or a toggle saves while Stash is down
+  if (connectionChanged) {
+    const testUrl = emptyToNull(url) ?? existing.url;
+    const testApiKey = emptyToNull(apiKey) ?? existing.apiKey;
+
+    const testStash = new StashClient({ url: testUrl, apiKey: testApiKey });
+    try {
+      await testStash.configuration();
+    } catch (error) {
+      throw new ValidationError(
+        urlChanged
+          ? "Could not connect to Stash at the new address"
+          : "Could not connect to Stash with the new API key",
+        { details: describeStashError(error) }
+      );
+    }
+  }
+
+  // Validate uiUrl format if provided (optional)
+  if (uiUrl) {
+    try {
+      new URL(uiUrl);
+    } catch {
+      res.status(400).json({
+        error: "Invalid UI URL format. Expected: https://hostname:port",
       });
+      return;
     }
+  }
 
-    // Track if connection details changed (requires re-sync)
-    const connectionChanged = (url && url !== existing.url) || (apiKey && apiKey !== existing.apiKey);
-
-    // If URL or API key changed, test connection
-    if (url || apiKey) {
-      const testUrl = url || existing.url;
-      const testApiKey = apiKey || existing.apiKey;
-
-      const testStash = new StashClient({ url: testUrl, apiKey: testApiKey });
-      try {
-        await testStash.configuration();
-      } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        logger.error("Stash connection validation failed", { error: errorMessage });
-        return res.status(400).json({
-          error: "Could not connect to Stash server with new credentials",
-          details: errorMessage,
-        });
-      }
+  // Peek keeps one enabled instance: a disable checks inside the unit that
+  // writes it, so two disables sent together cannot both pass the check
+  const disabling = enabled === false && existing.enabled;
+  const instance = await dbWriteTransaction("instance.update", async (tx) => {
+    if (disabling) {
+      const others = await tx.stashInstance.count({
+        where: { enabled: true, id: { not: id } },
+      });
+      if (others === 0) throw new LastEnabledInstanceError();
     }
-
-    // Update instance
-    const instance = await prisma.stashInstance.update({
+    return tx.stashInstance.update({
       where: { id },
       data: {
         ...(name !== undefined && { name }),
         ...(description !== undefined && { description }),
         ...(url !== undefined && { url }),
+        ...(uiUrl !== undefined && { uiUrl }),
         ...(apiKey !== undefined && { apiKey }),
         ...(enabled !== undefined && { enabled }),
         ...(priority !== undefined && { priority }),
+        // Another address may be another Stash: the instance is new again,
+        // hidden from users until its resync's exclusions are computed
+        ...(urlChanged && { firstSyncedAt: null }),
       },
       select: {
         id: true,
         name: true,
         description: true,
         url: true,
+        uiUrl: true,
         enabled: true,
         priority: true,
         createdAt: true,
         updatedAt: true,
+        firstSyncedAt: true,
       },
     });
+  }).catch((error: unknown) => {
+    throw error instanceof LastEnabledInstanceError
+      ? new ValidationError(LAST_ENABLED_INSTANCE_MESSAGE)
+      : error;
+  });
 
-    logger.info("Stash instance updated", {
-      instanceId: instance.id,
-      instanceName: instance.name,
-      connectionChanged,
-    });
+  logger.info("Stash instance updated", {
+    instanceId: instance.id,
+    instanceName: instance.name,
+    connectionChanged,
+  });
 
-    // Reload the StashInstanceManager to pick up changes
-    await stashInstanceManager.reload();
+  // Reload the StashInstanceManager to pick up changes
+  await stashInstanceManager.reload();
 
-    // If connection details changed, re-sync this instance to refresh cached data
-    if (connectionChanged && instance.enabled) {
-      logger.info("Connection details changed, triggering re-sync for instance...");
-      stashSyncService.fullSync(instance.id).catch((err) => {
-        logger.error("Failed to re-sync Stash instance after update", {
-          instanceId: instance.id,
-          error: err instanceof Error ? err.message : String(err),
-        });
-      });
-    }
-
-    res.json({
-      success: true,
-      instance,
-    });
-  } catch (error) {
-    logger.error("Failed to update Stash instance", { error });
-    res.status(500).json({
-      error: "Failed to update Stash instance",
-      message: error instanceof Error ? error.message : String(error),
-    });
+  // The users whose scope holds the instance (getUsersSelecting: a selection
+  // naming it, or one naming no other enabled instance, none at all
+  // included) see a different library now: their exclusion rows must match
+  // before anyone lists it, so the recompute runs in this request
+  if (enabledChanged) {
+    await exclusionComputationService.recomputeUsers(
+      await getUsersSelecting(id),
+      "recomputeUsersAfterInstanceToggle",
+      { instanceId: id, enabled }
+    );
   }
+
+  // If connection details changed, re-sync this instance to refresh cached
+  // data, once a running sync ends. An instance enabled before its first
+  // sync ever finished (added disabled, say) syncs now too: it is hidden
+  // from users until then
+  // After the recompute, so the refetch it triggers sees the new exclusions
+  bumpLibrary();
+
+  const firstSyncPending = enabledChanged && instance.firstSyncedAt === null;
+  const sync =
+    (connectionChanged || firstSyncPending) && instance.enabled
+      ? stashSyncService.queueFullSync(instance.id)
+      : "none";
+
+  res.json({
+    success: true,
+    instance: toStashInstanceData(instance),
+    sync,
+  });
 };
 
 /**
@@ -727,63 +877,50 @@ export const deleteStashInstance = async (
   req: TypedRequest<never, DeleteStashInstanceParams>,
   res: TypedResponse<DeleteStashInstanceResponse | ApiErrorResponse>
 ) => {
-  try {
-    const { id } = req.params;
+  const { id } = req.params;
 
-    // Check instance exists
-    const existing = await prisma.stashInstance.findUnique({
-      where: { id },
-      select: { id: true, name: true },
+  // Check instance exists
+  const existing = await prisma.stashInstance.findUnique({
+    where: { id },
+    select: { id: true, name: true },
+  });
+
+  if (!existing) {
+    res.status(404).json({
+      error: "Stash instance not found",
     });
-
-    if (!existing) {
-      return res.status(404).json({
-        error: "Stash instance not found",
-      });
-    }
-
-    // Check if this is the last enabled instance
-    const enabledCount = await prisma.stashInstance.count({
-      where: { enabled: true },
-    });
-
-    if (enabledCount === 1) {
-      const lastEnabled = await prisma.stashInstance.findFirst({
-        where: { enabled: true },
-      });
-      if (lastEnabled?.id === id) {
-        return res.status(400).json({
-          error: "Cannot delete the last enabled Stash instance. Disable it first or add another instance.",
-        });
-      }
-    }
-
-    // Clear all cached data for this instance before deleting
-    logger.info("Clearing cached data for instance before deletion...");
-    await stashSyncService.clearInstanceData(id);
-
-    // Delete the instance (cascades to UserStashInstance)
-    await prisma.stashInstance.delete({
-      where: { id },
-    });
-
-    logger.info("Stash instance deleted", {
-      instanceId: existing.id,
-      instanceName: existing.name,
-    });
-
-    // Reload the StashInstanceManager
-    await stashInstanceManager.reload();
-
-    res.json({
-      success: true,
-      message: `Stash instance "${existing.name}" deleted`,
-    });
-  } catch (error) {
-    logger.error("Failed to delete Stash instance", { error });
-    res.status(500).json({
-      error: "Failed to delete Stash instance",
-      message: error instanceof Error ? error.message : String(error),
-    });
+    return;
   }
+
+  // Deletes the instance row and every user's rows for it, reloads the
+  // instance manager, then removes the cached library in the background.
+  // It refuses the last enabled instance inside its write unit.
+  try {
+    await stashSyncService.deleteInstance(id);
+  } catch (error) {
+    if (error instanceof LastEnabledInstanceError) {
+      throw new ValidationError(LAST_ENABLED_INSTANCE_MESSAGE);
+    }
+    if (error instanceof SyncBusyError) {
+      throw new ConflictError(
+        error.job === "sync"
+          ? "A sync is running. Wait for it to finish or abort it under Server Configuration → Sync status, then delete again."
+          : "Peek is still removing a deleted instance's cached library. Delete again once it has finished."
+      );
+    }
+    throw error;
+  }
+
+  // Its rows and every user's exclusions for it are gone: open tabs refetch
+  bumpLibrary();
+
+  logger.info("Stash instance deleted", {
+    instanceId: existing.id,
+    instanceName: existing.name,
+  });
+
+  res.json({
+    success: true,
+    message: `Stash instance "${existing.name}" deleted; its cached library is being removed.`,
+  });
 };

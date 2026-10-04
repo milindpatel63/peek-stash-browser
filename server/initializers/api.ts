@@ -1,9 +1,7 @@
 import cookieParser from "cookie-parser";
 import cors from "cors";
 import express from "express";
-import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
+import { getClipsForScene } from "../controllers/clips.js";
 import {
   proxyClipPreview,
   proxyImage,
@@ -12,57 +10,53 @@ import {
   proxyStashMedia,
 } from "../controllers/proxy.js";
 import * as statsController from "../controllers/stats.js";
-import { authenticate, requireAdmin, requireCacheReady } from "../middleware/auth.js";
-import { getClipsForScene } from "../controllers/clips.js";
+import {
+  authenticate,
+  requireAdmin,
+  requireCacheReady,
+} from "../middleware/auth.js";
+import { errorHandler } from "../middleware/errorHandler.js";
+import { requestTimeZone } from "../middleware/requestTimeZone.js";
 import authRoutes from "../routes/auth.js";
 import carouselRoutes from "../routes/carousel.js";
+import clipsRoutes from "../routes/clips.js";
 import customThemeRoutes from "../routes/customTheme.js";
+import databaseBackupRoutes from "../routes/databaseBackup.js";
+import downloadRoutes from "../routes/download.js";
+import exclusionsRoutes from "../routes/exclusions.js";
+import groupRoutes from "../routes/groups.js";
 import imageViewHistoryRoutes from "../routes/imageViewHistory.js";
+import libraryClipsRoutes from "../routes/library/clips.js";
+import libraryCountsRoutes from "../routes/library/counts.js";
 import libraryGalleriesRoutes from "../routes/library/galleries.js";
 import libraryGroupsRoutes from "../routes/library/groups.js";
 import libraryImagesRoutes from "../routes/library/images.js";
 import libraryPerformersRoutes from "../routes/library/performers.js";
+import libraryReadyRoutes from "../routes/library/ready.js";
 import libraryScenesRoutes from "../routes/library/scenes.js";
 import libraryStudiosRoutes from "../routes/library/studios.js";
 import libraryTagsRoutes from "../routes/library/tags.js";
+import mergeReconciliationRoutes from "../routes/mergeReconciliation.js";
 import playlistRoutes from "../routes/playlist.js";
 import ratingsRoutes from "../routes/ratings.js";
 import setupRoutes from "../routes/setup.js";
 import syncRoutes from "../routes/sync.js";
-import exclusionsRoutes from "../routes/exclusions.js";
-import mergeReconciliationRoutes from "../routes/mergeReconciliation.js";
-import databaseBackupRoutes from "../routes/databaseBackup.js";
-import downloadRoutes from "../routes/download.js";
+import timelineRoutes from "../routes/timeline.js";
 import userRoutes from "../routes/user.js";
-import groupRoutes from "../routes/groups.js";
+import userStatsRoutes from "../routes/userStats.js";
 import videoRoutes from "../routes/video.js";
 import watchHistoryRoutes from "../routes/watchHistory.js";
-import userStatsRoutes from "../routes/userStats.js";
-import timelineRoutes from "../routes/timeline.js";
-import clipsRoutes from "../routes/clips.js";
-import { authenticated } from "../utils/routeHelpers.js";
-import { errorHandler } from "../middleware/errorHandler.js";
 import { logger } from "../utils/logger.js";
-
-// ES module equivalent of __dirname
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+import { authenticated, libraryHandler } from "../utils/routeHelpers.js";
+import { getBuildDate, getServerVersion } from "../utils/serverVersion.js";
+import { resolveTrustProxy } from "../utils/trustProxy.js";
 
 export const setupAPI = () => {
   const app = express();
 
-  // Configure trust proxy for reverse proxy setups (nginx, etc.)
-  // Prevents express-rate-limit ERR_ERL_UNEXPECTED_X_FORWARDED_FOR errors
-  const trustProxy = process.env.TRUST_PROXY;
-  if (trustProxy) {
-    if (trustProxy === "true") {
-      app.set("trust proxy", true);
-    } else if (/^\d+$/.test(trustProxy)) {
-      app.set("trust proxy", parseInt(trustProxy, 10));
-    } else {
-      app.set("trust proxy", trustProxy);
-    }
-  }
+  // Trust the image's own nginx (a loopback hop) and TRUST_PROXY more hops,
+  // so rate limiting and lockout see each visitor's address
+  app.set("trust proxy", resolveTrustProxy(process.env.TRUST_PROXY));
 
   app.use(
     cors({
@@ -72,38 +66,23 @@ export const setupAPI = () => {
   );
   app.use(express.json()); // Add JSON body parsing for POST/PUT requests
   app.use(cookieParser()); // Parse cookies for JWT
+  // The viewer's time zone (X-Peek-Time-Zone, else UTC) on every API request
+  app.use("/api", requestTimeZone);
 
-  // Health check endpoint (no auth required)
+  // Health check (no auth). Proves Node answers through nginx and nothing
+  // more: no database query, per the homelab health-check convention.
   app.get("/api/health", (req, res) => {
     res.json({
       status: "healthy",
+      version: getServerVersion(),
+      buildDate: getBuildDate(),
       timestamp: new Date().toISOString(),
-      version: process.env.npm_package_version || "1.0.0",
     });
   });
 
   // Version endpoint (no auth required)
   app.get("/api/version", (req, res) => {
-    // Read version from package.json (use process.cwd() for reliable path resolution)
-    const packagePath = path.join(process.cwd(), "package.json");
-
-    let version = "1.0.0";
-    try {
-      const packageJson = JSON.parse(fs.readFileSync(packagePath, "utf8")) as { version?: string };
-      version = packageJson.version ?? version;
-    } catch (err) {
-      logger.error("Failed to read package.json version:", {
-        error: err,
-        packagePath,
-        cwd: process.cwd(),
-        __dirname,
-      });
-    }
-
-    res.json({
-      server: version,
-      buildDate: process.env.BUILD_DATE || new Date().toISOString(),
-    });
+    res.json({ server: getServerVersion(), buildDate: getBuildDate() });
   });
 
   // Server stats endpoint (admin only - authenticated)
@@ -117,18 +96,21 @@ export const setupAPI = () => {
     statsController.refreshCache
   );
 
-  // Media proxy (public - no auth required for images)
-  app.get("/api/proxy/stash", proxyStashMedia);
+  // Media proxies require a Peek session; per-entity access in the handler
+  app.use("/api/proxy", authenticate);
 
-  // Scene preview proxy routes (public - no auth for performance)
-  app.get("/api/proxy/scene/:id/preview", proxyScenePreview);
-  app.get("/api/proxy/scene/:id/webp", proxySceneWebp);
+  // Media proxy (requires a Peek session; per-entity access in the handler)
+  app.get("/api/proxy/stash", authenticated(proxyStashMedia));
 
-  // Image proxy route (public - no auth for performance)
-  app.get("/api/proxy/image/:imageId/:type", proxyImage);
+  // Scene preview proxy routes (requires a Peek session; per-entity access in the handler)
+  app.get("/api/proxy/scene/:id/preview", authenticated(proxyScenePreview));
+  app.get("/api/proxy/scene/:id/webp", authenticated(proxySceneWebp));
 
-  // Clip preview proxy route (public - no auth for performance)
-  app.get("/api/proxy/clip/:id/preview", proxyClipPreview);
+  // Image proxy route (requires a Peek session; per-entity access in the handler)
+  app.get("/api/proxy/image/:imageId/:type", authenticated(proxyImage));
+
+  // Clip preview proxy route (requires a Peek session; per-entity access in the handler)
+  app.get("/api/proxy/clip/:id/preview", authenticated(proxyClipPreview));
 
   // Public authentication routes (no auth required for these)
   app.use("/api/auth", authRoutes);
@@ -189,8 +171,13 @@ export const setupAPI = () => {
     "/api/scenes/:id/clips",
     authenticate,
     requireCacheReady,
-    authenticated(getClipsForScene)
+    libraryHandler(getClipsForScene)
   );
+
+  // Whether the user's library can be shown yet (the client's re-check while
+  // the library routes answer 503 ready:false). Before the entity routers,
+  // each of which runs authenticate on every request that enters it
+  app.use("/api/library", libraryReadyRoutes);
 
   // Library routes (all entities)
   app.use("/api/library", libraryScenesRoutes);
@@ -200,6 +187,9 @@ export const setupAPI = () => {
   app.use("/api/library", libraryGroupsRoutes);
   app.use("/api/library", libraryGalleriesRoutes);
   app.use("/api/library", libraryImagesRoutes);
+  app.use("/api/library", libraryClipsRoutes);
+  // Count-only list requests (the filter sheet)
+  app.use("/api/library", libraryCountsRoutes);
 
   // Video routes (playback, sessions, HLS streaming)
   app.use("/api", videoRoutes);
@@ -213,15 +203,22 @@ export const setupAPI = () => {
 /**
  * Start the API server on the specified port.
  * Separated from setupAPI() to allow integration tests to start on a different port.
+ *
+ * No listen callback: Express 5 hands it a listen error (a port in use) as an
+ * argument, which would log "Server is running" for a server that is not.
+ * Without one the error is emitted on the returned server: uncaught, it ends
+ * the process; the integration setup listens for it.
  */
 export const startServer = (
   app: ReturnType<typeof setupAPI>,
   port: number = 8100
 ) => {
-  return app.listen(port, () => {
+  const server = app.listen(port);
+  server.once("listening", () => {
     logger.info("Server is running", {
       url: `http://localhost:${port}`,
       transcodingSystem: "session-based",
     });
   });
+  return server;
 };

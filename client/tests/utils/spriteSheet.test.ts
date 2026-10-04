@@ -1,7 +1,11 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { untrusted } from "@tests/helpers/untrusted";
+import { must } from "@tests/testUtils";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   fetchAndParseVTT,
+  fetchSpriteVtt,
   getEvenlySpacedSprites,
+  parseSpriteVtt,
 } from "../../src/utils/spriteSheet";
 
 describe("spriteSheet utilities", () => {
@@ -37,6 +41,7 @@ describe("spriteSheet utilities", () => {
       expect(cues[0]).toEqual({
         startTime: 0,
         endTime: 5,
+        image: "sprite.jpg",
         x: 0,
         y: 0,
         width: 160,
@@ -45,6 +50,7 @@ describe("spriteSheet utilities", () => {
       expect(cues[1]).toEqual({
         startTime: 5,
         endTime: 10,
+        image: "sprite.jpg",
         x: 160,
         y: 0,
         width: 160,
@@ -53,6 +59,7 @@ describe("spriteSheet utilities", () => {
       expect(cues[2]).toEqual({
         startTime: 10,
         endTime: 15,
+        image: "sprite.jpg",
         x: 320,
         y: 0,
         width: 160,
@@ -114,8 +121,104 @@ describe("spriteSheet utilities", () => {
 
       const cues = await fetchAndParseVTT("http://example.com/long.vtt");
       expect(cues).toHaveLength(1);
-      expect(cues[0].startTime).toBe(5400); // 1h 30m = 5400s
-      expect(cues[0].endTime).toBe(5405);
+      expect(must(cues[0]).startTime).toBe(5400); // 1h 30m = 5400s
+      expect(must(cues[0]).endTime).toBe(5405);
+    });
+  });
+
+  describe("parseSpriteVtt", () => {
+    it("parses hour timestamps, CRLF files and cue ids", () => {
+      const vtt = [
+        "\uFEFFWEBVTT",
+        "",
+        "NOTE sprite cues for one scene",
+        "",
+        "1",
+        "00:00:00.000 --> 00:00:05.000",
+        "abc_sprite.jpg#xywh=0,0,160,90",
+        "",
+        "cue-2",
+        "01:30:00.000 --> 01:30:05.500 align:start",
+        "abc_sprite.jpg#xywh=160,90,160,90",
+        "",
+        "02:05.000 --> 02:10.000",
+        "#xywh=320,0,160,90",
+        "",
+      ].join("\r\n");
+
+      expect(parseSpriteVtt(vtt)).toEqual([
+        {
+          startTime: 0,
+          endTime: 5,
+          image: "abc_sprite.jpg",
+          x: 0,
+          y: 0,
+          width: 160,
+          height: 90,
+        },
+        {
+          startTime: 5400,
+          endTime: 5405.5,
+          image: "abc_sprite.jpg",
+          x: 160,
+          y: 90,
+          width: 160,
+          height: 90,
+        },
+        {
+          startTime: 125,
+          endTime: 130,
+          image: "",
+          x: 320,
+          y: 0,
+          width: 160,
+          height: 90,
+        },
+      ]);
+    });
+
+    it("skips a cue whose text is not a sprite position", () => {
+      const vtt = [
+        "WEBVTT",
+        "",
+        "00:00:00.000 --> 00:00:05.000",
+        "just a caption",
+        "",
+        "00:00:05.000 --> 00:00:10.000",
+        "sprite.jpg#xywh=0,0,160,90",
+      ].join("\n");
+
+      expect(parseSpriteVtt(vtt).map((cue) => cue.startTime)).toEqual([5]);
+    });
+  });
+
+  describe("fetchSpriteVtt", () => {
+    it("passes the signal and parses the answer", async () => {
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        text: () =>
+          Promise.resolve(
+            "WEBVTT\n\n00:00:00.000 --> 00:00:05.000\ns.jpg#xywh=0,0,10,10\n"
+          ),
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      const controller = new AbortController();
+
+      const cues = await fetchSpriteVtt("/vtt", controller.signal);
+
+      expect(fetchMock).toHaveBeenCalledWith("/vtt", {
+        signal: controller.signal,
+      });
+      expect(cues).toHaveLength(1);
+    });
+
+    it("rejects on an error status", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue({ ok: false, status: 404, statusText: "" })
+      );
+
+      await expect(fetchSpriteVtt("/vtt")).rejects.toThrow("404");
     });
   });
 
@@ -124,6 +227,7 @@ describe("spriteSheet utilities", () => {
       Array.from({ length: count }, (_, i) => ({
         startTime: i * 5,
         endTime: (i + 1) * 5,
+        image: "sprite.jpg",
         x: i * 160,
         y: 0,
         width: 160,
@@ -135,7 +239,7 @@ describe("spriteSheet utilities", () => {
     });
 
     it("returns empty array for null/undefined cues", () => {
-      expect(getEvenlySpacedSprites(null as any)).toEqual([]);
+      expect(getEvenlySpacedSprites(untrusted(null))).toEqual([]);
     });
 
     it("returns single sprite when count is 1", () => {
@@ -171,9 +275,9 @@ describe("spriteSheet utilities", () => {
       const result = getEvenlySpacedSprites(cues, 3);
       expect(result).toHaveLength(3);
       // step = floor(15/3) = 5, indices 0, 5, 10
-      expect(result[0].x).toBe(0);
-      expect(result[1].x).toBe(800); // index 5 * 160
-      expect(result[2].x).toBe(1600); // index 10 * 160
+      expect(must(result[0]).x).toBe(0);
+      expect(must(result[1]).x).toBe(800); // index 5 * 160
+      expect(must(result[2]).x).toBe(1600); // index 10 * 160
     });
 
     it("returns exactly count sprites when cues are divisible", () => {

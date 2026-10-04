@@ -224,7 +224,6 @@ export const createTag = (overrides = {}) => {
     parents: [],
     children: [],
     scene_count: 25,
-    scene_marker_count: 0,
     image_count: 50,
     gallery_count: 5,
     performer_count: 10,
@@ -400,10 +399,7 @@ export const createFilterPreset = (overrides = {}) => {
  * @param {object} options - Pagination options
  * @returns {object}
  */
-export const createPaginatedResponse = (
-  items,
-  { totalCount = null } = {}
-) => {
+export const createPaginatedResponse = (items, { totalCount = null } = {}) => {
   const count = totalCount ?? items.length;
   return {
     count,
@@ -466,7 +462,11 @@ export const createWatchHistoryEntry = (overrides = {}) => {
  */
 export const createPlaylist = (overrides = {}) => {
   const id = overrides.id ?? `playlist-${nextId()}`;
-  const scenes = overrides.scenes ?? [createScene(), createScene(), createScene()];
+  const scenes = overrides.scenes ?? [
+    createScene(),
+    createScene(),
+    createScene(),
+  ];
   return {
     id,
     name: `Playlist ${id}`,

@@ -1,8 +1,31 @@
 import videojs from "video.js";
-import localForage from "localforage";
 
 const levelKey = "volume-level";
 const mutedKey = "volume-muted";
+
+// Storage can be unavailable (a private window, blocked site data): the
+// volume then just isn't remembered
+const logStorageError = (err: unknown) => {
+  console.warn("[Persist Volume] Volume storage failed:", err);
+};
+
+function store(key: string, value: number | boolean) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch (err) {
+    logStorageError(err);
+  }
+}
+
+function load(key: string): unknown {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw === null ? null : (JSON.parse(raw) as unknown);
+  } catch (err) {
+    logStorageError(err);
+    return null;
+  }
+}
 
 class PersistVolumePlugin extends videojs.getPlugin("plugin") {
   enabled: boolean;
@@ -15,8 +38,8 @@ class PersistVolumePlugin extends videojs.getPlugin("plugin") {
 
     player.on("volumechange", () => {
       if (this.enabled) {
-        localForage.setItem(levelKey, player.volume());
-        localForage.setItem(mutedKey, player.muted());
+        store(levelKey, player.volume() as number);
+        store(mutedKey, player.muted() as boolean);
       }
     });
 
@@ -26,17 +49,15 @@ class PersistVolumePlugin extends videojs.getPlugin("plugin") {
   }
 
   ready() {
-    localForage.getItem(levelKey).then((value: any) => {
-      if (value !== null) {
-        this.player.volume(value);
-      }
-    });
+    const level = load(levelKey);
+    if (typeof level === "number") {
+      this.player.volume(level);
+    }
 
-    localForage.getItem(mutedKey).then((value: any) => {
-      if (value !== null) {
-        this.player.muted(value);
-      }
-    });
+    const muted = load(mutedKey);
+    if (typeof muted === "boolean") {
+      this.player.muted(muted);
+    }
   }
 }
 

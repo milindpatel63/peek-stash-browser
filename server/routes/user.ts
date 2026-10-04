@@ -11,9 +11,9 @@ import {
   getAllUsers,
   getAnyUserPermissions,
   getDefaultFilterPresets,
+  getFilterPins,
   getFilterPresets,
   getHiddenEntities,
-  getHiddenEntityIds,
   getRecoveryKey,
   getSetupStatus,
   getUserGroupMemberships,
@@ -23,7 +23,11 @@ import {
   getUserStashInstances,
   hideEntities,
   hideEntity,
+  overwriteFilterPreset,
+  putFilterPins,
   regenerateRecoveryKey,
+  renameFilterPreset,
+  resetFilterPins,
   saveFilterPreset,
   setDefaultFilterPreset,
   syncFromStash,
@@ -60,6 +64,14 @@ router.post("/complete-setup", authenticated(completeSetup));
 // Filter preset routes
 router.get("/filter-presets", authenticated(getFilterPresets));
 router.post("/filter-presets", authenticated(saveFilterPreset));
+router.put(
+  "/filter-presets/:artifactType/:presetId",
+  authenticated(overwriteFilterPreset)
+);
+router.patch(
+  "/filter-presets/:artifactType/:presetId",
+  authenticated(renameFilterPreset)
+);
 router.delete(
   "/filter-presets/:artifactType/:presetId",
   authenticated(deleteFilterPreset)
@@ -68,6 +80,11 @@ router.delete(
 // Default filter preset routes
 router.get("/default-presets", authenticated(getDefaultFilterPresets));
 router.put("/default-preset", authenticated(setDefaultFilterPreset));
+
+// Pinned fields and filters, per list
+router.get("/filter-pins", authenticated(getFilterPins));
+router.put("/filter-pins/:list", authenticated(putFilterPins));
+router.delete("/filter-pins/:list", authenticated(resetFilterPins));
 
 // User's own permissions
 router.get("/permissions", authenticated(getUserPermissions));
@@ -146,8 +163,7 @@ router.delete(
   "/hidden-entities/:entityType/:entityId",
   authenticated(unhideEntity)
 ); // Unhide an entity
-router.get("/hidden-entities", authenticated(getHiddenEntities)); // Get all hidden entities (optionally filtered by type)
-router.get("/hidden-entities/ids", authenticated(getHiddenEntityIds)); // Get hidden entity IDs organized by type
+router.get("/hidden-entities", authenticated(getHiddenEntities)); // One page of hidden entities, with counts per type
 
 // Hide confirmation preference
 router.put("/hide-confirmation", authenticated(updateHideConfirmation)); // Update hide confirmation preference

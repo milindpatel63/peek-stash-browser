@@ -1,7 +1,10 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
+import type { NormalizedScene } from "@peek/shared-types";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { render, screen } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+// Import after mocks
+import SceneCard from "../../../src/components/ui/SceneCard";
 
 // Use vi.hoisted to create mock functions that can be accessed in vi.mock
 const { mockGetSettings } = vi.hoisted(() => ({
@@ -32,7 +35,13 @@ vi.mock("../../../src/hooks/useAuth", () => ({
 
 // Mock SceneCardPreview to avoid its dependencies
 vi.mock("../../../src/components/ui/SceneCardPreview", () => ({
-  default: ({ duration, resolution }: { duration?: number; resolution?: string }) => (
+  default: ({
+    duration,
+    resolution,
+  }: {
+    duration?: number;
+    resolution?: string;
+  }) => (
     <div data-testid="scene-preview">
       {duration && <span>{duration}</span>}
       {resolution && <span>{resolution}</span>}
@@ -40,18 +49,18 @@ vi.mock("../../../src/components/ui/SceneCardPreview", () => ({
   ),
 }));
 
-// Import after mocks
-import SceneCard from "../../../src/components/ui/SceneCard";
-
 describe("SceneCard respects card display settings", () => {
+  // A partial scene: the fields SceneCard shows
   const mockScene = {
     id: "scene-123",
+    instanceId: "inst-1",
     title: "Test Scene Title",
     code: "SCENE-CODE-001",
     paths: { screenshot: "/screenshot.jpg" },
     date: "2024-01-15",
     files: [{ duration: 3600, width: 1920, height: 1080 }],
     rating: 80,
+    rating100: 80,
     favorite: true,
     o_counter: 5,
     play_count: 10,
@@ -59,9 +68,11 @@ describe("SceneCard respects card display settings", () => {
     tags: [{ id: "t1", name: "Tag1" }],
     studio: { id: "s1", name: "Test Studio" },
     details: "This is a test scene description that should be visible.",
-  } as any;
+  } as unknown as NormalizedScene;
 
-  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
   const wrapper = ({ children }: { children: React.ReactNode }) => (
     <QueryClientProvider client={queryClient}>
       <MemoryRouter>{children}</MemoryRouter>
@@ -139,7 +150,9 @@ describe("SceneCard respects card display settings", () => {
       render(<SceneCard scene={mockScene} />, { wrapper });
 
       // Description should NOT appear
-      expect(screen.queryByText(/test scene description/i)).not.toBeInTheDocument();
+      expect(
+        screen.queryByText(/test scene description/i)
+      ).not.toBeInTheDocument();
     });
   });
 
@@ -180,22 +193,26 @@ describe("SceneCard respects card display settings", () => {
   });
 
   describe("rating controls settings", () => {
-    it("passes showRating to BaseCard ratingControlsProps", () => {
-      const { container } = render(<SceneCard scene={mockScene} />, { wrapper });
+    it("shows the rating badge when showRating is on", () => {
+      const { container } = render(<SceneCard scene={mockScene} />, {
+        wrapper,
+      });
 
       // When showRating is true, the rating badge should be present
       // Look for a rating-related element
       expect(container.innerHTML).toMatch(/rating|star|★/i);
     });
 
-    it("passes showFavorite to BaseCard ratingControlsProps", () => {
-      const { container } = render(<SceneCard scene={mockScene} />, { wrapper });
+    it("shows the favorite button when showFavorite is on", () => {
+      const { container } = render(<SceneCard scene={mockScene} />, {
+        wrapper,
+      });
 
       // When showFavorite is true, the favorite button should be present
       expect(container.innerHTML).toMatch(/favorite|heart/i);
     });
 
-    it("passes showOCounter to BaseCard ratingControlsProps", () => {
+    it("shows the O count when showOCounter is on", () => {
       render(<SceneCard scene={mockScene} />, { wrapper });
 
       // When showOCounter is true, the O counter should be present
@@ -212,7 +229,9 @@ describe("SceneCard respects card display settings", () => {
     });
 
     it("always renders image container", () => {
-      const { container } = render(<SceneCard scene={mockScene} />, { wrapper });
+      const { container } = render(<SceneCard scene={mockScene} />, {
+        wrapper,
+      });
 
       // Check for aspect ratio styling (16/9 for scenes)
       const imageContainer = container.querySelector('[style*="aspect-ratio"]');
@@ -238,7 +257,11 @@ describe("SceneCard respects card display settings", () => {
     });
 
     it("handles scene without studio gracefully", () => {
-      const sceneWithoutStudio = { ...mockScene, studio: null, code: "SCENE-CODE-001" };
+      const sceneWithoutStudio = {
+        ...mockScene,
+        studio: null,
+        code: "SCENE-CODE-001",
+      };
 
       render(<SceneCard scene={sceneWithoutStudio} />, { wrapper });
 

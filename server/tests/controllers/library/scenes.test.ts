@@ -1,129 +1,83 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { mockReq, mockRes } from "../../helpers/controllerTestUtils.js";
 import {
-  createMockScene,
-  createMockPerformer,
-  createMockTag,
-  createMockStudio,
-} from "../../helpers/mockDataGenerators.js";
+  afterEach,
+  assert,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
+// ---------------------------------------------------------------------------
+// Imports — after all vi.mock() calls
+// ---------------------------------------------------------------------------
+
+import {
+  addStashUrl,
+  countRecommendedScenes,
+  findRecommendedScenes,
+  findScenes,
+  findSimilarScenes,
+  getRecommendedScenes,
+} from "../../../controllers/library/scenes.js";
+import prisma from "../../../prisma/singleton.js";
+import { resolveAccessibleInstanceId } from "../../../services/EntityAccessService.js";
+import rankingComputeService from "../../../services/RankingComputeService.js";
+import { recommendationService } from "../../../services/RecommendationService.js";
+import { sceneQueryBuilder } from "../../../services/SceneQueryBuilder.js";
+import { stashEntityService } from "../../../services/StashEntityService.js";
+import type { FindRecommendedScenesRequest } from "../../../types/api/index.js";
+import { logger } from "../../../utils/logger.js";
+import { libraryHandler } from "../../../utils/routeHelpers.js";
+import {
+  type Malformed,
+  malformed,
+  reqFor,
+  resFor,
+  testUser,
+} from "../../helpers/controllerTestUtils.js";
+import { objectContaining } from "../../helpers/matchers.js";
+import { createMockScene } from "../../helpers/mockDataGenerators.js";
+import { must } from "../../helpers/must.js";
 
 // ---------------------------------------------------------------------------
 // Mocks — must precede imports of the module under test
 // ---------------------------------------------------------------------------
 
-vi.mock("../../../prisma/singleton.js", () => ({
-  default: {
-    watchHistory: { findMany: vi.fn().mockResolvedValue([]) },
-    sceneRating: { findMany: vi.fn().mockResolvedValue([]) },
-    performerRating: { findMany: vi.fn().mockResolvedValue([]) },
-    studioRating: { findMany: vi.fn().mockResolvedValue([]) },
-    tagRating: { findMany: vi.fn().mockResolvedValue([]) },
-    userEntityRanking: {
-      findMany: vi.fn().mockResolvedValue([]),
-      findFirst: vi.fn().mockResolvedValue(null),
-    },
-  },
-}));
+vi.mock(
+  "../../../prisma/singleton.js",
+  () => import("../../helpers/prismaSingletonMock.js")
+);
 
 vi.mock("../../../services/StashEntityService.js", () => ({
   stashEntityService: {
-    getAllScenes: vi.fn().mockResolvedValue([]),
-    getAllPerformers: vi.fn().mockResolvedValue([]),
     generateSceneStreams: vi.fn().mockReturnValue([]),
+    getPlaybackStreams: vi.fn().mockResolvedValue([]),
     getSimilarSceneCandidates: vi.fn().mockResolvedValue([]),
-    getScenesPaginated: vi.fn().mockResolvedValue({ scenes: [], total: 0 }),
-    getScenesForScoring: vi.fn().mockResolvedValue([]),
-  },
-}));
-
-vi.mock("../../../services/StashInstanceManager.js", () => ({
-  stashInstanceManager: {
-    get: vi.fn(),
-    getDefaultConfig: vi.fn().mockReturnValue({ id: "default" }),
-  },
-}));
-
-vi.mock("../../../services/EntityExclusionHelper.js", () => ({
-  entityExclusionHelper: {
-    filterExcluded: vi.fn().mockImplementation((items: unknown[]) => items),
-    getExcludedIds: vi.fn().mockResolvedValue(new Set()),
-    getExclusionData: vi.fn().mockResolvedValue({
-      globalIds: new Set(),
-      scopedKeys: new Set(),
-    }),
-    isExcluded: vi.fn().mockReturnValue(false),
   },
 }));
 
 vi.mock("../../../services/SceneQueryBuilder.js", () => ({
   sceneQueryBuilder: {
-    execute: vi.fn().mockResolvedValue({ scenes: [], total: 0 }),
-    getByIds: vi.fn().mockResolvedValue({ scenes: [], total: 0 }),
+    execute: vi.fn().mockResolvedValue({ items: [], total: 0 }),
+    getByRefs: vi.fn().mockResolvedValue([]),
+    count: vi.fn().mockResolvedValue(0),
   },
 }));
 
-vi.mock("../../../services/UserInstanceService.js", () => ({
-  getUserAllowedInstanceIds: vi.fn().mockResolvedValue(["default"]),
+vi.mock("../../../services/RecommendationService.js", () => ({
+  recommendationService: {
+    getRankedRefs: vi.fn(),
+  },
+}));
+
+vi.mock("../../../services/EntityAccessService.js", () => ({
+  resolveAccessibleInstanceId: vi.fn().mockResolvedValue("inst-a"),
 }));
 
 vi.mock("../../../services/RankingComputeService.js", () => ({
   default: {
-    getRankings: vi.fn(),
-    getLatestComputation: vi.fn(),
-    recomputeAllRankings: vi.fn().mockResolvedValue(undefined),
+    ensureFresh: vi.fn().mockResolvedValue(undefined),
   },
-}));
-
-vi.mock("../../../services/RecommendationScoringService.js", () => ({
-  buildDerivedWeightsFromScoringData: vi.fn().mockReturnValue({
-    derivedPerformerWeights: new Map(),
-    derivedStudioWeights: new Map(),
-    derivedTagWeights: new Map(),
-  }),
-  buildImplicitWeightsFromRankings: vi.fn().mockReturnValue({
-    implicitPerformerWeights: new Map(),
-    implicitStudioWeights: new Map(),
-    implicitTagWeights: new Map(),
-  }),
-  scoreScoringDataByPreferences: vi.fn().mockReturnValue(0),
-  countUserCriteria: vi.fn().mockReturnValue({
-    favoritePerformers: 0,
-    ratedPerformers: 0,
-    favoriteStudios: 0,
-    ratedStudios: 0,
-    favoriteTags: 0,
-    ratedTags: 0,
-    ratedScenes: 0,
-    favoriteScenes: 0,
-  }),
-  hasAnyCriteria: vi.fn().mockReturnValue(false),
-}));
-
-vi.mock("../../../utils/codecDetection.js", () => ({
-  isSceneStreamable: vi
-    .fn()
-    .mockReturnValue({ isStreamable: true, reasons: [] }),
-}));
-
-vi.mock("../../../utils/hierarchyUtils.js", () => ({
-  expandTagIds: vi
-    .fn()
-    .mockImplementation((ids: string[]) => Promise.resolve(ids)),
-  expandStudioIds: vi
-    .fn()
-    .mockImplementation((ids: string[]) => Promise.resolve(ids)),
-}));
-
-vi.mock("../../../utils/sqlFilterBuilders.js", () => ({
-  parseCompositeFilterValues: vi
-    .fn()
-    .mockImplementation((ids: string[]) => ({
-      parsed: ids.map((id: string) => ({ id, instanceId: undefined })),
-    })),
-}));
-
-vi.mock("../../../utils/entityInstanceId.js", () => ({
-  getEntityInstanceId: vi.fn().mockResolvedValue("default"),
 }));
 
 vi.mock("../../../utils/seededRandom.js", () => ({
@@ -134,7 +88,7 @@ vi.mock("../../../utils/seededRandom.js", () => ({
       randomSeed: undefined,
     })),
   SeededRandom: vi.fn().mockImplementation(() => ({
-    nextInt: vi.fn().mockReturnValue(0),
+    shuffle: vi.fn(<T>(items: T[]) => items),
   })),
   generateDailySeed: vi.fn().mockReturnValue(42),
 }));
@@ -143,16 +97,13 @@ vi.mock("../../../utils/stashUrl.js", () => ({
   buildStashEntityUrl: vi
     .fn()
     .mockImplementation(
-      (_type: string, id: string) => `http://stash/scenes/${id}`
+      (
+        type: string,
+        id: string,
+        _inst: string | undefined,
+        viewer: { role: string } | undefined
+      ) => (viewer?.role === "ADMIN" ? `http://stash/${type}s/${id}` : null)
     ),
-}));
-
-vi.mock("../../../graphql/generated/graphql.js", () => ({
-  OrientationEnum: {
-    Landscape: "LANDSCAPE",
-    Portrait: "PORTRAIT",
-    Square: "SQUARE",
-  },
 }));
 
 vi.mock("../../../utils/logger.js", () => ({
@@ -164,46 +115,13 @@ vi.mock("../../../utils/logger.js", () => ({
   },
 }));
 
-vi.mock("@peek/shared-types/instanceAwareId.js", () => ({
-  coerceEntityRefs: vi
-    .fn()
-    .mockImplementation((ids: string[]) => ids),
-}));
-
-// ---------------------------------------------------------------------------
-// Imports — after all vi.mock() calls
-// ---------------------------------------------------------------------------
-
-import {
-  addStreamabilityInfo,
-  applyQuickSceneFilters,
-  applyExpensiveSceneFilters,
-  sortScenes,
-  mergeScenesWithUserData,
-  findScenes,
-  updateScene,
-  findSimilarScenes,
-  getRecommendedScenes,
-} from "../../../controllers/library/scenes.js";
-import prisma from "../../../prisma/singleton.js";
-import { isSceneStreamable } from "../../../utils/codecDetection.js";
-import { sceneQueryBuilder } from "../../../services/SceneQueryBuilder.js";
-import { stashInstanceManager } from "../../../services/StashInstanceManager.js";
-import { stashEntityService } from "../../../services/StashEntityService.js";
-import { getEntityInstanceId } from "../../../utils/entityInstanceId.js";
-import {
-  hasAnyCriteria,
-  countUserCriteria,
-} from "../../../services/RecommendationScoringService.js";
-
-const mockPrisma = vi.mocked(prisma);
-const mockIsSceneStreamable = vi.mocked(isSceneStreamable);
+const mockPrisma = vi.mocked(prisma, true);
 const mockSceneQueryBuilder = vi.mocked(sceneQueryBuilder);
-const mockStashInstanceManager = vi.mocked(stashInstanceManager);
-const mockGetEntityInstanceId = vi.mocked(getEntityInstanceId);
 const mockStashEntityService = vi.mocked(stashEntityService);
-const mockHasAnyCriteria = vi.mocked(hasAnyCriteria);
-const mockCountUserCriteria = vi.mocked(countUserCriteria);
+const mockResolveInstance = vi.mocked(resolveAccessibleInstanceId);
+const mockLogger = vi.mocked(logger, true);
+const mockRankingService = vi.mocked(rankingComputeService, true);
+const mockRecommendationService = vi.mocked(recommendationService, true);
 
 // ---------------------------------------------------------------------------
 // Test suite
@@ -211,1069 +129,59 @@ const mockCountUserCriteria = vi.mocked(countUserCriteria);
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockPrisma.userEntityRanking.findMany.mockResolvedValue([]);
+  mockPrisma.userEntityRanking.findFirst.mockResolvedValue(null);
 });
 
-// ===== 1. addStreamabilityInfo =====
+// ===== 1. addStashUrl =====
 
-describe("addStreamabilityInfo", () => {
+const ADMIN_VIEWER = { role: "ADMIN" };
+
+describe("addStashUrl", () => {
   it("returns empty array when given empty scenes", () => {
-    expect(addStreamabilityInfo([])).toEqual([]);
+    expect(addStashUrl([], ADMIN_VIEWER)).toEqual([]);
   });
 
-  it("attaches isStreamable, streamabilityReasons, and stashUrl to each scene", () => {
-    mockIsSceneStreamable.mockReturnValue({
-      isStreamable: true,
-      reasons: [],
-    });
-
+  it("gives an admin's scene list item the stashUrl", () => {
     const scenes = [createMockScene({ id: "s1" })];
-    const result = addStreamabilityInfo(scenes);
+    const result = addStashUrl(scenes, ADMIN_VIEWER);
 
     expect(result).toHaveLength(1);
-    expect(result[0]).toMatchObject({
-      isStreamable: true,
-      streamabilityReasons: [],
-      stashUrl: "http://stash/scenes/s1",
-    });
+    expect(result[0]).toMatchObject({ stashUrl: "http://stash/scenes/s1" });
   });
 
-  it("propagates non-streamable info with reasons", () => {
-    mockIsSceneStreamable.mockReturnValue({
-      isStreamable: false,
-      reasons: ["HEVC codec not supported"],
-    });
+  it("gives a regular user no stashUrl", () => {
+    const scenes = [createMockScene({ id: "s1" })];
+    const result = addStashUrl(scenes, { role: "USER" });
 
-    const scenes = [createMockScene({ id: "s2" })];
-    const result = addStreamabilityInfo(scenes);
+    expect(result[0]).toMatchObject({ stashUrl: null });
+  });
 
-    expect(result[0]).toMatchObject({
-      isStreamable: false,
-      streamabilityReasons: ["HEVC codec not supported"],
-    });
+  it("a scene list item carries no isStreamable or streamabilityReasons", () => {
+    const scenes = [createMockScene({ id: "s1" })];
+    const result = addStashUrl(scenes, ADMIN_VIEWER);
+
+    expect(result[0]).not.toHaveProperty("isStreamable");
+    expect(result[0]).not.toHaveProperty("streamabilityReasons");
   });
 
   it("processes multiple scenes independently", () => {
-    mockIsSceneStreamable
-      .mockReturnValueOnce({ isStreamable: true, reasons: [] })
-      .mockReturnValueOnce({
-        isStreamable: false,
-        reasons: ["Unsupported codec"],
-      });
+    const scenes = [createMockScene({ id: "a" }), createMockScene({ id: "b" })];
+    const result = addStashUrl(scenes, ADMIN_VIEWER);
 
-    const scenes = [
-      createMockScene({ id: "a" }),
-      createMockScene({ id: "b" }),
-    ];
-    const result = addStreamabilityInfo(scenes);
-
-    expect(result[0]!.isStreamable).toBe(true);
-    expect(result[1]!.isStreamable).toBe(false);
+    expect(must(result[0]).stashUrl).toBe("http://stash/scenes/a");
+    expect(must(result[1]).stashUrl).toBe("http://stash/scenes/b");
   });
 });
 
-// ===== 2. applyQuickSceneFilters =====
-
-describe("applyQuickSceneFilters", () => {
-  describe("null/undefined filter passthrough", () => {
-    it("returns all scenes when filters is null", async () => {
-      const scenes = [createMockScene({ id: "1" })];
-      expect(await applyQuickSceneFilters(scenes, null)).toEqual(scenes);
-    });
-
-    it("returns all scenes when filters is undefined", async () => {
-      const scenes = [createMockScene({ id: "1" })];
-      expect(await applyQuickSceneFilters(scenes, undefined)).toEqual(scenes);
-    });
-  });
-
-  describe("ids filter", () => {
-    it("filters scenes to matching ids (raw array format)", async () => {
-      const scenes = [
-        createMockScene({ id: "1" }),
-        createMockScene({ id: "2" }),
-        createMockScene({ id: "3" }),
-      ];
-      // The ids filter in applyQuickSceneFilters checks Array.isArray(filters.ids),
-      // so it must be passed as a raw array, not EntityRefFilter shape
-      const result = await applyQuickSceneFilters(scenes, {
-        ids: ["1", "3"] as any,
-      });
-      expect(result.map((s) => s.id)).toEqual(["1", "3"]);
-    });
-
-    it("skips ids filter when passed as EntityRefFilter shape (not an array)", async () => {
-      const scenes = [
-        createMockScene({ id: "1" }),
-        createMockScene({ id: "2" }),
-      ];
-      // EntityRefFilter { value, modifier } is NOT an array, so the filter is skipped
-      const result = await applyQuickSceneFilters(scenes, {
-        ids: { value: ["1"] as any, modifier: "INCLUDES" },
-      });
-      expect(result).toHaveLength(2); // All scenes returned — filter not applied
-    });
-  });
-
-  describe("performers filter", () => {
-    const p1 = createMockPerformer({ id: "p1" });
-    const p2 = createMockPerformer({ id: "p2" });
-    const p3 = createMockPerformer({ id: "p3" });
-    const scenes = [
-      createMockScene({ id: "s1", performers: [p1, p2] }),
-      createMockScene({ id: "s2", performers: [p2, p3] }),
-      createMockScene({ id: "s3", performers: [p3] }),
-    ];
-
-    it("INCLUDES: returns scenes with any matching performer", async () => {
-      const result = await applyQuickSceneFilters(scenes, {
-        performers: { value: ["p1"] as any, modifier: "INCLUDES" },
-      });
-      expect(result.map((s) => s.id)).toEqual(["s1"]);
-    });
-
-    it("INCLUDES_ALL: returns only scenes containing all listed performers", async () => {
-      const result = await applyQuickSceneFilters(scenes, {
-        performers: { value: ["p2", "p3"] as any, modifier: "INCLUDES_ALL" },
-      });
-      expect(result.map((s) => s.id)).toEqual(["s2"]);
-    });
-
-    it("EXCLUDES: returns scenes without any listed performers", async () => {
-      const result = await applyQuickSceneFilters(scenes, {
-        performers: { value: ["p1", "p2"] as any, modifier: "EXCLUDES" },
-      });
-      expect(result.map((s) => s.id)).toEqual(["s3"]);
-    });
-  });
-
-  describe("tags filter", () => {
-    const t1 = createMockTag({ id: "t1" });
-    const t2 = createMockTag({ id: "t2" });
-    const t3 = createMockTag({ id: "t3" });
-
-    const scenes = [
-      createMockScene({ id: "s1", tags: [t1, t2] }),
-      createMockScene({ id: "s2", tags: [t2, t3] }),
-      createMockScene({ id: "s3", tags: [t3] }),
-    ];
-
-    it("INCLUDES: returns scenes with any matching tag", async () => {
-      const result = await applyQuickSceneFilters(scenes, {
-        tags: { value: ["t1"] as any, modifier: "INCLUDES" },
-      });
-      expect(result.map((s) => s.id)).toEqual(["s1"]);
-    });
-
-    it("INCLUDES_ALL: returns scenes with all matching tags", async () => {
-      const result = await applyQuickSceneFilters(scenes, {
-        tags: { value: ["t2", "t3"] as any, modifier: "INCLUDES_ALL" },
-      });
-      expect(result.map((s) => s.id)).toEqual(["s2"]);
-    });
-
-    it("EXCLUDES: returns scenes without any listed tags", async () => {
-      const result = await applyQuickSceneFilters(scenes, {
-        tags: { value: ["t1", "t2"] as any, modifier: "EXCLUDES" },
-      });
-      expect(result.map((s) => s.id)).toEqual(["s3"]);
-    });
-  });
-
-  describe("studios filter", () => {
-    const studio1 = createMockStudio({ id: "st1" });
-    const studio2 = createMockStudio({ id: "st2" });
-
-    const scenes = [
-      createMockScene({ id: "s1", studio: studio1 }),
-      createMockScene({ id: "s2", studio: studio2 }),
-      createMockScene({ id: "s3", studio: null }),
-    ];
-
-    it("INCLUDES: returns scenes with matching studio", async () => {
-      const result = await applyQuickSceneFilters(scenes, {
-        studios: { value: ["st1"] as any, modifier: "INCLUDES" },
-      });
-      expect(result.map((s) => s.id)).toEqual(["s1"]);
-    });
-
-    it("EXCLUDES: returns scenes without matching studio (null studio passes)", async () => {
-      const result = await applyQuickSceneFilters(scenes, {
-        studios: { value: ["st1"] as any, modifier: "EXCLUDES" },
-      });
-      expect(result.map((s) => s.id)).toEqual(["s2", "s3"]);
-    });
-  });
-
-  describe("groups filter", () => {
-    const scenes = [
-      createMockScene({
-        id: "s1",
-        groups: [{ id: "g1", instanceId: "default", name: "G1", front_image_path: null, back_image_path: null, scene_index: 0 }] as any,
-      }),
-      createMockScene({
-        id: "s2",
-        groups: [
-          { id: "g1", instanceId: "default", name: "G1", front_image_path: null, back_image_path: null, scene_index: 0 },
-          { id: "g2", instanceId: "default", name: "G2", front_image_path: null, back_image_path: null, scene_index: 1 },
-        ] as any,
-      }),
-      createMockScene({ id: "s3", groups: [] }),
-    ];
-
-    it("INCLUDES: returns scenes in any listed group", async () => {
-      const result = await applyQuickSceneFilters(scenes, {
-        groups: { value: ["g2"] as any, modifier: "INCLUDES" },
-      });
-      expect(result.map((s) => s.id)).toEqual(["s2"]);
-    });
-
-    it("INCLUDES_ALL: returns scenes in all listed groups", async () => {
-      const result = await applyQuickSceneFilters(scenes, {
-        groups: { value: ["g1", "g2"] as any, modifier: "INCLUDES_ALL" },
-      });
-      expect(result.map((s) => s.id)).toEqual(["s2"]);
-    });
-
-    it("EXCLUDES: returns scenes not in any listed group", async () => {
-      const result = await applyQuickSceneFilters(scenes, {
-        groups: { value: ["g1"] as any, modifier: "EXCLUDES" },
-      });
-      expect(result.map((s) => s.id)).toEqual(["s3"]);
-    });
-  });
-
-  describe("bitrate filter", () => {
-    const scenes = [
-      createMockScene({
-        id: "low",
-        files: [{ path: "/a.mp4", duration: 100, video_codec: "h264", audio_codec: "aac", width: 1920, height: 1080, frame_rate: 30, bit_rate: 1_000_000, size: 100 }],
-      }),
-      createMockScene({
-        id: "mid",
-        files: [{ path: "/b.mp4", duration: 100, video_codec: "h264", audio_codec: "aac", width: 1920, height: 1080, frame_rate: 30, bit_rate: 5_000_000, size: 100 }],
-      }),
-      createMockScene({
-        id: "high",
-        files: [{ path: "/c.mp4", duration: 100, video_codec: "h264", audio_codec: "aac", width: 1920, height: 1080, frame_rate: 30, bit_rate: 10_000_000, size: 100 }],
-      }),
-    ];
-
-    it("GREATER_THAN", async () => {
-      const result = await applyQuickSceneFilters(scenes, {
-        bitrate: { modifier: "GREATER_THAN", value: 5_000_000 },
-      } as any);
-      expect(result.map((s) => s.id)).toEqual(["high"]);
-    });
-
-    it("LESS_THAN", async () => {
-      const result = await applyQuickSceneFilters(scenes, {
-        bitrate: { modifier: "LESS_THAN", value: 5_000_000 },
-      } as any);
-      expect(result.map((s) => s.id)).toEqual(["low"]);
-    });
-
-    it("EQUALS", async () => {
-      const result = await applyQuickSceneFilters(scenes, {
-        bitrate: { modifier: "EQUALS", value: 5_000_000 },
-      } as any);
-      expect(result.map((s) => s.id)).toEqual(["mid"]);
-    });
-
-    it("BETWEEN", async () => {
-      const result = await applyQuickSceneFilters(scenes, {
-        bitrate: { modifier: "BETWEEN", value: 2_000_000, value2: 8_000_000 },
-      } as any);
-      expect(result.map((s) => s.id)).toEqual(["mid"]);
-    });
-  });
-
-  describe("duration filter", () => {
-    const scenes = [
-      createMockScene({
-        id: "short",
-        files: [{ path: "/a.mp4", duration: 60, video_codec: "h264", audio_codec: "aac", width: 1920, height: 1080, frame_rate: 30, bit_rate: 5_000_000, size: 100 }],
-      }),
-      createMockScene({
-        id: "long",
-        files: [{ path: "/b.mp4", duration: 3600, video_codec: "h264", audio_codec: "aac", width: 1920, height: 1080, frame_rate: 30, bit_rate: 5_000_000, size: 100 }],
-      }),
-    ];
-
-    it("GREATER_THAN filters by duration", async () => {
-      const result = await applyQuickSceneFilters(scenes, {
-        duration: { modifier: "GREATER_THAN", value: 600 },
-      } as any);
-      expect(result.map((s) => s.id)).toEqual(["long"]);
-    });
-  });
-
-  describe("created_at date filter", () => {
-    const scenes = [
-      createMockScene({ id: "old", created_at: "2024-01-01T00:00:00Z" }),
-      createMockScene({ id: "new", created_at: "2025-06-15T00:00:00Z" }),
-    ];
-
-    it("GREATER_THAN filters by date", async () => {
-      const result = await applyQuickSceneFilters(scenes, {
-        created_at: { modifier: "GREATER_THAN", value: "2025-01-01T00:00:00Z" },
-      } as any);
-      expect(result.map((s) => s.id)).toEqual(["new"]);
-    });
-
-    it("BETWEEN filters by date range", async () => {
-      const result = await applyQuickSceneFilters(scenes, {
-        created_at: {
-          modifier: "BETWEEN",
-          value: "2023-01-01T00:00:00Z",
-          value2: "2024-06-01T00:00:00Z",
-        },
-      } as any);
-      expect(result.map((s) => s.id)).toEqual(["old"]);
-    });
-  });
-
-  describe("performer_count filter", () => {
-    const scenes = [
-      createMockScene({ id: "solo", performers: [createMockPerformer({ id: "p1" })] }),
-      createMockScene({ id: "trio", performers: [createMockPerformer({ id: "p1" }), createMockPerformer({ id: "p2" }), createMockPerformer({ id: "p3" })] }),
-    ];
-
-    it("EQUALS filters by exact performer count", async () => {
-      const result = await applyQuickSceneFilters(scenes, {
-        performer_count: { modifier: "EQUALS", value: 3 },
-      } as any);
-      expect(result.map((s) => s.id)).toEqual(["trio"]);
-    });
-  });
-
-  describe("framerate filter", () => {
-    const scenes = [
-      createMockScene({
-        id: "30fps",
-        files: [{ path: "/a.mp4", duration: 100, video_codec: "h264", audio_codec: "aac", width: 1920, height: 1080, frame_rate: 30, bit_rate: 5_000_000, size: 100 }],
-      }),
-      createMockScene({
-        id: "60fps",
-        files: [{ path: "/b.mp4", duration: 100, video_codec: "h264", audio_codec: "aac", width: 1920, height: 1080, frame_rate: 60, bit_rate: 5_000_000, size: 100 }],
-      }),
-    ];
-
-    it("GREATER_THAN filters by framerate", async () => {
-      const result = await applyQuickSceneFilters(scenes, {
-        framerate: { modifier: "GREATER_THAN", value: 30 },
-      } as any);
-      expect(result.map((s) => s.id)).toEqual(["60fps"]);
-    });
-  });
-
-  describe("orientation filter", () => {
-    const scenes = [
-      createMockScene({
-        id: "landscape",
-        files: [{ path: "/a.mp4", duration: 100, video_codec: "h264", audio_codec: "aac", width: 1920, height: 1080, frame_rate: 30, bit_rate: 5_000_000, size: 100 }],
-      }),
-      createMockScene({
-        id: "portrait",
-        files: [{ path: "/b.mp4", duration: 100, video_codec: "h264", audio_codec: "aac", width: 1080, height: 1920, frame_rate: 30, bit_rate: 5_000_000, size: 100 }],
-      }),
-      createMockScene({
-        id: "square",
-        files: [{ path: "/c.mp4", duration: 100, video_codec: "h264", audio_codec: "aac", width: 1080, height: 1080, frame_rate: 30, bit_rate: 5_000_000, size: 100 }],
-      }),
-    ];
-
-    it("filters landscape scenes", async () => {
-      const result = await applyQuickSceneFilters(scenes, {
-        orientation: { value: ["LANDSCAPE"] },
-      } as any);
-      expect(result.map((s) => s.id)).toEqual(["landscape"]);
-    });
-
-    it("filters portrait scenes", async () => {
-      const result = await applyQuickSceneFilters(scenes, {
-        orientation: { value: ["PORTRAIT"] },
-      } as any);
-      expect(result.map((s) => s.id)).toEqual(["portrait"]);
-    });
-
-    it("filters multiple orientations", async () => {
-      const result = await applyQuickSceneFilters(scenes, {
-        orientation: { value: ["LANDSCAPE", "SQUARE"] },
-      } as any);
-      expect(result.map((s) => s.id)).toEqual(["landscape", "square"]);
-    });
-  });
-
-  describe("resolution filter", () => {
-    const scenes = [
-      createMockScene({
-        id: "720p",
-        files: [{ path: "/a.mp4", duration: 100, video_codec: "h264", audio_codec: "aac", width: 1280, height: 720, frame_rate: 30, bit_rate: 5_000_000, size: 100 }],
-      }),
-      createMockScene({
-        id: "1080p",
-        files: [{ path: "/b.mp4", duration: 100, video_codec: "h264", audio_codec: "aac", width: 1920, height: 1080, frame_rate: 30, bit_rate: 5_000_000, size: 100 }],
-      }),
-      createMockScene({
-        id: "4k",
-        files: [{ path: "/c.mp4", duration: 100, video_codec: "h264", audio_codec: "aac", width: 3840, height: 2160, frame_rate: 30, bit_rate: 5_000_000, size: 100 }],
-      }),
-    ];
-
-    it("EQUALS filters by resolution height", async () => {
-      const result = await applyQuickSceneFilters(scenes, {
-        resolution: { value: "FULL_HD", modifier: "EQUALS" },
-      } as any);
-      expect(result.map((s) => s.id)).toEqual(["1080p"]);
-    });
-
-    it("GREATER_THAN filters by resolution height", async () => {
-      const result = await applyQuickSceneFilters(scenes, {
-        resolution: { value: "FULL_HD", modifier: "GREATER_THAN" },
-      } as any);
-      expect(result.map((s) => s.id)).toEqual(["4k"]);
-    });
-  });
-
-  describe("title filter", () => {
-    const scenes = [
-      createMockScene({ id: "s1", title: "Beach Party" }),
-      createMockScene({ id: "s2", title: "Mountain Hike" }),
-      createMockScene({ id: "s3", title: "Beach Sunset" }),
-    ];
-
-    it("INCLUDES: case-insensitive substring match", async () => {
-      const result = await applyQuickSceneFilters(scenes, {
-        title: { value: "beach", modifier: "INCLUDES" },
-      } as any);
-      expect(result.map((s) => s.id)).toEqual(["s1", "s3"]);
-    });
-
-    it("EXCLUDES: excludes substring matches", async () => {
-      const result = await applyQuickSceneFilters(scenes, {
-        title: { value: "beach", modifier: "EXCLUDES" },
-      } as any);
-      expect(result.map((s) => s.id)).toEqual(["s2"]);
-    });
-
-    it("EQUALS: exact case-insensitive match", async () => {
-      const result = await applyQuickSceneFilters(scenes, {
-        title: { value: "mountain hike", modifier: "EQUALS" },
-      } as any);
-      expect(result.map((s) => s.id)).toEqual(["s2"]);
-    });
-  });
-
-  describe("details filter", () => {
-    const scenes = [
-      createMockScene({ id: "s1", details: "A fun day at the beach" }),
-      createMockScene({ id: "s2", details: null }),
-    ];
-
-    it("INCLUDES: matches against details field", async () => {
-      const result = await applyQuickSceneFilters(scenes, {
-        details: { value: "beach", modifier: "INCLUDES" },
-      } as any);
-      expect(result.map((s) => s.id)).toEqual(["s1"]);
-    });
-  });
-
-  describe("video_codec filter", () => {
-    const scenes = [
-      createMockScene({
-        id: "h264",
-        files: [{ path: "/a.mp4", duration: 100, video_codec: "h264", audio_codec: "aac", width: 1920, height: 1080, frame_rate: 30, bit_rate: 5_000_000, size: 100 }],
-      }),
-      createMockScene({
-        id: "hevc",
-        files: [{ path: "/b.mp4", duration: 100, video_codec: "hevc", audio_codec: "aac", width: 1920, height: 1080, frame_rate: 30, bit_rate: 5_000_000, size: 100 }],
-      }),
-    ];
-
-    it("INCLUDES: filters by video codec", async () => {
-      const result = await applyQuickSceneFilters(scenes, {
-        video_codec: { value: "h264", modifier: "INCLUDES" },
-      } as any);
-      expect(result.map((s) => s.id)).toEqual(["h264"]);
-    });
-  });
-
-  describe("audio_codec filter", () => {
-    const scenes = [
-      createMockScene({
-        id: "aac",
-        files: [{ path: "/a.mp4", duration: 100, video_codec: "h264", audio_codec: "aac", width: 1920, height: 1080, frame_rate: 30, bit_rate: 5_000_000, size: 100 }],
-      }),
-      createMockScene({
-        id: "opus",
-        files: [{ path: "/b.mp4", duration: 100, video_codec: "h264", audio_codec: "opus", width: 1920, height: 1080, frame_rate: 30, bit_rate: 5_000_000, size: 100 }],
-      }),
-    ];
-
-    it("EXCLUDES: filters out matching audio codec", async () => {
-      const result = await applyQuickSceneFilters(scenes, {
-        audio_codec: { value: "aac", modifier: "EXCLUDES" },
-      } as any);
-      expect(result.map((s) => s.id)).toEqual(["opus"]);
-    });
-  });
-});
-
-// ===== 3. applyExpensiveSceneFilters =====
-
-describe("applyExpensiveSceneFilters", () => {
-  it("returns all scenes when filters is null", () => {
-    const scenes = [createMockScene({ id: "1" })];
-    expect(applyExpensiveSceneFilters(scenes, null)).toEqual(scenes);
-  });
-
-  it("returns all scenes when filters is undefined", () => {
-    const scenes = [createMockScene({ id: "1" })];
-    expect(applyExpensiveSceneFilters(scenes, undefined)).toEqual(scenes);
-  });
-
-  describe("favorite filter", () => {
-    const scenes = [
-      createMockScene({ id: "fav", favorite: true }),
-      createMockScene({ id: "nofav", favorite: false }),
-    ];
-
-    it("filters to favorites only", () => {
-      const result = applyExpensiveSceneFilters(scenes, { favorite: true });
-      expect(result.map((s) => s.id)).toEqual(["fav"]);
-    });
-
-    it("filters to non-favorites", () => {
-      const result = applyExpensiveSceneFilters(scenes, { favorite: false });
-      expect(result.map((s) => s.id)).toEqual(["nofav"]);
-    });
-  });
-
-  describe("rating100 filter — all modifiers", () => {
-    const scenes = [
-      createMockScene({ id: "low", rating100: 20 }),
-      createMockScene({ id: "mid", rating100: 60 }),
-      createMockScene({ id: "high", rating100: 90 }),
-      createMockScene({ id: "none", rating100: null }),
-    ];
-
-    it("GREATER_THAN", () => {
-      const result = applyExpensiveSceneFilters(scenes, {
-        rating100: { modifier: "GREATER_THAN", value: 60 },
-      } as any);
-      expect(result.map((s) => s.id)).toEqual(["high"]);
-    });
-
-    it("LESS_THAN", () => {
-      const result = applyExpensiveSceneFilters(scenes, {
-        rating100: { modifier: "LESS_THAN", value: 60 },
-      } as any);
-      expect(result.map((s) => s.id)).toEqual(["low", "none"]);
-    });
-
-    it("EQUALS", () => {
-      const result = applyExpensiveSceneFilters(scenes, {
-        rating100: { modifier: "EQUALS", value: 60 },
-      } as any);
-      expect(result.map((s) => s.id)).toEqual(["mid"]);
-    });
-
-    it("NOT_EQUALS", () => {
-      const result = applyExpensiveSceneFilters(scenes, {
-        rating100: { modifier: "NOT_EQUALS", value: 60 },
-      } as any);
-      expect(result.map((s) => s.id)).toEqual(["low", "high", "none"]);
-    });
-
-    it("BETWEEN", () => {
-      const result = applyExpensiveSceneFilters(scenes, {
-        rating100: { modifier: "BETWEEN", value: 20, value2: 70 },
-      } as any);
-      expect(result.map((s) => s.id)).toEqual(["low", "mid"]);
-    });
-  });
-
-  describe("o_counter filter — representative modifiers", () => {
-    const scenes = [
-      createMockScene({ id: "zero", o_counter: 0 }),
-      createMockScene({ id: "some", o_counter: 5 }),
-      createMockScene({ id: "many", o_counter: 20 }),
-    ];
-
-    it("GREATER_THAN", () => {
-      const result = applyExpensiveSceneFilters(scenes, {
-        o_counter: { modifier: "GREATER_THAN", value: 5 },
-      } as any);
-      expect(result.map((s) => s.id)).toEqual(["many"]);
-    });
-
-    it("BETWEEN", () => {
-      const result = applyExpensiveSceneFilters(scenes, {
-        o_counter: { modifier: "BETWEEN", value: 1, value2: 10 },
-      } as any);
-      expect(result.map((s) => s.id)).toEqual(["some"]);
-    });
-  });
-
-  describe("play_count filter — representative modifiers", () => {
-    const scenes = [
-      createMockScene({ id: "unwatched", play_count: 0 }),
-      createMockScene({ id: "watched", play_count: 10 }),
-    ];
-
-    it("EQUALS", () => {
-      const result = applyExpensiveSceneFilters(scenes, {
-        play_count: { modifier: "EQUALS", value: 0 },
-      } as any);
-      expect(result.map((s) => s.id)).toEqual(["unwatched"]);
-    });
-  });
-
-  describe("play_duration filter", () => {
-    const scenes = [
-      createMockScene({ id: "short", play_duration: 60 }),
-      createMockScene({ id: "long", play_duration: 3600 }),
-    ];
-
-    it("GREATER_THAN", () => {
-      const result = applyExpensiveSceneFilters(scenes, {
-        play_duration: { modifier: "GREATER_THAN", value: 600 },
-      } as any);
-      expect(result.map((s) => s.id)).toEqual(["long"]);
-    });
-  });
-
-  describe("last_played_at date filter", () => {
-    const scenes = [
-      createMockScene({ id: "recent", last_played_at: "2025-06-01T00:00:00Z" }),
-      createMockScene({ id: "old", last_played_at: "2024-01-01T00:00:00Z" }),
-      createMockScene({ id: "never", last_played_at: null }),
-    ];
-
-    it("GREATER_THAN: excludes null and old dates", () => {
-      const result = applyExpensiveSceneFilters(scenes, {
-        last_played_at: { modifier: "GREATER_THAN", value: "2025-01-01T00:00:00Z" },
-      } as any);
-      expect(result.map((s) => s.id)).toEqual(["recent"]);
-    });
-  });
-
-  describe("last_o_at date filter", () => {
-    const scenes = [
-      createMockScene({ id: "has_o", last_o_at: "2025-06-01T00:00:00Z" }),
-      createMockScene({ id: "no_o", last_o_at: null }),
-    ];
-
-    it("GREATER_THAN: filters by last_o_at", () => {
-      const result = applyExpensiveSceneFilters(scenes, {
-        last_o_at: { modifier: "GREATER_THAN", value: "2025-01-01T00:00:00Z" },
-      } as any);
-      expect(result.map((s) => s.id)).toEqual(["has_o"]);
-    });
-  });
-
-  describe("performer_favorite filter", () => {
-    it("returns scenes that have at least one favorite performer", () => {
-      const scenes = [
-        createMockScene({
-          id: "s1",
-          performers: [createMockPerformer({ id: "p1", favorite: true })],
-        }),
-        createMockScene({
-          id: "s2",
-          performers: [createMockPerformer({ id: "p2", favorite: false })],
-        }),
-      ];
-      const result = applyExpensiveSceneFilters(scenes, {
-        performer_favorite: true,
-      });
-      expect(result.map((s) => s.id)).toEqual(["s1"]);
-    });
-  });
-
-  describe("studio_favorite filter", () => {
-    it("returns scenes with a favorite studio", () => {
-      const scenes = [
-        createMockScene({
-          id: "s1",
-          studio: createMockStudio({ id: "st1", favorite: true }),
-        }),
-        createMockScene({
-          id: "s2",
-          studio: createMockStudio({ id: "st2", favorite: false }),
-        }),
-        createMockScene({ id: "s3", studio: null }),
-      ];
-      const result = applyExpensiveSceneFilters(scenes, {
-        studio_favorite: true,
-      });
-      expect(result.map((s) => s.id)).toEqual(["s1"]);
-    });
-  });
-
-  describe("tag_favorite filter", () => {
-    it("returns scenes with at least one favorite tag", () => {
-      const scenes = [
-        createMockScene({
-          id: "s1",
-          tags: [createMockTag({ id: "t1", favorite: true })],
-        }),
-        createMockScene({
-          id: "s2",
-          tags: [createMockTag({ id: "t2", favorite: false })],
-        }),
-      ];
-      const result = applyExpensiveSceneFilters(scenes, {
-        tag_favorite: true,
-      });
-      expect(result.map((s) => s.id)).toEqual(["s1"]);
-    });
-  });
-});
-
-// ===== 4. sortScenes =====
-
-describe("sortScenes", () => {
-  it("sorts by title ASC alphabetically", () => {
-    const scenes = [
-      createMockScene({ id: "1", title: "Zebra" }),
-      createMockScene({ id: "2", title: "Apple" }),
-      createMockScene({ id: "3", title: "Mango" }),
-    ];
-    const result = sortScenes(scenes, "title", "ASC");
-    expect(result.map((s) => s.title)).toEqual(["Apple", "Mango", "Zebra"]);
-  });
-
-  it("sorts by title DESC", () => {
-    const scenes = [
-      createMockScene({ id: "1", title: "Apple" }),
-      createMockScene({ id: "2", title: "Zebra" }),
-    ];
-    const result = sortScenes(scenes, "title", "DESC");
-    expect(result.map((s) => s.title)).toEqual(["Zebra", "Apple"]);
-  });
-
-  it("sorts by created_at DESC (newest first)", () => {
-    const scenes = [
-      createMockScene({ id: "old", created_at: "2024-01-01T00:00:00Z" }),
-      createMockScene({ id: "new", created_at: "2025-06-01T00:00:00Z" }),
-    ];
-    const result = sortScenes(scenes, "created_at", "DESC");
-    expect(result.map((s) => s.id)).toEqual(["new", "old"]);
-  });
-
-  it("sorts by date ASC", () => {
-    const scenes = [
-      createMockScene({ id: "2", date: "2025-06-01" }),
-      createMockScene({ id: "1", date: "2024-01-01" }),
-    ];
-    const result = sortScenes(scenes, "date", "ASC");
-    expect(result.map((s) => s.id)).toEqual(["1", "2"]);
-  });
-
-  it("sorts by rating100 DESC", () => {
-    const scenes = [
-      createMockScene({ id: "low", rating100: 20 }),
-      createMockScene({ id: "high", rating100: 90 }),
-      createMockScene({ id: "mid", rating100: 60 }),
-    ];
-    const result = sortScenes(scenes, "rating100", "DESC");
-    expect(result.map((s) => s.id)).toEqual(["high", "mid", "low"]);
-  });
-
-  it("sorts by o_counter DESC", () => {
-    const scenes = [
-      createMockScene({ id: "low", o_counter: 1 }),
-      createMockScene({ id: "high", o_counter: 100 }),
-    ];
-    const result = sortScenes(scenes, "o_counter", "DESC");
-    expect(result.map((s) => s.id)).toEqual(["high", "low"]);
-  });
-
-  it("sorts by play_count ASC", () => {
-    const scenes = [
-      createMockScene({ id: "more", play_count: 50 }),
-      createMockScene({ id: "less", play_count: 5 }),
-    ];
-    const result = sortScenes(scenes, "play_count", "ASC");
-    expect(result.map((s) => s.id)).toEqual(["less", "more"]);
-  });
-
-  it("sorts by bitrate (file field)", () => {
-    const scenes = [
-      createMockScene({
-        id: "low",
-        files: [{ path: "/a.mp4", duration: 100, video_codec: "h264", audio_codec: "aac", width: 1920, height: 1080, frame_rate: 30, bit_rate: 1_000_000, size: 100 }],
-      }),
-      createMockScene({
-        id: "high",
-        files: [{ path: "/b.mp4", duration: 100, video_codec: "h264", audio_codec: "aac", width: 1920, height: 1080, frame_rate: 30, bit_rate: 10_000_000, size: 100 }],
-      }),
-    ];
-    const result = sortScenes(scenes, "bitrate", "DESC");
-    expect(result.map((s) => s.id)).toEqual(["high", "low"]);
-  });
-
-  it("sorts by duration (file field)", () => {
-    const scenes = [
-      createMockScene({
-        id: "short",
-        files: [{ path: "/a.mp4", duration: 60, video_codec: "h264", audio_codec: "aac", width: 1920, height: 1080, frame_rate: 30, bit_rate: 5_000_000, size: 100 }],
-      }),
-      createMockScene({
-        id: "long",
-        files: [{ path: "/b.mp4", duration: 7200, video_codec: "h264", audio_codec: "aac", width: 1920, height: 1080, frame_rate: 30, bit_rate: 5_000_000, size: 100 }],
-      }),
-    ];
-    const result = sortScenes(scenes, "duration", "ASC");
-    expect(result.map((s) => s.id)).toEqual(["short", "long"]);
-  });
-
-  it("sorts by performer_count", () => {
-    const scenes = [
-      createMockScene({
-        id: "solo",
-        performers: [createMockPerformer({ id: "p1" })],
-      }),
-      createMockScene({
-        id: "trio",
-        performers: [
-          createMockPerformer({ id: "p1" }),
-          createMockPerformer({ id: "p2" }),
-          createMockPerformer({ id: "p3" }),
-        ],
-      }),
-    ];
-    const result = sortScenes(scenes, "performer_count", "DESC");
-    expect(result.map((s) => s.id)).toEqual(["trio", "solo"]);
-  });
-
-  it("sorts by tag_count", () => {
-    const scenes = [
-      createMockScene({
-        id: "few",
-        tags: [createMockTag({ id: "t1" })],
-      }),
-      createMockScene({
-        id: "many",
-        tags: [createMockTag({ id: "t1" }), createMockTag({ id: "t2" }), createMockTag({ id: "t3" })],
-      }),
-    ];
-    const result = sortScenes(scenes, "tag_count", "ASC");
-    expect(result.map((s) => s.id)).toEqual(["few", "many"]);
-  });
-
-  it("uses secondary sort by title when primary values are equal", () => {
-    const scenes = [
-      createMockScene({ id: "b", title: "Bravo", rating100: 80 }),
-      createMockScene({ id: "a", title: "Alpha", rating100: 80 }),
-    ];
-    const result = sortScenes(scenes, "rating100", "DESC");
-    expect(result.map((s) => s.title)).toEqual(["Alpha", "Bravo"]);
-  });
-
-  it("sorts by scene_index with groupId context", () => {
-    const scenes = [
-      createMockScene({
-        id: "s1",
-        title: "First",
-        groups: [{ id: "g1", instanceId: "default", name: "G1", front_image_path: null, back_image_path: null, scene_index: 2 }] as any,
-      }),
-      createMockScene({
-        id: "s2",
-        title: "Second",
-        groups: [{ id: "g1", instanceId: "default", name: "G1", front_image_path: null, back_image_path: null, scene_index: 0 }] as any,
-      }),
-    ];
-    const result = sortScenes(scenes, "scene_index", "ASC", 0 as any);
-    // Without matching groupId, both get 999999, so secondary sort by title
-    // Let's test with matching groupId:
-    const result2 = sortScenes(scenes, "scene_index", "ASC", "g1" as any);
-    expect(result2.map((s) => s.id)).toEqual(["s2", "s1"]);
-  });
-
-  it("does not mutate the original array", () => {
-    const scenes = [
-      createMockScene({ id: "2", title: "B" }),
-      createMockScene({ id: "1", title: "A" }),
-    ];
-    const original = [...scenes];
-    sortScenes(scenes, "title", "ASC");
-    expect(scenes.map((s) => s.id)).toEqual(original.map((s) => s.id));
-  });
-});
-
-// ===== 5. mergeScenesWithUserData =====
-
-describe("mergeScenesWithUserData", () => {
-  it("merges watch history into scenes", async () => {
-    const scenes = [createMockScene({ id: "s1", instanceId: "inst1" })];
-    mockPrisma.watchHistory.findMany.mockResolvedValue([
-      {
-        id: 1,
-        userId: 1,
-        sceneId: "s1",
-        instanceId: "inst1",
-        oCount: 3,
-        playCount: 10,
-        playDuration: 5000,
-        resumeTime: 120,
-        playHistory: JSON.stringify(["2025-06-01T00:00:00Z"]),
-        oHistory: JSON.stringify(["2025-05-01T00:00:00Z"]),
-        lastPlayedAt: new Date("2025-06-01"),
-        lastOAt: new Date("2025-05-01"),
-        updatedAt: new Date(),
-      },
-    ] as any);
-    mockPrisma.sceneRating.findMany.mockResolvedValue([]);
-    mockPrisma.performerRating.findMany.mockResolvedValue([]);
-    mockPrisma.studioRating.findMany.mockResolvedValue([]);
-    mockPrisma.tagRating.findMany.mockResolvedValue([]);
-
-    const result = await mergeScenesWithUserData(scenes, 1);
-    expect(result[0]).toMatchObject({
-      o_counter: 3,
-      play_count: 10,
-      play_duration: 5000,
-      resume_time: 120,
-    });
-  });
-
-  it("merges scene ratings (rating100 and favorite)", async () => {
-    const scenes = [createMockScene({ id: "s1", instanceId: "inst1" })];
-    mockPrisma.watchHistory.findMany.mockResolvedValue([]);
-    mockPrisma.sceneRating.findMany.mockResolvedValue([
-      {
-        id: 1,
-        userId: 1,
-        sceneId: "s1",
-        instanceId: "inst1",
-        rating: 85,
-        favorite: true,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      },
-    ] as any);
-    mockPrisma.performerRating.findMany.mockResolvedValue([]);
-    mockPrisma.studioRating.findMany.mockResolvedValue([]);
-    mockPrisma.tagRating.findMany.mockResolvedValue([]);
-
-    const result = await mergeScenesWithUserData(scenes, 1);
-    expect(result[0]).toMatchObject({
-      rating: 85,
-      rating100: 85,
-      favorite: true,
-    });
-  });
-
-  it("updates nested performer favorites", async () => {
-    const p1 = createMockPerformer({ id: "p1", instanceId: "inst1" });
-    const p2 = createMockPerformer({ id: "p2", instanceId: "inst1" });
-    const scenes = [
-      createMockScene({ id: "s1", instanceId: "inst1", performers: [p1, p2] }),
-    ];
-    mockPrisma.watchHistory.findMany.mockResolvedValue([]);
-    mockPrisma.sceneRating.findMany.mockResolvedValue([]);
-    mockPrisma.performerRating.findMany.mockResolvedValue([
-      {
-        id: 1,
-        userId: 1,
-        performerId: "p1",
-        instanceId: "inst1",
-        rating: null,
-        favorite: true,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      },
-    ] as any);
-    mockPrisma.studioRating.findMany.mockResolvedValue([]);
-    mockPrisma.tagRating.findMany.mockResolvedValue([]);
-
-    const result = await mergeScenesWithUserData(scenes, 1);
-    expect(result[0]!.performers[0]!.favorite).toBe(true);
-    expect(result[0]!.performers[1]!.favorite).toBe(false);
-  });
-
-  it("updates nested studio favorite", async () => {
-    const studio = createMockStudio({ id: "st1", instanceId: "inst1" });
-    const scenes = [
-      createMockScene({ id: "s1", instanceId: "inst1", studio }),
-    ];
-    mockPrisma.watchHistory.findMany.mockResolvedValue([]);
-    mockPrisma.sceneRating.findMany.mockResolvedValue([]);
-    mockPrisma.performerRating.findMany.mockResolvedValue([]);
-    mockPrisma.studioRating.findMany.mockResolvedValue([
-      {
-        id: 1,
-        userId: 1,
-        studioId: "st1",
-        instanceId: "inst1",
-        rating: null,
-        favorite: true,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      },
-    ] as any);
-    mockPrisma.tagRating.findMany.mockResolvedValue([]);
-
-    const result = await mergeScenesWithUserData(scenes, 1);
-    expect(result[0]!.studio!.favorite).toBe(true);
-  });
-
-  it("updates nested tag favorites", async () => {
-    const t1 = createMockTag({ id: "t1", instanceId: "inst1" });
-    const scenes = [
-      createMockScene({ id: "s1", instanceId: "inst1", tags: [t1] }),
-    ];
-    mockPrisma.watchHistory.findMany.mockResolvedValue([]);
-    mockPrisma.sceneRating.findMany.mockResolvedValue([]);
-    mockPrisma.performerRating.findMany.mockResolvedValue([]);
-    mockPrisma.studioRating.findMany.mockResolvedValue([]);
-    mockPrisma.tagRating.findMany.mockResolvedValue([
-      {
-        id: 1,
-        userId: 1,
-        tagId: "t1",
-        instanceId: "inst1",
-        rating: null,
-        favorite: true,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      },
-    ] as any);
-
-    const result = await mergeScenesWithUserData(scenes, 1);
-    expect(result[0]!.tags[0]!.favorite).toBe(true);
-  });
-
-  it("uses targeted query for small scene sets (< 100)", async () => {
-    const scenes = [createMockScene({ id: "s1" })];
-    mockPrisma.watchHistory.findMany.mockResolvedValue([]);
-    mockPrisma.sceneRating.findMany.mockResolvedValue([]);
-    mockPrisma.performerRating.findMany.mockResolvedValue([]);
-    mockPrisma.studioRating.findMany.mockResolvedValue([]);
-    mockPrisma.tagRating.findMany.mockResolvedValue([]);
-
-    await mergeScenesWithUserData(scenes, 1);
-
-    // Watch history and scene ratings should filter by sceneId
-    expect(mockPrisma.watchHistory.findMany).toHaveBeenCalledWith({
-      where: { userId: 1, sceneId: { in: ["s1"] } },
-    });
-    expect(mockPrisma.sceneRating.findMany).toHaveBeenCalledWith({
-      where: { userId: 1, sceneId: { in: ["s1"] } },
-    });
-  });
-});
-
-// ===== 6. HTTP handlers =====
+// ===== 2. HTTP handlers =====
 
 describe("findScenes", () => {
   it("returns 401 when user is not authenticated", async () => {
-    const req = mockReq({ filter: {}, scene_filter: {} }, {}, undefined);
-    const res = mockRes();
+    const req = reqFor(findScenes, { body: { filter: {}, scene_filter: {} } });
+    const res = resFor(findScenes);
 
-    await findScenes(req, res);
+    await libraryHandler(findScenes)(req, res, vi.fn());
 
     expect(res._getStatus()).toBe(401);
     expect(res._getBody()).toEqual({ error: "Unauthorized" });
@@ -1282,253 +190,996 @@ describe("findScenes", () => {
   it("returns scenes from the SQL query builder path", async () => {
     const scene = createMockScene({ id: "s1", title: "Test" });
     mockSceneQueryBuilder.execute.mockResolvedValue({
-      scenes: [scene],
+      items: [scene],
       total: 1,
     });
 
-    const req = mockReq(
-      { filter: { page: 1, per_page: 40 }, scene_filter: {} },
-      {},
-      { id: 1, role: "USER" }
-    );
-    const res = mockRes();
+    const req = reqFor(findScenes, {
+      body: { filter: { page: 1, per_page: 40 }, scene_filter: {} },
+      user: testUser(),
+    });
+    const res = resFor(findScenes);
 
     await findScenes(req, res);
 
     expect(res._getStatus()).toBe(200);
-    const body = res._getBody();
+    const body = res._getOkBody();
     expect(body.findScenes.count).toBe(1);
     expect(body.findScenes.scenes).toHaveLength(1);
   });
 
-  it("returns 400 for ambiguous single-ID lookup", async () => {
-    const s1 = createMockScene({ id: "42", instanceId: "inst-a", title: "Scene A" });
-    const s2 = createMockScene({ id: "42", instanceId: "inst-b", title: "Scene B" });
+  it("passes req.allowedInstanceIds to the builder or service", async () => {
+    mockSceneQueryBuilder.execute.mockResolvedValue({ items: [], total: 0 });
+    const req = reqFor(findScenes, {
+      body: { filter: { page: 1, per_page: 40 }, scene_filter: {} },
+      user: testUser(),
+      allowedInstanceIds: ["inst-a", "inst-b"],
+    });
+    const res = resFor(findScenes);
+
+    await findScenes(req, res);
+
+    expect(mockSceneQueryBuilder.execute).toHaveBeenCalledWith(
+      expect.objectContaining({ allowedInstanceIds: ["inst-a", "inst-b"] })
+    );
+  });
+
+  it("passes the request's time zone to the builder", async () => {
+    mockSceneQueryBuilder.execute.mockResolvedValue({ items: [], total: 0 });
+    const req = reqFor(findScenes, {
+      body: { filter: { page: 1, per_page: 40 }, scene_filter: {} },
+      user: testUser(),
+      allowedInstanceIds: ["inst-a"],
+      timeZone: "America/Chicago",
+    });
+
+    await findScenes(req, resFor(findScenes));
+
+    expect(mockSceneQueryBuilder.execute).toHaveBeenCalledWith(
+      objectContaining({ timeZone: "America/Chicago" })
+    );
+  });
+
+  it("findScenes logs its timings at DEBUG, not INFO", async () => {
     mockSceneQueryBuilder.execute.mockResolvedValue({
-      scenes: [s1, s2],
+      items: [createMockScene({ id: "s1" })],
+      total: 1,
+    });
+
+    const req = reqFor(findScenes, {
+      body: { filter: { page: 1, per_page: 40 }, scene_filter: {} },
+      user: testUser(),
+    });
+    const res = resFor(findScenes);
+
+    await findScenes(req, res);
+
+    expect(res._getStatus()).toBe(200);
+    expect(mockLogger.info).not.toHaveBeenCalled();
+    expect(mockLogger.debug).toHaveBeenCalledWith(
+      "findScenes complete (SQL path)",
+      objectContaining({ resultCount: 1, total: 1 })
+    );
+  });
+
+  it("does not send stashUrl to a regular user", async () => {
+    mockSceneQueryBuilder.execute.mockResolvedValue({
+      items: [createMockScene({ id: "s1" }), createMockScene({ id: "s2" })],
       total: 2,
     });
 
-    const req = mockReq(
-      { filter: {}, scene_filter: {}, ids: ["42"] },
-      {},
-      { id: 1, role: "USER" }
+    const req = reqFor(findScenes, {
+      body: { filter: { page: 1, per_page: 40 }, scene_filter: {} },
+      user: testUser(),
+    });
+    const res = resFor(findScenes);
+
+    await findScenes(req, res);
+
+    const scenes = res._getOkBody().findScenes.scenes;
+    expect(scenes).toHaveLength(2);
+    for (const scene of scenes) expect(scene.stashUrl).toBeNull();
+  });
+
+  it("adds stashUrl for an admin", async () => {
+    mockSceneQueryBuilder.execute.mockResolvedValue({
+      items: [createMockScene({ id: "s1" })],
+      total: 1,
+    });
+
+    const req = reqFor(findScenes, {
+      body: { filter: { page: 1, per_page: 40 }, scene_filter: {} },
+      user: testUser({ role: "ADMIN" }),
+    });
+    const res = resFor(findScenes);
+
+    await findScenes(req, res);
+
+    expect(must(res._getOkBody().findScenes.scenes[0]).stashUrl).toBe(
+      "http://stash/scenes/s1"
     );
-    const res = mockRes();
+  });
+
+  it("attaches playback streams to a single-id lookup", async () => {
+    const scene = createMockScene({ id: "42", instanceId: "inst-a" });
+    mockSceneQueryBuilder.execute.mockResolvedValue({
+      items: [scene],
+      total: 1,
+    });
+    const streams = [
+      {
+        url: "/api/scene/42/proxy-stream/stream?instanceId=inst-a",
+        mime_type: "video/mp4",
+        label: "Direct stream",
+      },
+    ];
+    mockStashEntityService.getPlaybackStreams.mockResolvedValueOnce(streams);
+
+    const req = reqFor(findScenes, { body: { ids: ["42"] }, user: testUser() });
+    const res = resFor(findScenes);
+
+    await findScenes(req, res);
+
+    expect(res._getStatus()).toBe(200);
+    expect(mockStashEntityService.getPlaybackStreams).toHaveBeenCalledWith(
+      "42",
+      "inst-a"
+    );
+    expect(must(res._getOkBody().findScenes.scenes[0]).sceneStreams).toEqual(
+      streams
+    );
+  });
+
+  it("returns 400 for ambiguous single-ID lookup", async () => {
+    const s1 = createMockScene({
+      id: "42",
+      instanceId: "inst-a",
+      title: "Scene A",
+    });
+    const s2 = createMockScene({
+      id: "42",
+      instanceId: "inst-b",
+      title: "Scene B",
+    });
+    mockSceneQueryBuilder.execute.mockResolvedValue({
+      items: [s1, s2],
+      total: 2,
+    });
+
+    const req = reqFor(findScenes, {
+      body: { filter: {}, scene_filter: {}, ids: ["42"] },
+      user: testUser(),
+    });
+    const res = resFor(findScenes);
 
     await findScenes(req, res);
 
     expect(res._getStatus()).toBe(400);
     const body = res._getBody();
+    assert("matches" in body, "expected an ambiguous-lookup body");
     expect(body.error).toBe("Ambiguous lookup");
     expect(body.matches).toHaveLength(2);
   });
 
-  it("returns 500 on unexpected error", async () => {
+  it("a failure reaches the error handler: unexpected error", async () => {
     mockSceneQueryBuilder.execute.mockRejectedValue(new Error("DB down"));
 
-    const req = mockReq(
-      { filter: {}, scene_filter: {} },
-      {},
-      { id: 1, role: "USER" }
-    );
-    const res = mockRes();
+    const req = reqFor(findScenes, {
+      body: { filter: {}, scene_filter: {} },
+      user: testUser(),
+    });
+    const res = resFor(findScenes);
 
-    await findScenes(req, res);
+    await expect(findScenes(req, res)).rejects.toThrow("DB down");
 
-    expect(res._getStatus()).toBe(500);
-    expect(res._getBody()).toMatchObject({ error: "Failed to find scenes" });
+    expect(res.json).not.toHaveBeenCalled();
   });
-});
 
-describe("updateScene", () => {
-  it("returns 404 when stash instance is not found", async () => {
-    mockGetEntityInstanceId.mockResolvedValue("unknown");
-    mockStashInstanceManager.get.mockReturnValue(undefined as any);
+  describe("PEEK_FILTER_POLICY=drop no longer drops", () => {
+    afterEach(() => {
+      vi.unstubAllEnvs();
+    });
 
-    const req = mockReq(
-      { title: "Updated Title" },
-      { id: "123" },
-      { id: 1, role: "USER" }
-    );
-    const res = mockRes();
+    it("an unknown key answers 400", async () => {
+      vi.stubEnv("PEEK_FILTER_POLICY", "drop");
+      const body = malformed({
+        filter: { page: 1 },
+        scene_filter: { b7_not_a_field: { value: 1 } },
+      });
+      const req = reqFor(findScenes, { body, user: testUser() });
+      const res = resFor(findScenes);
 
-    await updateScene(req, res);
-
-    expect(res._getStatus()).toBe(404);
-    expect(res._getBody()).toMatchObject({
-      error: "Stash instance not found for scene",
+      await expect(findScenes(req, res)).rejects.toMatchObject({
+        statusCode: 400,
+        issues: [{ path: "scene_filter.b7_not_a_field" }],
+      });
+      expect(mockSceneQueryBuilder.execute).not.toHaveBeenCalled();
     });
   });
 
-  it("returns 500 when sceneUpdate returns null", async () => {
-    mockGetEntityInstanceId.mockResolvedValue("default");
-    const mockStash = { sceneUpdate: vi.fn().mockResolvedValue({ sceneUpdate: null }) };
-    mockStashInstanceManager.get.mockReturnValue(mockStash as any);
-
-    const req = mockReq(
-      { title: "Updated Title" },
-      { id: "123" },
-      { id: 1, role: "USER" }
-    );
-    const res = mockRes();
-
-    await updateScene(req, res);
-
-    expect(res._getStatus()).toBe(500);
-    expect(res._getBody()).toMatchObject({
-      error: "Scene update returned null",
+  describe("with USE_SQL_QUERY_BUILDER=false", () => {
+    afterEach(() => {
+      vi.unstubAllEnvs();
     });
-  });
 
-  it("returns updated scene on success", async () => {
-    mockGetEntityInstanceId.mockResolvedValue("default");
-    const updatedScene = createMockScene({ id: "123", title: "Updated Title" });
-    const mockStash = {
-      sceneUpdate: vi.fn().mockResolvedValue({ sceneUpdate: updatedScene }),
-    };
-    mockStashInstanceManager.get.mockReturnValue(mockStash as any);
-    // Ensure mergeScenesWithUserData returns the scene unchanged
-    mockPrisma.watchHistory.findMany.mockResolvedValue([]);
-    mockPrisma.sceneRating.findMany.mockResolvedValue([]);
-    mockPrisma.performerRating.findMany.mockResolvedValue([]);
-    mockPrisma.studioRating.findMany.mockResolvedValue([]);
-    mockPrisma.tagRating.findMany.mockResolvedValue([]);
+    it("findScenes ignores USE_SQL_QUERY_BUILDER=false", async () => {
+      // A module could read the flag once, when it loads: load a fresh
+      // module graph with the flag set
+      vi.stubEnv("USE_SQL_QUERY_BUILDER", "false");
+      vi.resetModules();
+      const { findScenes: freshFindScenes } =
+        await import("../../../controllers/library/scenes.js");
+      const { sceneQueryBuilder: freshBuilder } =
+        await import("../../../services/SceneQueryBuilder.js");
+      vi.mocked(freshBuilder).execute.mockResolvedValue({
+        items: [createMockScene({ id: "s1" })],
+        total: 1,
+      });
 
-    const req = mockReq(
-      { title: "Updated Title" },
-      { id: "123" },
-      { id: 1, role: "USER" }
-    );
-    const res = mockRes();
+      const req = reqFor(freshFindScenes, {
+        body: { filter: { page: 1, per_page: 40 }, scene_filter: {} },
+        user: testUser(),
+      });
+      const res = resFor(freshFindScenes);
 
-    await updateScene(req, res);
+      await freshFindScenes(req, res);
 
-    expect(res._getStatus()).toBe(200);
-    const body = res._getBody();
-    expect(body.success).toBe(true);
-    expect(body.scene.title).toBe("Updated Title");
-  });
-
-  it("returns 500 on unexpected error", async () => {
-    mockGetEntityInstanceId.mockRejectedValue(new Error("DB crash"));
-
-    const req = mockReq(
-      { title: "x" },
-      { id: "123" },
-      { id: 1, role: "USER" }
-    );
-    const res = mockRes();
-
-    await updateScene(req, res);
-
-    expect(res._getStatus()).toBe(500);
-    expect(res._getBody()).toMatchObject({ error: "Failed to update scene" });
+      expect(vi.mocked(freshBuilder).execute).toHaveBeenCalled();
+      expect(res._getStatus()).toBe(200);
+      expect(res._getOkBody().findScenes.count).toBe(1);
+    });
   });
 });
 
 describe("findSimilarScenes", () => {
-  it("returns 401 when user is not authenticated", async () => {
-    const req = mockReq({}, { id: "s1" }, undefined, { page: "1" });
-    const res = mockRes();
+  beforeEach(() => {
+    mockResolveInstance.mockResolvedValue("inst-a");
+    mockStashEntityService.getSimilarSceneCandidates.mockResolvedValue([]);
+    mockSceneQueryBuilder.getByRefs.mockResolvedValue([]);
+  });
 
-    await findSimilarScenes(req, res);
+  it("returns 401 when user is not authenticated", async () => {
+    const req = reqFor(findSimilarScenes, {
+      params: { id: "101" },
+      query: { page: "1", instanceId: "inst-a" },
+    });
+    const res = resFor(findSimilarScenes);
+
+    await libraryHandler(findSimilarScenes)(req, res, vi.fn());
 
     expect(res._getStatus()).toBe(401);
   });
 
-  it("returns empty result when no candidates found", async () => {
-    mockStashEntityService.getSimilarSceneCandidates.mockResolvedValue([]);
+  it("404 when the seed is not visible to the user", async () => {
+    mockResolveInstance.mockResolvedValue(null);
 
-    const req = mockReq({}, { id: "s1" }, { id: 1, role: "USER" }, { page: "1" });
-    const res = mockRes();
+    const req = reqFor(findSimilarScenes, {
+      params: { id: "101" },
+      user: testUser(),
+      query: { page: "1", instanceId: "inst-b" },
+    });
+    const res = resFor(findSimilarScenes);
 
     await findSimilarScenes(req, res);
 
-    expect(res._getStatus()).toBe(200);
-    const body = res._getBody();
-    expect(body.scenes).toEqual([]);
-    expect(body.count).toBe(0);
+    expect(res._getStatus()).toBe(404);
+    expect(mockResolveInstance).toHaveBeenCalledWith(
+      testUser().id,
+      "scene",
+      "101",
+      "inst-b"
+    );
+    expect(
+      mockStashEntityService.getSimilarSceneCandidates
+    ).not.toHaveBeenCalled();
   });
 
-  it("returns paginated similar scenes", async () => {
-    const candidates = [
-      { sceneId: "c1", weight: 10, date: "2025-01-01" },
-      { sceneId: "c2", weight: 8, date: "2025-01-02" },
-    ];
-    mockStashEntityService.getSimilarSceneCandidates.mockResolvedValue(candidates);
-
-    const scene1 = createMockScene({ id: "c1" });
-    const scene2 = createMockScene({ id: "c2" });
-    mockSceneQueryBuilder.getByIds.mockResolvedValue({
-      scenes: [scene2, scene1], // intentionally out of order
-      total: 2,
+  it("returns empty result when no candidates found", async () => {
+    const req = reqFor(findSimilarScenes, {
+      params: { id: "101" },
+      user: testUser(),
+      query: { page: "1", instanceId: "inst-a" },
     });
-
-    const req = mockReq({}, { id: "s1" }, { id: 1, role: "USER" }, { page: "1" });
-    const res = mockRes();
+    const res = resFor(findSimilarScenes);
 
     await findSimilarScenes(req, res);
 
     expect(res._getStatus()).toBe(200);
-    const body = res._getBody();
+    const body = res._getOkBody();
+    expect(body.scenes).toEqual([]);
+    expect(body.count).toBe(0);
+    // The seed is passed with the instance the access check resolved
+    expect(
+      mockStashEntityService.getSimilarSceneCandidates
+    ).toHaveBeenCalledWith(
+      { id: "101", instanceId: "inst-a" },
+      testUser().id,
+      500
+    );
+  });
+
+  it("fetches the page by (id, instance) refs in candidate order", async () => {
+    const candidate = (sceneId: string, weight: number) => ({
+      sceneId,
+      instanceId: "inst-a",
+      weight,
+      date: null,
+    });
+    // 13 candidates: page 2 holds the 13th only
+    mockStashEntityService.getSimilarSceneCandidates.mockResolvedValue(
+      Array.from({ length: 13 }, (_, i) => candidate(`c${i + 1}`, 13 - i))
+    );
+    const scene13 = createMockScene({ id: "c13", instanceId: "inst-a" });
+    mockSceneQueryBuilder.getByRefs.mockResolvedValue([scene13]);
+
+    const req = reqFor(findSimilarScenes, {
+      params: { id: "101" },
+      user: testUser(),
+      query: { page: "2", instanceId: "inst-a" },
+      allowedInstanceIds: ["default"],
+    });
+    const res = resFor(findSimilarScenes);
+
+    await findSimilarScenes(req, res);
+
+    expect(res._getStatus()).toBe(200);
+    expect(mockSceneQueryBuilder.getByRefs).toHaveBeenCalledWith({
+      userId: testUser().id,
+      refs: [{ id: "c13", instanceId: "inst-a" }],
+      allowedInstanceIds: ["default"],
+    });
+    const body = res._getOkBody();
+    expect(body.scenes.map((s) => s.id)).toEqual(["c13"]);
+    expect(body.count).toBe(13);
+    expect(body.page).toBe(2);
+  });
+
+  it("returns paginated similar scenes in score order", async () => {
+    mockStashEntityService.getSimilarSceneCandidates.mockResolvedValue([
+      { sceneId: "c1", instanceId: "inst-a", weight: 10, date: "2025-01-01" },
+      { sceneId: "c2", instanceId: "inst-a", weight: 8, date: "2025-01-02" },
+    ]);
+
+    const scene1 = createMockScene({ id: "c1", instanceId: "inst-a" });
+    const scene2 = createMockScene({ id: "c2", instanceId: "inst-a" });
+    // A same-id scene on another instance is not the one the candidate named
+    const other = createMockScene({ id: "c1", instanceId: "inst-b" });
+    mockSceneQueryBuilder.getByRefs.mockResolvedValue([scene2, other, scene1]);
+
+    const req = reqFor(findSimilarScenes, {
+      params: { id: "101" },
+      user: testUser(),
+      query: { page: "1", instanceId: "inst-a" },
+    });
+    const res = resFor(findSimilarScenes);
+
+    await findSimilarScenes(req, res);
+
+    expect(res._getStatus()).toBe(200);
+    const body = res._getOkBody();
     // Should preserve score order (c1 first, higher weight)
-    expect(body.scenes.map((s: any) => s.id)).toEqual(["c1", "c2"]);
+    expect(body.scenes.map((s) => `${s.id}:${s.instanceId}`)).toEqual([
+      "c1:inst-a",
+      "c2:inst-a",
+    ]);
     expect(body.count).toBe(2);
   });
 
-  it("returns 500 on error", async () => {
+  it.each([
+    ["page", { id: "101" }, { page: "abc", instanceId: "inst-a" }],
+    ["instanceId", { id: "101" }, { instanceId: "not an instance" }],
+    ["instanceId", { id: "101" }, { page: "1" }],
+    ["per_page", { id: "101" }, { per_page: "5", instanceId: "inst-a" }],
+    ["id", { id: "s1" }, { instanceId: "inst-a" }],
+  ])(
+    "a bad %s answers 400 before the seed is resolved",
+    async (path, params: { id: string }, query: Record<string, string>) => {
+      const req = reqFor(findSimilarScenes, {
+        params,
+        user: testUser(),
+        query,
+      });
+      const res = resFor(findSimilarScenes);
+
+      await expect(findSimilarScenes(req, res)).rejects.toMatchObject({
+        statusCode: 400,
+        issues: [{ path }],
+      });
+      expect(mockResolveInstance).not.toHaveBeenCalled();
+    }
+  );
+
+  it("a failure reaches the error handler: error", async () => {
     mockStashEntityService.getSimilarSceneCandidates.mockRejectedValue(
       new Error("DB error")
     );
 
-    const req = mockReq({}, { id: "s1" }, { id: 1, role: "USER" }, { page: "1" });
-    const res = mockRes();
+    const req = reqFor(findSimilarScenes, {
+      params: { id: "101" },
+      user: testUser(),
+      query: { page: "1", instanceId: "inst-a" },
+    });
+    const res = resFor(findSimilarScenes);
 
-    await findSimilarScenes(req, res);
+    await expect(findSimilarScenes(req, res)).rejects.toThrow("DB error");
 
-    expect(res._getStatus()).toBe(500);
+    expect(res.json).not.toHaveBeenCalled();
   });
 });
 
 describe("getRecommendedScenes", () => {
-  it("returns 401 when user is not authenticated", async () => {
-    const req = mockReq({}, {}, undefined, { page: "1" });
-    const res = mockRes();
+  const noCriteria = {
+    favoritedPerformers: 0,
+    ratedPerformers: 0,
+    favoritedStudios: 0,
+    ratedStudios: 0,
+    favoritedTags: 0,
+    ratedTags: 0,
+    favoritedScenes: 0,
+    ratedScenes: 0,
+    rankedEntities: 0,
+  };
+  const someCriteria = { ...noCriteria, favoritedPerformers: 1 };
+  const ref = (id: string, instanceId = "default") => ({ id, instanceId });
 
-    await getRecommendedScenes(req, res);
-
-    expect(res._getStatus()).toBe(401);
+  beforeEach(() => {
+    mockRecommendationService.getRankedRefs.mockResolvedValue({
+      refs: [],
+      criteria: noCriteria,
+    });
   });
 
-  it("returns empty result with message when user has no criteria", async () => {
-    mockHasAnyCriteria.mockReturnValue(false);
+  it("returns 401 when user is not authenticated", async () => {
+    const req = reqFor(getRecommendedScenes, { query: { page: "1" } });
+    const res = resFor(getRecommendedScenes);
 
-    const req = mockReq({}, {}, { id: 1, role: "USER" }, { page: "1" });
-    const res = mockRes();
+    await libraryHandler(getRecommendedScenes)(req, res, vi.fn());
+
+    expect(res._getStatus()).toBe(401);
+    expect(mockRecommendationService.getRankedRefs).not.toHaveBeenCalled();
+  });
+
+  it("page 1 awaits ensureFresh with wait: true before reading the ranked list", async () => {
+    const order: string[] = [];
+    mockRankingService.ensureFresh.mockImplementationOnce(async () => {
+      await Promise.resolve();
+      order.push("ensureFresh");
+    });
+    mockRecommendationService.getRankedRefs.mockImplementationOnce(() => {
+      order.push("getRankedRefs");
+      return Promise.resolve({ refs: [], criteria: noCriteria });
+    });
+    const req = reqFor(getRecommendedScenes, {
+      user: testUser(),
+      query: { page: "1" },
+    });
+    const res = resFor(getRecommendedScenes);
 
     await getRecommendedScenes(req, res);
 
     expect(res._getStatus()).toBe(200);
-    const body = res._getBody();
-    expect(body.scenes).toEqual([]);
-    expect(body.message).toBe("No recommendations yet");
+    expect(mockRankingService.ensureFresh).toHaveBeenCalledExactlyOnceWith(1, {
+      wait: true,
+    });
+    expect(order).toEqual(["ensureFresh", "getRankedRefs"]);
+    expect(mockPrisma.userEntityRanking.findFirst).not.toHaveBeenCalled();
   });
 
-  it("returns 500 on unexpected error", async () => {
-    // Force an error by making prisma throw
-    mockPrisma.performerRating.findMany.mockRejectedValue(
-      new Error("DB down")
-    );
-
-    const req = mockReq({}, {}, { id: 1, role: "USER" }, { page: "1" });
-    const res = mockRes();
+  it("pages above 1 call no ensureFresh", async () => {
+    const req = reqFor(getRecommendedScenes, {
+      user: testUser(),
+      query: { page: "2" },
+    });
+    const res = resFor(getRecommendedScenes);
 
     await getRecommendedScenes(req, res);
 
-    expect(res._getStatus()).toBe(500);
-    expect(res._getBody()).toMatchObject({
-      error: "Failed to get recommended scenes",
+    expect(res._getStatus()).toBe(200);
+    expect(mockRankingService.ensureFresh).not.toHaveBeenCalled();
+    expect(mockRecommendationService.getRankedRefs).toHaveBeenCalledOnce();
+  });
+
+  it("a failed recompute on page 1 still answers with the stored rankings (logged)", async () => {
+    // RankingComputeService.refresh logs the failure before rejecting
+    mockRankingService.ensureFresh.mockRejectedValueOnce(
+      new Error("recompute failed")
+    );
+    mockRecommendationService.getRankedRefs.mockResolvedValue({
+      refs: [ref("s1")],
+      criteria: someCriteria,
     });
+    mockSceneQueryBuilder.execute.mockResolvedValue({
+      items: [createMockScene({ id: "s1", instanceId: "default" })],
+      total: 1,
+    });
+    const req = reqFor(getRecommendedScenes, {
+      user: testUser(),
+      query: { page: "1" },
+    });
+    const res = resFor(getRecommendedScenes);
+
+    await getRecommendedScenes(req, res);
+
+    expect(res._getStatus()).toBe(200);
+    expect(res._getOkBody().scenes.map((s) => s.id)).toEqual(["s1"]);
+  });
+
+  it("returns empty result with message when user has no criteria", async () => {
+    const req = reqFor(getRecommendedScenes, {
+      user: testUser(),
+      query: { page: "1" },
+    });
+    const res = resFor(getRecommendedScenes);
+
+    await getRecommendedScenes(req, res);
+
+    expect(res._getStatus()).toBe(200);
+    const body = res._getOkBody();
+    expect(body.scenes).toEqual([]);
+    expect(body.count).toBe(0);
+    expect(body.message).toBe("No recommendations yet");
+    expect(body.criteria).toEqual(noCriteria);
+    expect(mockSceneQueryBuilder.execute).not.toHaveBeenCalled();
+  });
+
+  it("says so when the user's criteria match no scene", async () => {
+    mockRecommendationService.getRankedRefs.mockResolvedValue({
+      refs: [],
+      criteria: someCriteria,
+    });
+    const req = reqFor(getRecommendedScenes, {
+      user: testUser(),
+      query: { page: "1" },
+    });
+    const res = resFor(getRecommendedScenes);
+
+    await getRecommendedScenes(req, res);
+
+    expect(res._getStatus()).toBe(200);
+    const body = res._getOkBody();
+    expect(body.scenes).toEqual([]);
+    expect(body.message).toBe("No matching recommendations found");
+    expect(body.criteria).toEqual(someCriteria);
+  });
+
+  it("passes req.allowedInstanceIds to the builder or service: the ranked list of the request's instances", async () => {
+    const req = reqFor(getRecommendedScenes, {
+      user: testUser(),
+      query: { page: "1" },
+      allowedInstanceIds: ["inst-a", "inst-b"],
+    });
+    const res = resFor(getRecommendedScenes);
+
+    await getRecommendedScenes(req, res);
+
+    expect(
+      mockRecommendationService.getRankedRefs
+    ).toHaveBeenCalledExactlyOnceWith(1, ["inst-a", "inst-b"]);
+  });
+
+  it("lists one page through the builder within the ranked refs, in the builder's order, and counts what it matches", async () => {
+    const refs = [
+      ref("s1", "inst-a"),
+      ref("s2", "inst-b"),
+      ref("s1", "inst-b"),
+      ref("s3", "inst-a"),
+      ref("s4", "inst-a"),
+    ];
+    mockRecommendationService.getRankedRefs.mockResolvedValue({
+      refs,
+      criteria: someCriteria,
+    });
+    // Page 2 of 2 under the Recommended sort: s1@B then s3@A
+    mockSceneQueryBuilder.execute.mockResolvedValue({
+      items: [
+        createMockScene({ id: "s1", instanceId: "inst-b" }),
+        createMockScene({ id: "s3", instanceId: "inst-a" }),
+      ],
+      total: 4,
+    });
+    const req = reqFor(getRecommendedScenes, {
+      user: testUser(),
+      query: { page: "2", per_page: "2" },
+      allowedInstanceIds: ["default"],
+    });
+    const res = resFor(getRecommendedScenes);
+
+    await getRecommendedScenes(req, res);
+
+    expect(res._getStatus()).toBe(200);
+    expect(mockSceneQueryBuilder.execute).toHaveBeenCalledExactlyOnceWith(
+      objectContaining({
+        userId: 1,
+        allowedInstanceIds: ["default"],
+        ranked: refs,
+        request: objectContaining({
+          page: 2,
+          perPage: 2,
+          q: undefined,
+          filter: {},
+          sort: { field: "recommended", direction: "DESC", seed: undefined },
+        }),
+      })
+    );
+    const body = res._getOkBody();
+    expect(body.scenes.map((s) => `${s.id}:${s.instanceId}`)).toEqual([
+      "s1:inst-b",
+      "s3:inst-a",
+    ]);
+    expect(body.count).toBe(4);
+    expect(body.page).toBe(2);
+    expect(body.perPage).toBe(2);
+  });
+
+  it("echoes per_page 1000 as 250 and asks the builder for at most 250 scenes", async () => {
+    mockRecommendationService.getRankedRefs.mockResolvedValue({
+      refs: Array.from({ length: 300 }, (_, i) => ref(String(i + 1))),
+      criteria: someCriteria,
+    });
+    mockSceneQueryBuilder.execute.mockResolvedValue({ items: [], total: 300 });
+    const req = reqFor(getRecommendedScenes, {
+      user: testUser(),
+      query: { page: "1", per_page: "1000" },
+    });
+    const res = resFor(getRecommendedScenes);
+
+    await getRecommendedScenes(req, res);
+
+    expect(res._getStatus()).toBe(200);
+    const body = res._getOkBody();
+    expect(body.perPage).toBe(250);
+    expect(body.count).toBe(300);
+    expect(
+      must(mockSceneQueryBuilder.execute.mock.calls[0])[0].request.perPage
+    ).toBe(250);
+  });
+
+  it.each([
+    ["page", { page: "abc" }],
+    ["per_page", { per_page: "many" }],
+    ["sort", { sort: "title" }],
+  ])(
+    "a bad %s answers 400 before any read",
+    async (path, query: Record<string, string>) => {
+      const req = reqFor(getRecommendedScenes, { user: testUser(), query });
+      const res = resFor(getRecommendedScenes);
+
+      await expect(getRecommendedScenes(req, res)).rejects.toMatchObject({
+        statusCode: 400,
+        issues: [{ path }],
+      });
+      expect(mockRecommendationService.getRankedRefs).not.toHaveBeenCalled();
+      expect(mockRankingService.ensureFresh).not.toHaveBeenCalled();
+    }
+  );
+
+  it("a failure reaches the error handler: unexpected error", async () => {
+    mockRecommendationService.getRankedRefs.mockRejectedValue(
+      new Error("DB down")
+    );
+
+    const req = reqFor(getRecommendedScenes, {
+      user: testUser(),
+      query: { page: "1" },
+    });
+    const res = resFor(getRecommendedScenes);
+
+    await expect(getRecommendedScenes(req, res)).rejects.toThrow("DB down");
+
+    expect(res.json).not.toHaveBeenCalled();
+  });
+});
+
+describe("findRecommendedScenes", () => {
+  const noCriteria = {
+    favoritedPerformers: 0,
+    ratedPerformers: 0,
+    favoritedStudios: 0,
+    ratedStudios: 0,
+    favoritedTags: 0,
+    ratedTags: 0,
+    favoritedScenes: 0,
+    ratedScenes: 0,
+    rankedEntities: 0,
+  };
+  const someCriteria = { ...noCriteria, favoritedPerformers: 1 };
+  const refs = [
+    { id: "s1", instanceId: "A" },
+    { id: "s2", instanceId: "B" },
+  ];
+
+  beforeEach(() => {
+    mockRecommendationService.getRankedRefs.mockResolvedValue({
+      refs,
+      criteria: someCriteria,
+    });
+    mockSceneQueryBuilder.execute.mockResolvedValue({ items: [], total: 0 });
+  });
+
+  const run = async (
+    body: FindRecommendedScenesRequest | Malformed,
+    parts: { role?: "ADMIN" | "USER"; allowedInstanceIds?: string[] } = {}
+  ) => {
+    const req = reqFor(findRecommendedScenes, {
+      body,
+      user: testUser({ role: parts.role ?? "USER" }),
+      allowedInstanceIds: parts.allowedInstanceIds ?? ["A", "B"],
+      timeZone: "America/Chicago",
+    });
+    const res = resFor(findRecommendedScenes);
+    await findRecommendedScenes(req, res);
+    return res;
+  };
+
+  it("returns 401 when user is not authenticated", async () => {
+    const req = reqFor(findRecommendedScenes, { body: {} });
+    const res = resFor(findRecommendedScenes);
+
+    await libraryHandler(findRecommendedScenes)(req, res, vi.fn());
+
+    expect(res._getStatus()).toBe(401);
+    expect(mockRecommendationService.getRankedRefs).not.toHaveBeenCalled();
+  });
+
+  it("page 1 awaits ensureFresh; a later page does not", async () => {
+    const order: string[] = [];
+    mockRankingService.ensureFresh.mockImplementationOnce(async () => {
+      await Promise.resolve();
+      order.push("ensureFresh");
+    });
+    mockRecommendationService.getRankedRefs.mockImplementationOnce(() => {
+      order.push("getRankedRefs");
+      return Promise.resolve({ refs, criteria: someCriteria });
+    });
+    await run({ filter: { page: 1 } });
+    expect(mockRankingService.ensureFresh).toHaveBeenCalledExactlyOnceWith(1, {
+      wait: true,
+    });
+    expect(order).toEqual(["ensureFresh", "getRankedRefs"]);
+
+    mockRankingService.ensureFresh.mockClear();
+    await run({ filter: { page: 2 } });
+    expect(mockRankingService.ensureFresh).not.toHaveBeenCalled();
+  });
+
+  it("passes the ranked refs and the allowed instances to the builder, with the parsed filter", async () => {
+    await run(
+      {
+        filter: { page: 3, per_page: 20, q: "beach", sort: "title" },
+        scene_filter: {
+          tags: { value: ["12:B"], modifier: "INCLUDES" },
+        },
+      },
+      { allowedInstanceIds: ["B"] }
+    );
+
+    expect(
+      mockRecommendationService.getRankedRefs
+    ).toHaveBeenCalledExactlyOnceWith(1, ["B"]);
+    expect(mockSceneQueryBuilder.execute).toHaveBeenCalledExactlyOnceWith(
+      objectContaining({
+        userId: 1,
+        allowedInstanceIds: ["B"],
+        timeZone: "America/Chicago",
+        ranked: refs,
+        request: objectContaining({
+          page: 3,
+          perPage: 20,
+          q: "beach",
+          sort: objectContaining({ field: "title" }),
+          filter: {
+            tags: objectContaining({ refs: [{ id: "12", instanceId: "B" }] }),
+          },
+        }),
+      })
+    );
+  });
+
+  it("no criteria answers the 'No recommendations yet' message without a list query", async () => {
+    mockRecommendationService.getRankedRefs.mockResolvedValue({
+      refs: [],
+      criteria: noCriteria,
+    });
+
+    const res = await run({});
+
+    expect(res._getOkBody()).toEqual({
+      scenes: [],
+      count: 0,
+      page: 1,
+      perPage: 40,
+      message: "No recommendations yet",
+      criteria: noCriteria,
+    });
+    expect(mockSceneQueryBuilder.execute).not.toHaveBeenCalled();
+  });
+
+  it("no ranked refs answers 'No matching recommendations found' without a list query", async () => {
+    mockRecommendationService.getRankedRefs.mockResolvedValue({
+      refs: [],
+      criteria: someCriteria,
+    });
+
+    const res = await run({});
+
+    const body = res._getOkBody();
+    expect(body.message).toBe("No matching recommendations found");
+    expect(body.count).toBe(0);
+    expect(body.criteria).toEqual(someCriteria);
+    expect(mockSceneQueryBuilder.execute).not.toHaveBeenCalled();
+  });
+
+  it("answers the builder's total, null on `count: false`", async () => {
+    mockSceneQueryBuilder.execute.mockResolvedValueOnce({
+      items: [createMockScene({ id: "s1", instanceId: "A" })],
+      total: 7,
+    });
+    const counted = await run({});
+    expect(counted._getOkBody().count).toBe(7);
+
+    mockSceneQueryBuilder.execute.mockResolvedValueOnce({
+      items: [createMockScene({ id: "s1", instanceId: "A" })],
+      total: null,
+    });
+    const uncounted = await run({ filter: { page: 2, count: false } });
+    expect(uncounted._getOkBody().count).toBeNull();
+    expect(
+      must(mockSceneQueryBuilder.execute.mock.calls[1])[0].request.count
+    ).toBe(false);
+  });
+
+  it("adds no stashUrl for a regular user, one for an admin", async () => {
+    mockSceneQueryBuilder.execute.mockResolvedValue({
+      items: [createMockScene({ id: "s1" })],
+      total: 1,
+    });
+
+    const regular = await run({});
+    expect(must(regular._getOkBody().scenes[0]).stashUrl).toBeNull();
+
+    const admin = await run({}, { role: "ADMIN" });
+    expect(must(admin._getOkBody().scenes[0]).stashUrl).toBe(
+      "http://stash/scenes/s1"
+    );
+  });
+
+  it.each([
+    ["ids", { ids: ["1:A"] }],
+    ["scene_filter.ids", { scene_filter: { ids: { value: ["1:A"] } } }],
+  ])("a body naming %s answers 400 before any read", async (path, body) => {
+    await expect(run(malformed(body))).rejects.toMatchObject({
+      statusCode: 400,
+      issues: [{ path, message: "Recommended lists its own scenes" }],
+    });
+    expect(mockRecommendationService.getRankedRefs).not.toHaveBeenCalled();
+    expect(mockRankingService.ensureFresh).not.toHaveBeenCalled();
+  });
+});
+
+describe("countRecommendedScenes", () => {
+  const refs = [{ id: "s1", instanceId: "A" }];
+  const criteria = {
+    favoritedPerformers: 1,
+    ratedPerformers: 0,
+    favoritedStudios: 0,
+    ratedStudios: 0,
+    favoritedTags: 0,
+    ratedTags: 0,
+    favoritedScenes: 0,
+    ratedScenes: 0,
+    rankedEntities: 0,
+  };
+
+  it("the recommended count answers the builder's count within the ranked refs", async () => {
+    mockRecommendationService.getRankedRefs.mockResolvedValue({
+      refs,
+      criteria,
+    });
+    mockSceneQueryBuilder.count.mockResolvedValue(9);
+    const req = reqFor(countRecommendedScenes, {
+      body: {
+        scene_filter: { tags: { value: ["12:B"], modifier: "INCLUDES" } },
+      },
+      user: testUser(),
+      allowedInstanceIds: ["A", "B"],
+      timeZone: "America/Chicago",
+    });
+    const res = resFor(countRecommendedScenes);
+
+    await countRecommendedScenes(req, res);
+
+    expect(res._getOkBody()).toEqual({ count: 9 });
+    expect(mockSceneQueryBuilder.count).toHaveBeenCalledExactlyOnceWith(
+      objectContaining({
+        userId: 1,
+        allowedInstanceIds: ["A", "B"],
+        timeZone: "America/Chicago",
+        ranked: refs,
+        request: objectContaining({
+          filter: {
+            tags: objectContaining({ refs: [{ id: "12", instanceId: "B" }] }),
+          },
+        }),
+      })
+    );
+    expect(mockSceneQueryBuilder.execute).not.toHaveBeenCalled();
+  });
+
+  it("the count awaits the rankings' freshness first, as page 1 does, so its N is page 1's total", async () => {
+    const order: string[] = [];
+    mockRankingService.ensureFresh.mockImplementationOnce(async () => {
+      await Promise.resolve();
+      order.push("ensureFresh");
+    });
+    mockRecommendationService.getRankedRefs.mockImplementationOnce(() => {
+      order.push("getRankedRefs");
+      return Promise.resolve({ refs, criteria });
+    });
+    mockSceneQueryBuilder.count.mockResolvedValue(3);
+    const req = reqFor(countRecommendedScenes, {
+      body: {},
+      user: testUser(),
+    });
+    const res = resFor(countRecommendedScenes);
+
+    await countRecommendedScenes(req, res);
+
+    expect(res._getOkBody()).toEqual({ count: 3 });
+    expect(mockRankingService.ensureFresh).toHaveBeenCalledExactlyOnceWith(1, {
+      wait: true,
+    });
+    expect(order).toEqual(["ensureFresh", "getRankedRefs"]);
+  });
+
+  it("a failed recompute still answers the count from the stored rankings", async () => {
+    mockRankingService.ensureFresh.mockRejectedValueOnce(
+      new Error("recompute failed")
+    );
+    mockRecommendationService.getRankedRefs.mockResolvedValue({
+      refs,
+      criteria,
+    });
+    mockSceneQueryBuilder.count.mockResolvedValue(4);
+    const req = reqFor(countRecommendedScenes, {
+      body: {},
+      user: testUser(),
+    });
+    const res = resFor(countRecommendedScenes);
+
+    await countRecommendedScenes(req, res);
+
+    expect(res._getOkBody()).toEqual({ count: 4 });
+  });
+
+  it("no ranked refs answer 0 without a count query", async () => {
+    mockRecommendationService.getRankedRefs.mockResolvedValue({
+      refs: [],
+      criteria,
+    });
+    const req = reqFor(countRecommendedScenes, {
+      body: {},
+      user: testUser(),
+    });
+    const res = resFor(countRecommendedScenes);
+
+    await countRecommendedScenes(req, res);
+
+    expect(res._getOkBody()).toEqual({ count: 0 });
+    expect(mockSceneQueryBuilder.count).not.toHaveBeenCalled();
+  });
+
+  it("a bad body is the list parser's 400", async () => {
+    const req = reqFor(countRecommendedScenes, {
+      body: malformed({ filter: { sort: "position" } }),
+      user: testUser(),
+    });
+
+    await expect(
+      countRecommendedScenes(req, resFor(countRecommendedScenes))
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      issues: [{ path: "filter.sort" }],
+    });
+    expect(mockRecommendationService.getRankedRefs).not.toHaveBeenCalled();
   });
 });

@@ -5,24 +5,45 @@
  * - incrementImageOCounter (O counter for images)
  * - recordImageView (lightbox view tracking)
  * - getImageViewHistory (single image history retrieval)
+ * - the entity access check on both writes
  */
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  decrementImageOCounter,
+  getImageViewHistory,
+  incrementImageOCounter,
+  recordImageView,
+} from "../../controllers/imageViewHistory.js";
+import type { StashClient } from "../../graphql/StashClient.js";
+import prisma from "../../prisma/singleton.js";
+import { resolveAccessibleInstanceId } from "../../services/EntityAccessService.js";
+import { stashInstanceManager } from "../../services/StashInstanceManager.js";
+import { DB_WRITE_TX } from "../../utils/dbWrite.js";
+import { authenticated } from "../../utils/routeHelpers.js";
+import {
+  findHandler,
+  malformed,
+  reqFor,
+  resFor,
+} from "../helpers/controllerTestUtils.js";
+import { anyOf, objectContaining } from "../helpers/matchers.js";
+import { partialRow } from "../helpers/prismaMock.js";
 
-// Mock Prisma - hoisted before imports
-vi.mock("../../prisma/singleton.js", () => ({
-  default: {
-    user: { findUnique: vi.fn() },
-    imageViewHistory: {
-      findUnique: vi.fn(),
-      create: vi.fn(),
-      update: vi.fn(),
-    },
-  },
+// Mock Prisma - hoisted before imports. Interactive transactions run their
+// callback on this same mock client.
+vi.mock(
+  "../../prisma/singleton.js",
+  () => import("../helpers/prismaSingletonMock.js")
+);
+
+// Mock the access check: the request's instance when given, else "instance-1"
+vi.mock("../../services/EntityAccessService.js", () => ({
+  resolveAccessibleInstanceId: vi.fn(),
 }));
 
-// Mock entityInstanceId
-vi.mock("../../utils/entityInstanceId.js", () => ({
-  getEntityInstanceId: vi.fn().mockResolvedValue("instance-1"),
+// The instance's Stash client, for Sync to Stash
+vi.mock("../../services/StashInstanceManager.js", () => ({
+  stashInstanceManager: { getForSync: vi.fn() },
 }));
 
 // Mock logger
@@ -30,23 +51,103 @@ vi.mock("../../utils/logger.js", () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }));
 
-import prisma from "../../prisma/singleton.js";
-import { getEntityInstanceId } from "../../utils/entityInstanceId.js";
-import {
-  incrementImageOCounter,
-  recordImageView,
-  getImageViewHistory,
-} from "../../controllers/imageViewHistory.js";
-import { mockReq, mockRes } from "../helpers/controllerTestUtils.js";
+const mockPrisma = vi.mocked(prisma, true);
+const mockResolve = vi.mocked(resolveAccessibleInstanceId);
+const mockInstanceManager = vi.mocked(stashInstanceManager, true);
 
-const mockPrisma = vi.mocked(prisma);
-const mockGetEntityInstanceId = vi.mocked(getEntityInstanceId);
+/** The image O mutations Sync to Stash sends */
+const stash = {
+  imageIncrementO: vi.fn<StashClient["imageIncrementO"]>(),
+  imageDecrementO: vi.fn<StashClient["imageDecrementO"]>(),
+};
 
 const USER = { id: 1, username: "testuser", role: "USER" };
 
 describe("Image View History Controller", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockResolve.mockImplementation((_userId, _type, _id, requested) =>
+      Promise.resolve(requested)
+    );
+    stash.imageIncrementO.mockResolvedValue({ imageIncrementO: 1 });
+    stash.imageDecrementO.mockResolvedValue({ imageDecrementO: 0 });
+    mockInstanceManager.getForSync.mockReturnValue(partialRow(stash));
+  });
+
+  // ==========================================================================
+  // Entity access (item 6)
+  // ==========================================================================
+
+  describe("entity access", () => {
+    const writes: [string, typeof recordImageView][] = [
+      ["incrementImageOCounter", incrementImageOCounter as never],
+      ["recordImageView", recordImageView],
+    ];
+
+    it.each(writes)(
+      "%s returns 404 and writes nothing when the image is not visible",
+      async (_name, handler) => {
+        mockPrisma.user.findUnique.mockResolvedValue(
+          partialRow({
+            id: 1,
+            syncToStash: true,
+          })
+        );
+        mockResolve.mockResolvedValueOnce(null);
+        const req = reqFor(handler, {
+          body: { imageId: "img-1", instanceId: "inst-b" },
+          user: USER,
+        });
+        const res = resFor(handler);
+        await handler(req, res);
+
+        expect(mockResolve).toHaveBeenCalledWith(1, "image", "img-1", "inst-b");
+        expect(res._getStatus()).toBe(404);
+        expect(res._getBody()).toEqual({ error: "Image not found" });
+        expect(mockPrisma.imageViewHistory.create).not.toHaveBeenCalled();
+        expect(mockPrisma.imageViewHistory.update).not.toHaveBeenCalled();
+      }
+    );
+
+    it.each(writes)(
+      "%s returns 400 and writes nothing when the request has no instance",
+      async (_name, handler) => {
+        const req = reqFor(handler, {
+          body: malformed({ imageId: "img-1" }),
+          user: USER,
+        });
+        const res = resFor(handler);
+        await handler(req, res);
+
+        expect(res._getStatus()).toBe(400);
+        expect(res._getBody()).toEqual({
+          error: "Missing required field: instanceId",
+        });
+        expect(mockResolve).not.toHaveBeenCalled();
+        expect(mockPrisma.imageViewHistory.create).not.toHaveBeenCalled();
+        expect(mockPrisma.imageViewHistory.update).not.toHaveBeenCalled();
+      }
+    );
+
+    it.each(writes)(
+      "%s returns 400 when instanceId is not a non-empty string",
+      async (_name, handler) => {
+        for (const instanceId of [5, ""]) {
+          const req = reqFor(handler, {
+            body: malformed({ imageId: "img-1", instanceId }),
+            user: USER,
+          });
+          const res = resFor(handler);
+          await handler(req, res);
+
+          expect(res._getStatus()).toBe(400);
+          expect(res._getBody()).toEqual({
+            error: "instanceId must be a non-empty string",
+          });
+        }
+        expect(mockResolve).not.toHaveBeenCalled();
+      }
+    );
   });
 
   // ==========================================================================
@@ -55,49 +156,66 @@ describe("Image View History Controller", () => {
 
   describe("incrementImageOCounter", () => {
     it("returns 401 when user is not authenticated", async () => {
-      const req = mockReq({ imageId: "img-1" });
-      const res = mockRes();
-      await incrementImageOCounter(req, res);
+      const req = reqFor(incrementImageOCounter, {
+        body: { imageId: "img-1", instanceId: "instance-1" },
+      });
+      const res = resFor(incrementImageOCounter);
+      await authenticated(incrementImageOCounter)(req, res, vi.fn());
       expect(res._getStatus()).toBe(401);
-      expect(res._getBody()).toEqual({ error: "User not found" });
+      expect(res._getBody()).toEqual({ error: "Unauthorized" });
     });
 
     it("returns 400 when imageId is missing", async () => {
-      const req = mockReq({}, {}, USER);
-      const res = mockRes();
+      const req = reqFor(incrementImageOCounter, { user: USER });
+      const res = resFor(incrementImageOCounter);
       await incrementImageOCounter(req, res);
       expect(res._getStatus()).toBe(400);
-      expect(res._getBody()).toEqual({ error: "Missing required field: imageId" });
+      expect(res._getBody()).toEqual({
+        error: "Missing required field: imageId",
+      });
     });
 
     it("returns 401 when user is not found in database", async () => {
       mockPrisma.user.findUnique.mockResolvedValue(null);
-      const req = mockReq({ imageId: "img-1" }, {}, USER);
-      const res = mockRes();
+      const req = reqFor(incrementImageOCounter, {
+        body: { imageId: "img-1", instanceId: "instance-1" },
+        user: USER,
+      });
+      const res = resFor(incrementImageOCounter);
       await incrementImageOCounter(req, res);
       expect(res._getStatus()).toBe(401);
     });
 
     it("creates new record with oCount=1 when no history exists", async () => {
-      mockPrisma.user.findUnique.mockResolvedValue({ id: 1, syncToStash: false } as any);
+      mockPrisma.user.findUnique.mockResolvedValue(
+        partialRow({
+          id: 1,
+          syncToStash: false,
+        })
+      );
       mockPrisma.imageViewHistory.findUnique.mockResolvedValue(null);
-      mockPrisma.imageViewHistory.create.mockResolvedValue({
-        id: 1,
-        userId: 1,
-        imageId: "img-1",
-        instanceId: "instance-1",
-        viewCount: 0,
-        oCount: 1,
-        oHistory: [new Date().toISOString()],
-      } as any);
+      mockPrisma.imageViewHistory.create.mockResolvedValue(
+        partialRow({
+          id: 1,
+          userId: 1,
+          imageId: "img-1",
+          instanceId: "instance-1",
+          viewCount: 0,
+          oCount: 1,
+          oHistory: [new Date().toISOString()],
+        })
+      );
 
-      const req = mockReq({ imageId: "img-1" }, {}, USER);
-      const res = mockRes();
+      const req = reqFor(incrementImageOCounter, {
+        body: { imageId: "img-1", instanceId: "instance-1" },
+        user: USER,
+      });
+      const res = resFor(incrementImageOCounter);
       await incrementImageOCounter(req, res);
 
       expect(mockPrisma.imageViewHistory.create).toHaveBeenCalledWith(
         expect.objectContaining({
-          data: expect.objectContaining({
+          data: objectContaining({
             userId: 1,
             imageId: "img-1",
             instanceId: "instance-1",
@@ -106,7 +224,7 @@ describe("Image View History Controller", () => {
           }),
         })
       );
-      const body = res._getBody();
+      const body = res._getOkBody();
       expect(body.success).toBe(true);
       expect(body.oCount).toBe(1);
       expect(body.timestamp).toBeDefined();
@@ -114,49 +232,86 @@ describe("Image View History Controller", () => {
 
     it("increments oCount on existing record", async () => {
       const existingHistory = ["2024-01-01T00:00:00.000Z"];
-      mockPrisma.user.findUnique.mockResolvedValue({ id: 1, syncToStash: false } as any);
-      mockPrisma.imageViewHistory.findUnique.mockResolvedValue({
-        id: 1,
-        userId: 1,
-        imageId: "img-1",
-        instanceId: "instance-1",
-        oCount: 3,
-        oHistory: existingHistory,
-      } as any);
-      mockPrisma.imageViewHistory.update.mockResolvedValue({
-        id: 1,
-        oCount: 4,
-        oHistory: [...existingHistory, new Date().toISOString()],
-      } as any);
+      mockPrisma.user.findUnique.mockResolvedValue(
+        partialRow({
+          id: 1,
+          syncToStash: false,
+        })
+      );
+      mockPrisma.imageViewHistory.findUnique.mockResolvedValue(
+        partialRow({
+          id: 1,
+          userId: 1,
+          imageId: "img-1",
+          instanceId: "instance-1",
+          oCount: 3,
+          oHistory: existingHistory,
+        })
+      );
+      mockPrisma.imageViewHistory.update.mockResolvedValue(
+        partialRow({
+          id: 1,
+          oCount: 4,
+          oHistory: [...existingHistory, new Date().toISOString()],
+        })
+      );
 
-      const req = mockReq({ imageId: "img-1" }, {}, USER);
-      const res = mockRes();
+      const req = reqFor(incrementImageOCounter, {
+        body: { imageId: "img-1", instanceId: "instance-1" },
+        user: USER,
+      });
+      const res = resFor(incrementImageOCounter);
       await incrementImageOCounter(req, res);
 
-      expect(mockPrisma.imageViewHistory.update).toHaveBeenCalled();
-      const body = res._getBody();
+      expect(mockPrisma.$transaction).toHaveBeenCalledWith(
+        expect.any(Function),
+        DB_WRITE_TX
+      );
+      expect(mockPrisma.imageViewHistory.update).toHaveBeenCalledWith({
+        where: { id: 1 },
+        data: {
+          oCount: { increment: 1 },
+          oHistory: [...existingHistory, expect.any(String)],
+        },
+      });
+      const body = res._getOkBody();
       expect(body.success).toBe(true);
       expect(body.oCount).toBe(4);
     });
 
     it("uses instanceId from request body when provided", async () => {
-      mockPrisma.user.findUnique.mockResolvedValue({ id: 1, syncToStash: false } as any);
+      mockPrisma.user.findUnique.mockResolvedValue(
+        partialRow({
+          id: 1,
+          syncToStash: false,
+        })
+      );
       mockPrisma.imageViewHistory.findUnique.mockResolvedValue(null);
-      mockPrisma.imageViewHistory.create.mockResolvedValue({
-        id: 1,
-        oCount: 1,
-        oHistory: [],
-      } as any);
+      mockPrisma.imageViewHistory.create.mockResolvedValue(
+        partialRow({
+          id: 1,
+          oCount: 1,
+          oHistory: [],
+        })
+      );
 
-      const req = mockReq({ imageId: "img-1", instanceId: "custom-instance" }, {}, USER);
-      const res = mockRes();
+      const req = reqFor(incrementImageOCounter, {
+        body: { imageId: "img-1", instanceId: "custom-instance" },
+        user: USER,
+      });
+      const res = resFor(incrementImageOCounter);
       await incrementImageOCounter(req, res);
 
-      expect(mockGetEntityInstanceId).not.toHaveBeenCalled();
+      expect(mockResolve).toHaveBeenCalledWith(
+        1,
+        "image",
+        "img-1",
+        "custom-instance"
+      );
       expect(mockPrisma.imageViewHistory.findUnique).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: expect.objectContaining({
-            userId_instanceId_imageId: expect.objectContaining({
+          where: objectContaining({
+            userId_instanceId_imageId: objectContaining({
               instanceId: "custom-instance",
             }),
           }),
@@ -164,69 +319,269 @@ describe("Image View History Controller", () => {
       );
     });
 
-    it("falls back to getEntityInstanceId when instanceId not in body", async () => {
-      mockPrisma.user.findUnique.mockResolvedValue({ id: 1, syncToStash: false } as any);
+    it("with Sync to Stash on, increment of an image calls imageIncrementO", async () => {
+      mockPrisma.user.findUnique.mockResolvedValue(
+        partialRow({ id: 1, syncToStash: true })
+      );
       mockPrisma.imageViewHistory.findUnique.mockResolvedValue(null);
-      mockPrisma.imageViewHistory.create.mockResolvedValue({
-        id: 1,
-        oCount: 1,
-        oHistory: [],
-      } as any);
+      mockPrisma.imageViewHistory.create.mockResolvedValue(
+        partialRow({ id: 1, oCount: 1, oHistory: [] })
+      );
 
-      const req = mockReq({ imageId: "img-1" }, {}, USER);
-      const res = mockRes();
-      await incrementImageOCounter(req, res);
+      const res = resFor(incrementImageOCounter);
+      await incrementImageOCounter(
+        reqFor(incrementImageOCounter, {
+          body: { imageId: "img-1", instanceId: "instance-1" },
+          user: USER,
+        }),
+        res
+      );
 
-      expect(mockGetEntityInstanceId).toHaveBeenCalledWith("image", "img-1");
+      expect(mockInstanceManager.getForSync).toHaveBeenCalledWith("instance-1");
+      expect(stash.imageIncrementO).toHaveBeenCalledWith({ id: "img-1" });
+      expect(res._getOkBody().oCount).toBe(1);
     });
 
-    it("logs warning when user has syncToStash enabled", async () => {
-      const { logger } = await import("../../utils/logger.js");
-      mockPrisma.user.findUnique.mockResolvedValue({ id: 1, syncToStash: true } as any);
+    it("with Sync to Stash off, increment of an image calls no Stash", async () => {
+      mockPrisma.user.findUnique.mockResolvedValue(
+        partialRow({ id: 1, syncToStash: false })
+      );
       mockPrisma.imageViewHistory.findUnique.mockResolvedValue(null);
-      mockPrisma.imageViewHistory.create.mockResolvedValue({
-        id: 1,
-        oCount: 1,
-        oHistory: [],
-      } as any);
+      mockPrisma.imageViewHistory.create.mockResolvedValue(
+        partialRow({ id: 1, oCount: 1, oHistory: [] })
+      );
 
-      const req = mockReq({ imageId: "img-1" }, {}, USER);
-      const res = mockRes();
-      await incrementImageOCounter(req, res);
+      await incrementImageOCounter(
+        reqFor(incrementImageOCounter, {
+          body: { imageId: "img-1", instanceId: "instance-1" },
+          user: USER,
+        }),
+        resFor(incrementImageOCounter)
+      );
 
-      expect(logger.warn).toHaveBeenCalled();
-      expect(res._getBody().success).toBe(true);
+      expect(stash.imageIncrementO).not.toHaveBeenCalled();
+    });
+
+    it("a Stash failure does not fail an image increment", async () => {
+      mockPrisma.user.findUnique.mockResolvedValue(
+        partialRow({ id: 1, syncToStash: true })
+      );
+      mockPrisma.imageViewHistory.findUnique.mockResolvedValue(null);
+      mockPrisma.imageViewHistory.create.mockResolvedValue(
+        partialRow({ id: 1, oCount: 1, oHistory: [] })
+      );
+      stash.imageIncrementO.mockRejectedValue(new Error("Stash is down"));
+
+      const res = resFor(incrementImageOCounter);
+      await incrementImageOCounter(
+        reqFor(incrementImageOCounter, {
+          body: { imageId: "img-1", instanceId: "instance-1" },
+          user: USER,
+        }),
+        res
+      );
+
+      expect(res._getOkBody().oCount).toBe(1);
     });
 
     it("handles oHistory stored as JSON string", async () => {
-      mockPrisma.user.findUnique.mockResolvedValue({ id: 1, syncToStash: false } as any);
-      mockPrisma.imageViewHistory.findUnique.mockResolvedValue({
-        id: 1,
-        oCount: 2,
-        oHistory: JSON.stringify(["2024-01-01T00:00:00.000Z", "2024-01-02T00:00:00.000Z"]),
-      } as any);
-      mockPrisma.imageViewHistory.update.mockResolvedValue({
-        id: 1,
-        oCount: 3,
-        oHistory: [],
-      } as any);
+      mockPrisma.user.findUnique.mockResolvedValue(
+        partialRow({
+          id: 1,
+          syncToStash: false,
+        })
+      );
+      mockPrisma.imageViewHistory.findUnique.mockResolvedValue(
+        partialRow({
+          id: 1,
+          oCount: 2,
+          oHistory: JSON.stringify([
+            "2024-01-01T00:00:00.000Z",
+            "2024-01-02T00:00:00.000Z",
+          ]),
+        })
+      );
+      mockPrisma.imageViewHistory.update.mockResolvedValue(
+        partialRow({
+          id: 1,
+          oCount: 3,
+          oHistory: [],
+        })
+      );
 
-      const req = mockReq({ imageId: "img-1" }, {}, USER);
-      const res = mockRes();
+      const req = reqFor(incrementImageOCounter, {
+        body: { imageId: "img-1", instanceId: "instance-1" },
+        user: USER,
+      });
+      const res = resFor(incrementImageOCounter);
       await incrementImageOCounter(req, res);
 
-      expect(mockPrisma.imageViewHistory.update).toHaveBeenCalled();
-      expect(res._getBody().success).toBe(true);
+      // Read through readHistory, written back as an array
+      expect(mockPrisma.imageViewHistory.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: objectContaining({
+            oHistory: [
+              "2024-01-01T00:00:00.000Z",
+              "2024-01-02T00:00:00.000Z",
+              expect.any(String),
+            ],
+          }),
+        })
+      );
+      expect(res._getOkBody().success).toBe(true);
     });
 
-    it("returns 500 on unexpected error", async () => {
-      mockPrisma.user.findUnique.mockRejectedValue(new Error("DB connection lost"));
+    it("a failure reaches the error handler: unexpected error", async () => {
+      mockPrisma.user.findUnique.mockRejectedValue(
+        new Error("DB connection lost")
+      );
 
-      const req = mockReq({ imageId: "img-1" }, {}, USER);
-      const res = mockRes();
-      await incrementImageOCounter(req, res);
+      const req = reqFor(incrementImageOCounter, {
+        body: { imageId: "img-1", instanceId: "instance-1" },
+        user: USER,
+      });
+      const res = resFor(incrementImageOCounter);
+      await expect(incrementImageOCounter(req, res)).rejects.toThrow(
+        "DB connection lost"
+      );
 
-      expect(res._getStatus()).toBe(500);
+      expect(res.json).not.toHaveBeenCalled();
+    });
+  });
+
+  // ==========================================================================
+  // decrementImageOCounter Tests
+  // ==========================================================================
+
+  describe("decrementImageOCounter", () => {
+    // The rows these tests store stay out of the tests after them
+    afterEach(() => {
+      mockPrisma.imageViewHistory.findUnique.mockReset();
+      mockPrisma.imageViewHistory.update.mockReset();
+    });
+
+    async function decrement() {
+      const res = resFor(decrementImageOCounter);
+      await decrementImageOCounter(
+        reqFor(decrementImageOCounter, {
+          body: { imageId: "img-1", instanceId: "instance-1" },
+          user: USER,
+        }),
+        res
+      );
+      return res;
+    }
+
+    function storedRow(oCount: number, oHistory: string[]) {
+      mockPrisma.imageViewHistory.findUnique.mockResolvedValue(
+        partialRow({ id: 1, oCount, oHistory })
+      );
+      mockPrisma.imageViewHistory.update.mockResolvedValue(
+        partialRow({ id: 1, oCount: oCount - 1 })
+      );
+    }
+
+    it("removes the newest O time and lowers oCount by 1 in one unit", async () => {
+      mockPrisma.user.findUnique.mockResolvedValue(
+        partialRow({ id: 1, syncToStash: false })
+      );
+      storedRow(3, [
+        "2024-03-01T00:00:00.000Z",
+        "2024-01-01T00:00:00.000Z",
+        "2024-02-01T00:00:00.000Z",
+      ]);
+
+      const res = await decrement();
+
+      expect(mockPrisma.$transaction).toHaveBeenCalledTimes(1);
+      expect(mockPrisma.$transaction).toHaveBeenCalledWith(
+        expect.any(Function),
+        DB_WRITE_TX
+      );
+      expect(mockPrisma.imageViewHistory.update).toHaveBeenCalledWith({
+        where: { id: 1 },
+        data: {
+          oCount: { decrement: 1 },
+          oHistory: ["2024-01-01T00:00:00.000Z", "2024-02-01T00:00:00.000Z"],
+        },
+      });
+      expect(res._getOkBody()).toEqual({ success: true, oCount: 2 });
+      expect(stash.imageDecrementO).not.toHaveBeenCalled();
+    });
+
+    it("at 0 answers 200 with oCount 0 and writes nothing", async () => {
+      mockPrisma.user.findUnique.mockResolvedValue(
+        partialRow({ id: 1, syncToStash: true })
+      );
+      mockPrisma.imageViewHistory.findUnique.mockResolvedValue(null);
+
+      const res = await decrement();
+
+      expect(res._getStatus()).toBe(200);
+      expect(res._getOkBody()).toEqual({ success: true, oCount: 0 });
+      expect(mockPrisma.$transaction).not.toHaveBeenCalled();
+      expect(mockPrisma.imageViewHistory.update).not.toHaveBeenCalled();
+      expect(stash.imageDecrementO).not.toHaveBeenCalled();
+    });
+
+    it("on an image the user cannot see is 404", async () => {
+      mockPrisma.user.findUnique.mockResolvedValue(
+        partialRow({ id: 1, syncToStash: true })
+      );
+      mockResolve.mockResolvedValueOnce(null);
+
+      const res = await decrement();
+
+      expect(res._getStatus()).toBe(404);
+      expect(res._getErrorBody()).toEqual({ error: "Image not found" });
+      expect(mockPrisma.imageViewHistory.update).not.toHaveBeenCalled();
+      expect(mockInstanceManager.getForSync).not.toHaveBeenCalled();
+    });
+
+    it("answers 400 without an instance", async () => {
+      const res = resFor(decrementImageOCounter);
+      await decrementImageOCounter(
+        reqFor(decrementImageOCounter, {
+          body: malformed({ imageId: "img-1" }),
+          user: USER,
+        }),
+        res
+      );
+
+      expect(res._getStatus()).toBe(400);
+      expect(mockResolve).not.toHaveBeenCalled();
+    });
+
+    it("with Sync to Stash on, decrement calls imageDecrementO", async () => {
+      mockPrisma.user.findUnique.mockResolvedValue(
+        partialRow({ id: 1, syncToStash: true })
+      );
+      storedRow(1, ["2024-01-01T00:00:00.000Z"]);
+
+      const res = await decrement();
+
+      expect(mockInstanceManager.getForSync).toHaveBeenCalledWith("instance-1");
+      expect(stash.imageDecrementO).toHaveBeenCalledWith({ id: "img-1" });
+      expect(res._getOkBody()).toEqual({ success: true, oCount: 0 });
+    });
+
+    it("a Stash failure does not fail the request", async () => {
+      mockPrisma.user.findUnique.mockResolvedValue(
+        partialRow({ id: 1, syncToStash: true })
+      );
+      storedRow(2, ["2024-01-01T00:00:00.000Z", "2024-02-01T00:00:00.000Z"]);
+      stash.imageDecrementO.mockRejectedValue(new Error("Stash is down"));
+
+      const res = await decrement();
+
+      expect(res._getOkBody()).toEqual({ success: true, oCount: 1 });
+    });
+
+    it("POST /decrement-o is routed", async () => {
+      const { default: router } =
+        await import("../../routes/imageViewHistory.js");
+
+      expect(() => findHandler(router, "post", "/decrement-o")).not.toThrow();
     });
   });
 
@@ -236,41 +591,50 @@ describe("Image View History Controller", () => {
 
   describe("recordImageView", () => {
     it("returns 401 when user is not authenticated", async () => {
-      const req = mockReq({ imageId: "img-1" });
-      const res = mockRes();
-      await recordImageView(req, res);
+      const req = reqFor(recordImageView, {
+        body: { imageId: "img-1", instanceId: "instance-1" },
+      });
+      const res = resFor(recordImageView);
+      await authenticated(recordImageView)(req, res, vi.fn());
       expect(res._getStatus()).toBe(401);
-      expect(res._getBody()).toEqual({ error: "User not found" });
+      expect(res._getBody()).toEqual({ error: "Unauthorized" });
     });
 
     it("returns 400 when imageId is missing", async () => {
-      const req = mockReq({}, {}, USER);
-      const res = mockRes();
+      const req = reqFor(recordImageView, { user: USER });
+      const res = resFor(recordImageView);
       await recordImageView(req, res);
       expect(res._getStatus()).toBe(400);
-      expect(res._getBody()).toEqual({ error: "Missing required field: imageId" });
+      expect(res._getBody()).toEqual({
+        error: "Missing required field: imageId",
+      });
     });
 
     it("creates new view record with viewCount=1 when no history exists", async () => {
       mockPrisma.imageViewHistory.findUnique.mockResolvedValue(null);
-      mockPrisma.imageViewHistory.create.mockResolvedValue({
-        id: 1,
-        userId: 1,
-        imageId: "img-1",
-        instanceId: "instance-1",
-        viewCount: 1,
-        viewHistory: [new Date().toISOString()],
-        oCount: 0,
-        lastViewedAt: new Date(),
-      } as any);
+      mockPrisma.imageViewHistory.create.mockResolvedValue(
+        partialRow({
+          id: 1,
+          userId: 1,
+          imageId: "img-1",
+          instanceId: "instance-1",
+          viewCount: 1,
+          viewHistory: [new Date().toISOString()],
+          oCount: 0,
+          lastViewedAt: new Date(),
+        })
+      );
 
-      const req = mockReq({ imageId: "img-1" }, {}, USER);
-      const res = mockRes();
+      const req = reqFor(recordImageView, {
+        body: { imageId: "img-1", instanceId: "instance-1" },
+        user: USER,
+      });
+      const res = resFor(recordImageView);
       await recordImageView(req, res);
 
       expect(mockPrisma.imageViewHistory.create).toHaveBeenCalledWith(
         expect.objectContaining({
-          data: expect.objectContaining({
+          data: objectContaining({
             userId: 1,
             imageId: "img-1",
             viewCount: 1,
@@ -278,7 +642,7 @@ describe("Image View History Controller", () => {
           }),
         })
       );
-      const body = res._getBody();
+      const body = res._getOkBody();
       expect(body.success).toBe(true);
       expect(body.viewCount).toBe(1);
       expect(body.lastViewedAt).toBeDefined();
@@ -286,41 +650,58 @@ describe("Image View History Controller", () => {
 
     it("increments viewCount on existing record", async () => {
       const existingHistory = ["2024-01-01T00:00:00.000Z"];
-      mockPrisma.imageViewHistory.findUnique.mockResolvedValue({
-        id: 1,
-        userId: 1,
-        imageId: "img-1",
-        viewCount: 5,
-        viewHistory: existingHistory,
-        lastViewedAt: new Date("2024-01-01"),
-      } as any);
-      mockPrisma.imageViewHistory.update.mockResolvedValue({
-        id: 1,
-        viewCount: 6,
-        viewHistory: [...existingHistory, new Date().toISOString()],
-        lastViewedAt: new Date(),
-      } as any);
+      mockPrisma.imageViewHistory.findUnique.mockResolvedValue(
+        partialRow({
+          id: 1,
+          userId: 1,
+          imageId: "img-1",
+          viewCount: 5,
+          viewHistory: existingHistory,
+          lastViewedAt: new Date("2024-01-01"),
+        })
+      );
+      mockPrisma.imageViewHistory.update.mockResolvedValue(
+        partialRow({
+          id: 1,
+          viewCount: 6,
+          viewHistory: [...existingHistory, new Date().toISOString()],
+          lastViewedAt: new Date(),
+        })
+      );
 
-      const req = mockReq({ imageId: "img-1" }, {}, USER);
-      const res = mockRes();
+      const req = reqFor(recordImageView, {
+        body: { imageId: "img-1", instanceId: "instance-1" },
+        user: USER,
+      });
+      const res = resFor(recordImageView);
       await recordImageView(req, res);
 
-      expect(mockPrisma.imageViewHistory.update).toHaveBeenCalled();
-      const body = res._getBody();
+      expect(mockPrisma.imageViewHistory.update).toHaveBeenCalledWith({
+        where: { id: 1 },
+        data: {
+          viewCount: { increment: 1 },
+          viewHistory: [...existingHistory, expect.any(String)],
+          lastViewedAt: anyOf(Date),
+        },
+      });
+      const body = res._getOkBody();
       expect(body.success).toBe(true);
       expect(body.viewCount).toBe(6);
     });
 
-    it("returns 500 on unexpected error", async () => {
+    it("a failure reaches the error handler: unexpected error", async () => {
       mockPrisma.imageViewHistory.findUnique.mockRejectedValue(
         new Error("Query failed")
       );
 
-      const req = mockReq({ imageId: "img-1" }, {}, USER);
-      const res = mockRes();
-      await recordImageView(req, res);
+      const req = reqFor(recordImageView, {
+        body: { imageId: "img-1", instanceId: "instance-1" },
+        user: USER,
+      });
+      const res = resFor(recordImageView);
+      await expect(recordImageView(req, res)).rejects.toThrow("Query failed");
 
-      expect(res._getStatus()).toBe(500);
+      expect(res.json).not.toHaveBeenCalled();
     });
   });
 
@@ -330,26 +711,55 @@ describe("Image View History Controller", () => {
 
   describe("getImageViewHistory", () => {
     it("returns 401 when user is not authenticated", async () => {
-      const req = mockReq({}, { imageId: "img-1" });
-      const res = mockRes();
-      await getImageViewHistory(req, res);
+      const req = reqFor(getImageViewHistory, { params: { imageId: "img-1" } });
+      const res = resFor(getImageViewHistory);
+      await authenticated(getImageViewHistory)(req, res, vi.fn());
       expect(res._getStatus()).toBe(401);
-      expect(res._getBody()).toEqual({ error: "User not authenticated" });
+      expect(res._getBody()).toEqual({ error: "Unauthorized" });
     });
 
     it("returns 400 when imageId is missing", async () => {
-      const req = mockReq({}, {}, USER);
-      const res = mockRes();
+      const req = reqFor(getImageViewHistory, { user: USER });
+      const res = resFor(getImageViewHistory);
       await getImageViewHistory(req, res);
       expect(res._getStatus()).toBe(400);
-      expect(res._getBody()).toEqual({ error: "Missing required parameter: imageId" });
+      expect(res._getBody()).toEqual({
+        error: "Missing required parameter: imageId",
+      });
+    });
+
+    it("answers 400 without an instanceId", async () => {
+      const req = reqFor(getImageViewHistory, {
+        params: { imageId: "img-1" },
+        user: USER,
+      });
+      const res = resFor(getImageViewHistory);
+      await getImageViewHistory(req, res);
+      expect(res._getStatus()).toBe(400);
+      expect(mockPrisma.imageViewHistory.findUnique).not.toHaveBeenCalled();
+    });
+
+    it("answers 400 for a malformed instanceId", async () => {
+      const req = reqFor(getImageViewHistory, {
+        params: { imageId: "img-1" },
+        query: { instanceId: "a:b" },
+        user: USER,
+      });
+      const res = resFor(getImageViewHistory);
+      await getImageViewHistory(req, res);
+      expect(res._getStatus()).toBe(400);
+      expect(mockPrisma.imageViewHistory.findUnique).not.toHaveBeenCalled();
     });
 
     it("returns exists:false when no history found", async () => {
       mockPrisma.imageViewHistory.findUnique.mockResolvedValue(null);
 
-      const req = mockReq({}, { imageId: "img-1" }, USER);
-      const res = mockRes();
+      const req = reqFor(getImageViewHistory, {
+        params: { imageId: "img-1" },
+        query: { instanceId: "instance-1" },
+        user: USER,
+      });
+      const res = resFor(getImageViewHistory);
       await getImageViewHistory(req, res);
 
       expect(res._getBody()).toEqual({
@@ -361,23 +771,33 @@ describe("Image View History Controller", () => {
 
     it("returns full history when record exists", async () => {
       const lastViewed = new Date("2024-06-15T12:00:00.000Z");
-      mockPrisma.imageViewHistory.findUnique.mockResolvedValue({
-        id: 1,
-        userId: 1,
-        imageId: "img-1",
-        instanceId: "instance-1",
-        viewCount: 10,
-        viewHistory: ["2024-06-15T12:00:00.000Z"],
-        oCount: 3,
-        oHistory: ["2024-06-10T08:00:00.000Z", "2024-06-12T08:00:00.000Z", "2024-06-14T08:00:00.000Z"],
-        lastViewedAt: lastViewed,
-      } as any);
+      mockPrisma.imageViewHistory.findUnique.mockResolvedValue(
+        partialRow({
+          id: 1,
+          userId: 1,
+          imageId: "img-1",
+          instanceId: "instance-1",
+          viewCount: 10,
+          viewHistory: ["2024-06-15T12:00:00.000Z"],
+          oCount: 3,
+          oHistory: [
+            "2024-06-10T08:00:00.000Z",
+            "2024-06-12T08:00:00.000Z",
+            "2024-06-14T08:00:00.000Z",
+          ],
+          lastViewedAt: lastViewed,
+        })
+      );
 
-      const req = mockReq({}, { imageId: "img-1" }, USER);
-      const res = mockRes();
+      const req = reqFor(getImageViewHistory, {
+        params: { imageId: "img-1" },
+        query: { instanceId: "instance-1" },
+        user: USER,
+      });
+      const res = resFor(getImageViewHistory);
       await getImageViewHistory(req, res);
 
-      const body = res._getBody();
+      const body = res._getOkBody();
       expect(body.exists).toBe(true);
       expect(body.viewCount).toBe(10);
       expect(body.oCount).toBe(3);
@@ -387,39 +807,81 @@ describe("Image View History Controller", () => {
     });
 
     it("parses JSON strings in viewHistory and oHistory", async () => {
-      mockPrisma.imageViewHistory.findUnique.mockResolvedValue({
-        id: 1,
-        viewCount: 2,
-        viewHistory: JSON.stringify(["2024-01-01T00:00:00.000Z", "2024-01-02T00:00:00.000Z"]),
-        oCount: 1,
-        oHistory: JSON.stringify(["2024-01-01T12:00:00.000Z"]),
-        lastViewedAt: new Date("2024-01-02"),
-      } as any);
+      mockPrisma.imageViewHistory.findUnique.mockResolvedValue(
+        partialRow({
+          id: 1,
+          viewCount: 2,
+          viewHistory: JSON.stringify([
+            "2024-01-01T00:00:00.000Z",
+            "2024-01-02T00:00:00.000Z",
+          ]),
+          oCount: 1,
+          oHistory: JSON.stringify(["2024-01-01T12:00:00.000Z"]),
+          lastViewedAt: new Date("2024-01-02"),
+        })
+      );
 
-      const req = mockReq({}, { imageId: "img-1" }, USER);
-      const res = mockRes();
+      const req = reqFor(getImageViewHistory, {
+        params: { imageId: "img-1" },
+        query: { instanceId: "instance-1" },
+        user: USER,
+      });
+      const res = resFor(getImageViewHistory);
       await getImageViewHistory(req, res);
 
-      const body = res._getBody();
+      const body = res._getOkBody();
       expect(body.exists).toBe(true);
-      expect(Array.isArray(body.viewHistory)).toBe(true);
-      expect(body.viewHistory).toHaveLength(2);
-      expect(Array.isArray(body.oHistory)).toBe(true);
-      expect(body.oHistory).toHaveLength(1);
+      expect(body.viewHistory).toEqual([
+        "2024-01-01T00:00:00.000Z",
+        "2024-01-02T00:00:00.000Z",
+      ]);
+      expect(body.oHistory).toEqual(["2024-01-01T12:00:00.000Z"]);
+    });
+
+    it("reads a malformed viewHistory and oHistory as empty lists", async () => {
+      mockPrisma.imageViewHistory.findUnique.mockResolvedValue(
+        partialRow({
+          id: 1,
+          viewCount: 2,
+          viewHistory: "not json",
+          oCount: 1,
+          oHistory: "not json",
+          lastViewedAt: new Date("2024-01-02"),
+        })
+      );
+
+      const req = reqFor(getImageViewHistory, {
+        params: { imageId: "img-1" },
+        query: { instanceId: "instance-1" },
+        user: USER,
+      });
+      const res = resFor(getImageViewHistory);
+      await getImageViewHistory(req, res);
+
+      expect(res.status).not.toHaveBeenCalled();
+      const body = res._getOkBody();
+      expect(body.exists).toBe(true);
+      expect(body.viewHistory).toEqual([]);
+      expect(body.oHistory).toEqual([]);
     });
 
     it("uses instanceId from query param when provided", async () => {
       mockPrisma.imageViewHistory.findUnique.mockResolvedValue(null);
 
-      const req = mockReq({}, { imageId: "img-1" }, USER, { instanceId: "query-instance" });
-      const res = mockRes();
+      const req = reqFor(getImageViewHistory, {
+        params: { imageId: "img-1" },
+        user: USER,
+        query: {
+          instanceId: "query-instance",
+        },
+      });
+      const res = resFor(getImageViewHistory);
       await getImageViewHistory(req, res);
 
-      expect(mockGetEntityInstanceId).not.toHaveBeenCalled();
       expect(mockPrisma.imageViewHistory.findUnique).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: expect.objectContaining({
-            userId_instanceId_imageId: expect.objectContaining({
+          where: objectContaining({
+            userId_instanceId_imageId: objectContaining({
               instanceId: "query-instance",
             }),
           }),
@@ -427,16 +889,20 @@ describe("Image View History Controller", () => {
       );
     });
 
-    it("returns 500 on unexpected error", async () => {
+    it("a failure reaches the error handler: unexpected error", async () => {
       mockPrisma.imageViewHistory.findUnique.mockRejectedValue(
         new Error("DB timeout")
       );
 
-      const req = mockReq({}, { imageId: "img-1" }, USER);
-      const res = mockRes();
-      await getImageViewHistory(req, res);
+      const req = reqFor(getImageViewHistory, {
+        params: { imageId: "img-1" },
+        query: { instanceId: "instance-1" },
+        user: USER,
+      });
+      const res = resFor(getImageViewHistory);
+      await expect(getImageViewHistory(req, res)).rejects.toThrow("DB timeout");
 
-      expect(res._getStatus()).toBe(500);
+      expect(res.json).not.toHaveBeenCalled();
     });
   });
 });

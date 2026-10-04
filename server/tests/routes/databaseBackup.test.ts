@@ -1,8 +1,11 @@
 /**
  * Unit Tests for Database Backup Routes (Admin API)
  */
-import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
-import { Request, Response, NextFunction } from "express";
+import type { NextFunction, Request, Response } from "express";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ValidationError } from "../../middleware/errorHandler.js";
+import { databaseBackupService } from "../../services/DatabaseBackupService.js";
+import { findHandler, reqFor, resFor } from "../helpers/controllerTestUtils.js";
 
 // Mock DatabaseBackupService
 vi.mock("../../services/DatabaseBackupService.js", () => ({
@@ -10,13 +13,18 @@ vi.mock("../../services/DatabaseBackupService.js", () => ({
     listBackups: vi.fn(),
     createBackup: vi.fn(),
     deleteBackup: vi.fn(),
+    getBackupDir: vi.fn(() => "/app/data"),
   },
 }));
 
 // Mock auth middleware
 vi.mock("../../middleware/auth.js", () => ({
-  authenticate: vi.fn((_req: Request, _res: Response, next: NextFunction) => next()),
-  requireAdmin: vi.fn((_req: Request, _res: Response, next: NextFunction) => next()),
+  authenticate: vi.fn((_req: Request, _res: Response, next: NextFunction) =>
+    next()
+  ),
+  requireAdmin: vi.fn((_req: Request, _res: Response, next: NextFunction) =>
+    next()
+  ),
 }));
 
 // Mock logger
@@ -28,32 +36,7 @@ vi.mock("../../utils/logger.js", () => ({
   },
 }));
 
-import { databaseBackupService } from "../../services/DatabaseBackupService.js";
-
 const mockService = vi.mocked(databaseBackupService);
-
-function createMockRequest(options: {
-  params?: Record<string, string>;
-  body?: Record<string, unknown>;
-  user?: { id: number; username: string; role: string };
-} = {}): Partial<Request> {
-  return {
-    params: options.params || {},
-    body: options.body || {},
-    user: options.user,
-  } as Partial<Request>;
-}
-
-function createMockResponse() {
-  const responseJson = vi.fn();
-  const responseStatus = vi.fn(() => ({ json: responseJson }));
-  return {
-    json: responseJson,
-    status: responseStatus,
-    responseJson,
-    responseStatus,
-  };
-}
 
 describe("Database Backup Routes", () => {
   beforeEach(() => {
@@ -65,88 +48,132 @@ describe("Database Backup Routes", () => {
   });
 
   describe("GET /api/admin/database/backups", () => {
-    it("should return list of backups", async () => {
-      const mockBackups = [
+    it("lists every backup with its kind, path and the backup directory", async () => {
+      const preMigration =
+        "peek-stash-browser.db.backup-20260924-101112-pre-3.5.0";
+      mockService.getBackupDir.mockReturnValue("/app/data");
+      mockService.listBackups.mockResolvedValue([
+        {
+          filename: preMigration,
+          kind: "preMigration",
+          version: "3.5.0",
+          path: `/app/data/${preMigration}`,
+          size: 4096,
+          createdAt: new Date("2026-09-24T10:11:12.000Z"),
+        },
         {
           filename: "peek-stash-browser.db.backup-20260118-104532",
+          kind: "manual",
+          version: null,
+          path: "/app/data/peek-stash-browser.db.backup-20260118-104532",
           size: 246747136,
           createdAt: new Date("2026-01-18T10:45:32.000Z"),
         },
-      ];
-      mockService.listBackups.mockResolvedValue(mockBackups);
+      ]);
 
-      const { default: router } = await import("../../routes/databaseBackup.js");
-
-      const mockReq = createMockRequest({
-        user: { id: 1, username: "admin", role: "ADMIN" },
-      });
-      const { json, status } = createMockResponse();
-      const mockRes = { json, status } as unknown as Response;
+      const { default: router } =
+        await import("../../routes/databaseBackup.js");
 
       // Find and call the route handler
-      const layer = router.stack.find(
-        (l: any) => l.route?.path === "/database/backups" && l.route?.methods?.get
-      );
-      const handler = layer?.route?.stack?.[0]?.handle;
-
-      await handler(mockReq, mockRes, () => {});
-
-      expect(mockService.listBackups).toHaveBeenCalled();
-      expect(json).toHaveBeenCalledWith({ backups: mockBackups });
-    });
-
-    it("should return 500 on service error", async () => {
-      mockService.listBackups.mockRejectedValue(new Error("Disk error"));
-
-      const { default: router } = await import("../../routes/databaseBackup.js");
-
-      const mockReq = createMockRequest({
+      const handler = findHandler(router, "get", "/database/backups");
+      const req = reqFor(handler, {
         user: { id: 1, username: "admin", role: "ADMIN" },
       });
-      const { json, status, responseJson, responseStatus } = createMockResponse();
-      const mockRes = { json, status } as unknown as Response;
+      const res = resFor(handler);
 
-      const layer = router.stack.find(
-        (l: any) => l.route?.path === "/database/backups" && l.route?.methods?.get
-      );
-      const handler = layer?.route?.stack?.[0]?.handle;
+      await handler(req, res, () => {});
 
-      await handler(mockReq, mockRes, () => {});
-
-      expect(responseStatus).toHaveBeenCalledWith(500);
-      expect(responseJson).toHaveBeenCalledWith({
-        error: "Failed to list backups",
-        message: "Disk error",
+      expect(mockService.listBackups).toHaveBeenCalled();
+      expect(res.json).toHaveBeenCalledWith({
+        backups: [
+          {
+            filename: preMigration,
+            kind: "preMigration",
+            version: "3.5.0",
+            path: `/app/data/${preMigration}`,
+            size: 4096,
+            createdAt: "2026-09-24T10:11:12.000Z",
+          },
+          {
+            filename: "peek-stash-browser.db.backup-20260118-104532",
+            kind: "manual",
+            version: null,
+            path: "/app/data/peek-stash-browser.db.backup-20260118-104532",
+            size: 246747136,
+            createdAt: "2026-01-18T10:45:32.000Z",
+          },
+        ],
+        directory: "/app/data",
       });
+    });
+
+    it("a failed backup reaches the error handler", async () => {
+      mockService.createBackup.mockRejectedValue(new Error("Disk full"));
+
+      const { default: router } =
+        await import("../../routes/databaseBackup.js");
+
+      const handler = findHandler(router, "post", "/database/backup");
+      const req = reqFor(handler, {
+        user: { id: 1, username: "admin", role: "ADMIN" },
+      });
+      const res = resFor(handler);
+
+      await expect(handler(req, res, () => {})).rejects.toThrow("Disk full");
+      expect(res.json).not.toHaveBeenCalled();
+    });
+
+    it("a service failure reaches the error handler", async () => {
+      mockService.listBackups.mockRejectedValue(new Error("Disk error"));
+
+      const { default: router } =
+        await import("../../routes/databaseBackup.js");
+
+      const handler = findHandler(router, "get", "/database/backups");
+      const req = reqFor(handler, {
+        user: { id: 1, username: "admin", role: "ADMIN" },
+      });
+      const res = resFor(handler);
+
+      await expect(handler(req, res, () => {})).rejects.toThrow("Disk error");
+      expect(res.json).not.toHaveBeenCalled();
     });
   });
 
   describe("POST /api/admin/database/backup", () => {
     it("should create a backup and return info", async () => {
-      const mockBackup = {
-        filename: "peek-stash-browser.db.backup-20260118-104532",
+      const filename = "peek-stash-browser.db.backup-20260118-104532-2";
+      mockService.createBackup.mockResolvedValue({
+        filename,
+        kind: "manual",
+        version: null,
+        path: `/app/data/${filename}`,
         size: 246747136,
         createdAt: new Date("2026-01-18T10:45:32.000Z"),
-      };
-      mockService.createBackup.mockResolvedValue(mockBackup);
+      });
 
-      const { default: router } = await import("../../routes/databaseBackup.js");
+      const { default: router } =
+        await import("../../routes/databaseBackup.js");
 
-      const mockReq = createMockRequest({
+      const handler = findHandler(router, "post", "/database/backup");
+      const req = reqFor(handler, {
         user: { id: 1, username: "admin", role: "ADMIN" },
       });
-      const { json, status } = createMockResponse();
-      const mockRes = { json, status } as unknown as Response;
+      const res = resFor(handler);
 
-      const layer = router.stack.find(
-        (l: any) => l.route?.path === "/database/backup" && l.route?.methods?.post
-      );
-      const handler = layer?.route?.stack?.[0]?.handle;
-
-      await handler(mockReq, mockRes, () => {});
+      await handler(req, res, () => {});
 
       expect(mockService.createBackup).toHaveBeenCalled();
-      expect(json).toHaveBeenCalledWith({ backup: mockBackup });
+      expect(res.json).toHaveBeenCalledWith({
+        backup: {
+          filename,
+          kind: "manual",
+          version: null,
+          path: `/app/data/${filename}`,
+          size: 246747136,
+          createdAt: "2026-01-18T10:45:32.000Z",
+        },
+      });
     });
   });
 
@@ -154,54 +181,52 @@ describe("Database Backup Routes", () => {
     it("should delete a backup", async () => {
       mockService.deleteBackup.mockResolvedValue(undefined);
 
-      const { default: router } = await import("../../routes/databaseBackup.js");
+      const { default: router } =
+        await import("../../routes/databaseBackup.js");
 
-      const mockReq = createMockRequest({
+      const handler = findHandler(
+        router,
+        "delete",
+        "/database/backups/:filename"
+      );
+      const req = reqFor(handler, {
         params: { filename: "peek-stash-browser.db.backup-20260118-104532" },
         user: { id: 1, username: "admin", role: "ADMIN" },
       });
-      const { json, status } = createMockResponse();
-      const mockRes = { json, status } as unknown as Response;
+      const res = resFor(handler);
 
-      const layer = router.stack.find(
-        (l: any) =>
-          l.route?.path === "/database/backups/:filename" &&
-          l.route?.methods?.delete
-      );
-      const handler = layer?.route?.stack?.[0]?.handle;
-
-      await handler(mockReq, mockRes, () => {});
+      await handler(req, res, () => {});
 
       expect(mockService.deleteBackup).toHaveBeenCalledWith(
         "peek-stash-browser.db.backup-20260118-104532"
       );
-      expect(json).toHaveBeenCalledWith({ ok: true });
+      expect(res.json).toHaveBeenCalledWith({ ok: true });
     });
 
-    it("should return 400 for invalid filename", async () => {
+    it("an invalid filename reaches the error handler as a 400", async () => {
       mockService.deleteBackup.mockRejectedValue(
-        new Error("Invalid backup filename")
+        new ValidationError("Invalid backup filename")
       );
 
-      const { default: router } = await import("../../routes/databaseBackup.js");
+      const { default: router } =
+        await import("../../routes/databaseBackup.js");
 
-      const mockReq = createMockRequest({
+      const handler = findHandler(
+        router,
+        "delete",
+        "/database/backups/:filename"
+      );
+      const req = reqFor(handler, {
         params: { filename: "../etc/passwd" },
         user: { id: 1, username: "admin", role: "ADMIN" },
       });
-      const { json, status, responseJson, responseStatus } = createMockResponse();
-      const mockRes = { json, status } as unknown as Response;
+      const res = resFor(handler);
 
-      const layer = router.stack.find(
-        (l: any) =>
-          l.route?.path === "/database/backups/:filename" &&
-          l.route?.methods?.delete
-      );
-      const handler = layer?.route?.stack?.[0]?.handle;
-
-      await handler(mockReq, mockRes, () => {});
-
-      expect(responseStatus).toHaveBeenCalledWith(400);
+      await expect(handler(req, res, () => {})).rejects.toMatchObject({
+        statusCode: 400,
+        message: "Invalid backup filename",
+      });
+      expect(res.json).not.toHaveBeenCalled();
     });
   });
 });

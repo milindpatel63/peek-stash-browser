@@ -4,22 +4,74 @@
  * Handles automatic sync triggers:
  * - Startup sync (full if first run, incremental otherwise)
  * - Polling interval (configurable, default 60 min)
+ * - The daily full pass: the startup sync or a scheduled one is a full sync
+ *   when an enabled instance's last full pass that ran to the end is over
+ *   24 hours old, or it has none
  * - Manual trigger support
  *
  * Note: Stash scan completion subscription is a future enhancement
  * that would require WebSocket connection to Stash GraphQL.
  */
-
-import { wereMigrationsApplied } from "../initializers/database.js";
+import type { StashInstance } from "@prisma/client";
 import prisma from "../prisma/singleton.js";
 import { logger } from "../utils/logger.js";
+import { logSyncFailure } from "../utils/syncLog.js";
 import { stashInstanceManager } from "./StashInstanceManager.js";
-import { stashSyncService, type SyncProgress } from "./StashSyncService.js";
+import { stashSyncService } from "./StashSyncService.js";
+
+/** The types the startup check reports as never synced when a row is absent */
+const STARTUP_TYPES = [
+  "studio",
+  "tag",
+  "performer",
+  "group",
+  "gallery",
+  "scene",
+  "image",
+];
 
 interface SyncSchedulerSettings {
   syncIntervalMinutes: number;
   enableScanSubscription: boolean;
-  enablePluginWebhook: boolean;
+}
+
+/**
+ * How often every type of every enabled instance is fetched whole: the
+ * catch-all for what Stash changes without moving updated_at and what an
+ * incremental sync cannot see (see .claude/rules/sync.md).
+ */
+const FULL_PASS_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+type FullPassState = Pick<StashInstance, "id" | "lastFullPassAt">;
+
+/** The instance that makes the full pass due, and its last full pass. */
+type FullPassDue = {
+  instanceId: string;
+  lastFullPassAt: string | null;
+};
+
+/**
+ * The first of `instanceIds` whose last full pass (`lastFullPassAt`, set
+ * when a full sync of the instance ran to the end) is older than
+ * FULL_PASS_INTERVAL_MS before `now`, or that has none (the pass is due),
+ * else null. A pass cut off by an abort or a restart never set it; a type
+ * that failed in a pass that ran to the end keeps its `lastError` and its
+ * old watermark, so the incremental syncs keep trying it, and does not make
+ * every scheduled sync a full one.
+ */
+function fullPassDue(
+  instanceIds: readonly string[],
+  instances: readonly FullPassState[],
+  now: number
+): FullPassDue | null {
+  for (const instanceId of instanceIds) {
+    const at =
+      instances.find((i) => i.id === instanceId)?.lastFullPassAt ?? null;
+    if (!at || at.getTime() < now - FULL_PASS_INTERVAL_MS) {
+      return { instanceId, lastFullPassAt: at?.toISOString() ?? null };
+    }
+  }
+  return null;
 }
 
 class SyncScheduler {
@@ -28,8 +80,10 @@ class SyncScheduler {
   private currentSettings: SyncSchedulerSettings | null = null;
 
   /**
-   * Start the sync scheduler
-   * Should be called after StashInstanceManager is initialized
+   * Start the sync scheduler: the polling interval, then the startup sync.
+   * Called after StashInstanceManager is initialized, at boot and by the
+   * setup wizard once it has saved the first instance. With no enabled
+   * instance it does nothing and stays stopped, so a later call starts it.
    */
   async start(): Promise<void> {
     if (this.isStarted) {
@@ -37,29 +91,38 @@ class SyncScheduler {
       return;
     }
 
-    // Check if Stash is configured
     if (!stashInstanceManager.hasInstances()) {
-      logger.info("No Stash instances configured - sync scheduler will not start");
-      logger.info("Sync will start automatically after Stash is configured via setup wizard");
-      this.isStarted = true;
+      logger.info(
+        "No Stash instances configured - sync scheduler will not start"
+      );
+      logger.info(
+        "Sync will start automatically after Stash is configured via setup wizard"
+      );
       return;
     }
 
-    // Load settings
-    const settings = await this.loadSettings();
+    // Started from here on: a second call while this one's startup sync runs
+    // returns above instead of starting another sync
+    this.isStarted = true;
+    let settings: SyncSchedulerSettings;
+    try {
+      settings = await this.loadSettings();
+    } catch (error) {
+      // Not started: a later call tries again
+      this.isStarted = false;
+      throw error;
+    }
+    // Stopped (a shutdown) while the settings loaded: arm no timer
+    if (!this.isRunning()) return;
     this.currentSettings = settings;
 
-    // Start polling interval
     this.startPollingInterval(settings.syncIntervalMinutes);
 
-    // Perform initial sync
     await this.performStartupSync();
 
-    this.isStarted = true;
     logger.info("SyncScheduler started", {
       intervalMinutes: settings.syncIntervalMinutes,
       scanSubscription: settings.enableScanSubscription,
-      webhookEnabled: settings.enablePluginWebhook,
     });
   }
 
@@ -73,14 +136,6 @@ class SyncScheduler {
     }
     this.isStarted = false;
     logger.info("SyncScheduler stopped");
-  }
-
-  /**
-   * Restart the scheduler (e.g., after settings change)
-   */
-  async restart(): Promise<void> {
-    this.stop();
-    await this.start();
   }
 
   /**
@@ -98,33 +153,36 @@ class SyncScheduler {
   }
 
   /**
-   * Update settings and restart scheduler if needed
+   * Save the settings. A new interval re-arms the running scheduler's timer,
+   * so the next scheduled sync comes one new interval from now; it never
+   * starts a sync. A stopped scheduler reads the saved settings when it
+   * starts.
    */
-  async updateSettings(settings: Partial<SyncSchedulerSettings>): Promise<void> {
-    await prisma.syncSettings.upsert({
+  async updateSettings(
+    settings: Partial<SyncSchedulerSettings>
+  ): Promise<void> {
+    const saved = await prisma.syncSettings.upsert({
       where: { id: 1 },
       update: settings,
       create: {
         id: 1,
         syncIntervalMinutes: settings.syncIntervalMinutes ?? 60,
         enableScanSubscription: settings.enableScanSubscription ?? true,
-        enablePluginWebhook: settings.enablePluginWebhook ?? false,
       },
     });
 
-    // Restart if interval changed
-    if (
-      settings.syncIntervalMinutes !== undefined &&
-      settings.syncIntervalMinutes !== this.currentSettings?.syncIntervalMinutes
-    ) {
-      logger.info("Sync interval changed, restarting scheduler", {
-        oldInterval: this.currentSettings?.syncIntervalMinutes,
-        newInterval: settings.syncIntervalMinutes,
+    const oldInterval = this.currentSettings?.syncIntervalMinutes;
+    this.currentSettings = {
+      syncIntervalMinutes: saved.syncIntervalMinutes,
+      enableScanSubscription: saved.enableScanSubscription,
+    };
+
+    if (this.isStarted && saved.syncIntervalMinutes !== oldInterval) {
+      logger.info("Sync interval changed, next scheduled sync reset", {
+        oldInterval,
+        newInterval: saved.syncIntervalMinutes,
       });
-      await this.restart();
-    } else {
-      // Just update in-memory settings
-      this.currentSettings = await this.loadSettings();
+      this.startPollingInterval(saved.syncIntervalMinutes);
     }
   }
 
@@ -141,9 +199,7 @@ class SyncScheduler {
     try {
       await stashSyncService.incrementalSync();
     } catch (error) {
-      logger.error("Manual incremental sync failed", {
-        error: error instanceof Error ? error.message : String(error),
-      });
+      logSyncFailure("Manual incremental sync failed", error);
       throw error;
     }
   }
@@ -161,19 +217,9 @@ class SyncScheduler {
     try {
       await stashSyncService.fullSync();
     } catch (error) {
-      logger.error("Manual full sync failed", {
-        error: error instanceof Error ? error.message : String(error),
-      });
+      logSyncFailure("Manual full sync failed", error);
       throw error;
     }
-  }
-
-  /**
-   * Subscribe to sync progress events
-   */
-  onProgress(callback: (progress: SyncProgress) => void): () => void {
-    stashSyncService.on("progress", callback);
-    return () => stashSyncService.off("progress", callback);
   }
 
   // ==================== Private Methods ====================
@@ -184,7 +230,6 @@ class SyncScheduler {
     return {
       syncIntervalMinutes: settings?.syncIntervalMinutes ?? 60,
       enableScanSubscription: settings?.enableScanSubscription ?? true,
-      enablePluginWebhook: settings?.enablePluginWebhook ?? false,
     };
   }
 
@@ -195,76 +240,109 @@ class SyncScheduler {
 
     const intervalMs = intervalMinutes * 60 * 1000;
 
-    this.intervalId = setInterval(() => void (async () => {
+    this.intervalId = setInterval(
+      () => void this.runScheduledSync(),
+      intervalMs
+    );
+
+    logger.info(`Sync polling interval started: ${intervalMinutes} minutes`);
+  }
+
+  /**
+   * One scheduled tick: the daily full pass when it is due
+   * (`isFullPassDue`), else an incremental sync. Nothing while a sync runs.
+   */
+  private async runScheduledSync(): Promise<void> {
+    try {
+      const due = await this.isFullPassDue(
+        stashInstanceManager.getAllEnabled().map((i) => i.id)
+      );
+      // Checked after the read, so the sync below takes the lock at once
       if (stashSyncService.isSyncing()) {
         logger.debug("Scheduled sync skipped - sync already in progress");
         return;
       }
 
-      logger.info("Scheduled incremental sync triggered");
-      try {
+      if (due) {
+        logger.info(
+          "Scheduled full sync triggered: the daily full pass is due",
+          due
+        );
+        await stashSyncService.fullSync();
+      } else {
+        logger.info("Scheduled incremental sync triggered");
         await stashSyncService.incrementalSync();
-      } catch (error) {
-        logger.error("Scheduled sync failed", {
-          error: error instanceof Error ? error.message : String(error),
-        });
       }
-    })(), intervalMs);
+    } catch (error) {
+      logSyncFailure("Scheduled sync failed", error);
+    }
+  }
 
-    logger.info(`Sync polling interval started: ${intervalMinutes} minutes`);
+  /**
+   * Whether the daily full pass is due for one of the enabled instances
+   * (`fullPassDue`). The time is stored, so it survives restarts; a manual
+   * Full Sync that runs to the end resets it. Returns the instance that
+   * makes it due, else null.
+   */
+  private async isFullPassDue(
+    instanceIds: readonly string[]
+  ): Promise<FullPassDue | null> {
+    if (instanceIds.length === 0) return null;
+    const instances = await prisma.stashInstance.findMany({
+      where: { id: { in: [...instanceIds] } },
+      select: { id: true, lastFullPassAt: true },
+    });
+    return fullPassDue(instanceIds, instances, Date.now());
   }
 
   private async performStartupSync(): Promise<void> {
-    // Check if migrations were applied - if so, force full sync to ensure
-    // database schema changes are properly reflected in cached data
-    if (wereMigrationsApplied()) {
-      logger.info("Database migrations were applied, performing full sync to refresh cache");
-      try {
-        await stashSyncService.fullSync();
-      } catch (error) {
-        logger.error("Post-migration full sync failed", {
-          error: error instanceof Error ? error.message : String(error),
-        });
-        // Don't throw - let the app continue, sync can be retried manually
-      }
-      return;
-    }
-
-    // Check sync state for ALL entity types, not just scenes
-    // This prevents re-syncing already completed entities when scene sync fails/never completes
-    const syncStates = await prisma.syncState.findMany();
-    const syncStateMap = new Map(syncStates.map((s) => [s.entityType, s]));
-
-    // Log what we found
-    const completedTypes = syncStates
-      .filter((s) => s.lastFullSyncTimestamp || s.lastIncrementalSyncTimestamp)
-      .map((s) => s.entityType);
-
-    const missingTypes = [
-      "studio",
-      "tag",
-      "performer",
-      "group",
-      "gallery",
-      "scene",
-      "image",
-    ].filter((t) => !syncStateMap.has(t));
+    // The stored sync state alone decides what to fetch. A migration that
+    // needs Peek to refetch a type clears that type's timestamps, and the
+    // sync below fetches it whole (see .claude/rules/prisma.md).
+    // Check sync state for ALL entity types, not just scenes: this prevents
+    // re-syncing already completed entities when scene sync fails/never
+    // completes. Each enabled instance's own rows: another instance's (a
+    // disabled one, or a deleted one whose purge has not run) never count.
+    const instanceIds = stashInstanceManager.getAllEnabled().map((i) => i.id);
+    const syncStates = await prisma.syncState.findMany({
+      where: { stashInstanceId: { in: instanceIds } },
+    });
+    const instances = instanceIds.map((instanceId) => {
+      const states = syncStates.filter((s) => s.stashInstanceId === instanceId);
+      const stored = new Set(states.map((s) => s.entityType));
+      return {
+        instanceId,
+        completedTypes: states
+          .filter(
+            (s) => s.lastFullSyncTimestamp ?? s.lastIncrementalSyncTimestamp
+          )
+          .map((s) => s.entityType),
+        missingTypes: STARTUP_TYPES.filter((t) => !stored.has(t)),
+      };
+    });
 
     logger.info("Startup sync state check", {
-      completedTypes,
-      missingTypes,
+      instances,
       totalSyncStates: syncStates.length,
     });
 
-    // If NO entity types have ever been synced, do a full sync
-    if (completedTypes.length === 0) {
-      logger.info("No previous sync found for any entity type, performing full sync");
+    // A full sync when no instance has ever synced any entity type, or when
+    // the daily full pass is due (an instance never synced, beside one that
+    // has, makes it due too)
+    const neverSynced = instances.every((i) => i.completedTypes.length === 0);
+    const due = neverSynced ? null : await this.isFullPassDue(instanceIds);
+    if (neverSynced || due) {
+      if (due) {
+        logger.info("The daily full pass is due, performing full sync", due);
+      } else {
+        logger.info(
+          "No previous sync found for any entity type, performing full sync"
+        );
+      }
       try {
         await stashSyncService.fullSync();
       } catch (error) {
-        logger.error("Startup full sync failed", {
-          error: error instanceof Error ? error.message : String(error),
-        });
+        logSyncFailure("Startup full sync failed", error);
         // Don't throw - let the app continue, sync can be retried manually
       }
       return;
@@ -276,16 +354,13 @@ class SyncScheduler {
     // - Re-sync entities that never completed
     // - Incrementally sync entities that have changes
     logger.info("Performing smart incremental sync on startup", {
-      completedTypes,
-      missingTypes,
+      instances,
     });
 
     try {
       await stashSyncService.smartIncrementalSync();
     } catch (error) {
-      logger.error("Startup smart incremental sync failed", {
-        error: error instanceof Error ? error.message : String(error),
-      });
+      logSyncFailure("Startup smart incremental sync failed", error);
       // Don't throw - let the app continue
     }
   }

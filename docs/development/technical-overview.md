@@ -44,22 +44,32 @@ Peek has two mechanisms for hiding content from users. Both cascade (hiding a Ta
 |--------|------|-------------|
 | `userId` | Int | Target user |
 | `entityType` | String | `'groups'`, `'tags'`, `'studios'`, `'galleries'` |
-| `mode` | String | `'INCLUDE'` (whitelist) or `'EXCLUDE'` (blacklist) |
-| `entityIds` | String | JSON array of entity IDs |
-| `restrictEmpty` | Boolean | Also hide items with no entities of this type |
+| `mode` | String | `'INCLUDE'` (Show only) or `'EXCLUDE'` (Always hide) |
+| `entityIds` | String | JSON array of `"id:instanceId"` references |
+| `restrictEmpty` | Boolean | Also hide content with no item of this type |
+
+Unique per `(userId, entityType, mode)`: a type can have a Show-only and an Always-hide row at once. `restrictEmpty` is one setting per type (the compute ORs the rows); the API defaults it to `true` for INCLUDE and `false` for EXCLUDE when a client omits it. An empty `entityIds` list is rejected.
 
 **Key behaviors:**
-- Only admins can set restrictions (via Server Settings)
-- Users cannot see or modify their restrictions
-- Users cannot bypass restrictions
-- Supports both whitelist (INCLUDE) and blacklist (EXCLUDE) modes
-- Can restrict by: Tags, Groups, Studios, Galleries
+- Only admins can set restrictions (via Server Settings), and only on non-admin accounts: `restrictionsApplyTo(role)` in `server/services/exclusionPolicy.ts` is the one place that says who they apply to
+- Users cannot see, modify or bypass their restrictions
+- Rows stored on an admin account stay inert and apply again if the account is demoted; any role change recomputes the user
 
-**Cascading:**
-- Tag restriction → Hides Scenes/Performers/Studios with that Tag (including inherited tags)
-- Group restriction → Hides Scenes in that Group
-- Studio restriction → Hides Scenes from that Studio
-- Gallery restriction → Hides Scenes linked to that Gallery
+**Resolution:** every listed reference is looked up on the user's allowed instances before anything else (a bare id resolves to one reference per instance where the entity exists). Tags expand through `StashTag.parentIds` and studios through `StashStudio.parentId` to every descendant on the same instance with one recursive CTE; parents are not covered. The closure is what every later rule sees, for both lists and for hides.
+
+**Cascading (EXCLUDE closures and hides):**
+
+| Source | Targets |
+|--------|---------|
+| Performer | Scenes (`ScenePerformer`), galleries (`GalleryPerformer`), images (`ImagePerformer`) |
+| Studio | Scenes, galleries, images (`studioId` columns) |
+| Tag | Scenes (`SceneTag` and `inheritedTagIds`), performers, studios, groups, galleries, images, clips (`ClipTag` and `primaryTagId`) |
+| Group | Scenes (`SceneGroup`) |
+| Gallery | Scenes (`SceneGallery`), images (`ImageGallery`) |
+
+Cascades are first order only (a performer excluded through a tag does not cascade further). Clips get real `UserExcludedEntity` rows with `entityType = 'clip'`; the clip query builder joins both `'clip'` rows and the parent scene's rows.
+
+**INCLUDE (Show only):** every entity of the type not in the closure gets a `restricted` row (inversion), and inverted rows are not cascade sources. Content the type links to (scenes, galleries, images) is hidden when it has no item of the type in the closure, unless it has no item at all and `restrictEmpty` is off. Performers, studios, groups and tags are never hidden for lacking an included item; they disappear only through the empty phase. With only an EXCLUDE row, `restrictEmpty` hides content with no item of the type.
 
 ### Hidden Content (User-Controlled)
 
@@ -72,48 +82,47 @@ Peek has two mechanisms for hiding content from users. Both cascade (hiding a Ta
 | `userId` | Int | User who hid the entity |
 | `entityType` | String | Any entity type |
 | `entityId` | String | Stash entity ID |
+| `instanceId` | String | Stash instance (`""` means every instance) |
 | `hiddenAt` | DateTime | When it was hidden |
 
 **Key behaviors:**
 - Users control their own hidden items
 - Users can view and unhide items via Settings
 - Supports all entity types: Scene, Performer, Studio, Tag, Group, Gallery, Image
-- Admins still see their own hidden items (they can hide content for personal preference)
+- Hides apply to everyone, admins included: no read path checks the role, every list, by-id, download and media check consults `UserExcludedEntity` for every user
 
-**Cascading:**
-- Hidden Performer → Hides Scenes with that Performer
-- Hidden Studio → Hides Scenes from that Studio
-- Hidden Tag → Hides Scenes/Performers/Studios with that Tag (including inherited)
-- Hidden Group → Hides Scenes in that Group
-- Hidden Gallery → Hides Scenes linked to that Gallery, Images in Gallery
+**Cascading:** a hide resolves like a listed id (tags and studios expand to their descendants) and cascades along the table above. The stored row keeps its instance as stored; the descendants and the per-instance copies of a `""` hide get their own `hidden` rows, and the Hidden Items page still lists the one stored row. Unhiding the stored row removes the whole set at the next recompute.
 
 ### Processing Order
 
-Content filtering happens in this order:
-1. **INCLUDE restrictions** (intersection) — must match ALL includes
-2. **EXCLUDE restrictions** (difference) — must not match ANY excludes
-3. **Hidden entity filtering** (cascade)
-4. **Empty entity filtering** — remove organizational entities with no visible content
+`ExclusionComputationService.recomputeForUser` runs raw SQL end to end on a dedicated single-connection Prisma client (`prisma/computeClient.ts`), one recompute at a time, inside a deferred `BEGIN` that reads one snapshot and takes no write lock (TEMP tables hold the closures and exclusion sets, so every membership test is an indexed lookup). It computes the rows in these steps:
 
-### Empty Entity Filtering
+1. **Resolve** the lists and hides on the user's instance scope, the enabled instances narrowed by their selection, including one still on its first sync so that its rows exist before it shows (recursive CTE for tags and studios)
+2. **Direct rows**: EXCLUDE closures (`restricted`), INCLUDE inversion (`restricted`), hides (`hidden`)
+3. **Cascades** from the EXCLUDE closures and hides only
+4. **Content rules**: INCLUDE admission and `restrictEmpty` for scenes, galleries and images
+5. **Empty phase**, per instance: galleries with no visible image; performers, studios and groups with no visible content; tags attached to no visible scene, performer, studio, group, gallery or image and with no live child tag on the same instance. Skipped for admins
 
-After restrictions/hiding are applied, organizational entities with no remaining content are removed. Order matters due to dependencies:
+Every restriction-derived row carries a real `stashInstanceId`. When an entity qualifies twice, the first reason in that order is the one stored. Types AND together: content is hidden if any EXCLUDE or hide rule hits it, any INCLUDE rule does not admit it, or it is empty under `restrictEmpty`.
 
-1. **Galleries** — Keep if `image_count > 0`
-2. **Groups** — Keep if has scenes OR has sub-groups with content (tree traversal)
-3. **Studios** — Keep if appears in visible scenes OR has visible groups/galleries OR has child studios with content
-4. **Performers** — Keep if appears in visible scenes OR has images OR in visible groups/galleries
-5. **Tags** — Keep if attached to any visible entity OR has children with content (DAG traversal)
+The rows are then written, taking the database's write lock once:
 
-**Current limitation:** Empty filtering uses scene/image counts from Stash metadata, not restriction-aware counts. A workaround passes `visibleScenes` to the filter methods.
+- **Fill**: the deduplicated rows go into the TEMP table `_peek_result` on the same connection, still without the lock.
+- **Swap**: one short `BEGIN IMMEDIATE` on that connection, as one unit of the writer queue (`exclusions.swap`, see [Database writes](#database-writes)), deletes the user's rows and copies `_peek_result` in with one `INSERT OR IGNORE ... SELECT`. The delete keeps the `pending` rows a sync wrote after the snapshot began, so those holds survive. For a user with 180,000 rows the swap holds the lock about 0.7 s, where the old single transaction (delete, insert, stats) held it 3.3 s.
+
+The Library counts on the stats page are not stored: `UserStatsAggregationService.getLibraryStats` counts each type per request from what the user can see (live entities on their allowed instances with no exclusion row for them, the same anti-join the lists use), so a recompute, a hide or an unhide shows in them at once.
+
+Hiding an entity (`addHiddenEntity`) computes its rows the same way and merges them in (`INSERT OR IGNORE`), never overwriting a row already there.
 
 ---
 
-## Current Architecture Issues
+## Why Queries Moved to SQL
+
+The first implementation filtered in memory. Every list now filters, sorts and pages in SQL through the query builders (see [Query Builders](#query-builders)); the in-memory pipeline and its `USE_SQL_QUERY_BUILDER` switch were removed in 3.4. The problems it had are kept here for context.
 
 ### Problem: In-Memory Filtering Doesn't Scale
 
-The current implementation loads all entities into memory then filters:
+The in-memory pipeline loaded all entities into memory then filtered:
 
 ```
 1. Load ALL scenes from cache
@@ -122,29 +131,29 @@ The current implementation loads all entities into memory then filters:
 4. Paginate
 ```
 
-This works for small collections but becomes problematic with:
+This worked for small collections but became a problem with:
 - 10k+ scenes
 - Multiple concurrent users
 - Complex restriction rules
 
 ### Problem: Redundant Computation
 
-Every request recomputes:
+Every request recomputed:
 - Which entities are hidden for this user
 - Which scenes match restriction rules
 - Which organizational entities are now empty
 
-`FilteredEntityCacheService` helps but is invalidated frequently.
+`FilteredEntityCacheService` helped but was invalidated frequently.
 
 ### Problem: Pagination Breaks
 
-To paginate correctly, we need to know the total count of visible items. Currently:
+To paginate correctly, a list needs the total count of visible items. The in-memory pipeline:
 1. Load ALL items
 2. Filter ALL items
 3. Get count
 4. Return page slice
 
-This defeats the purpose of pagination for large collections.
+This defeated the purpose of pagination for large collections.
 
 ---
 
@@ -190,20 +199,9 @@ model UserExcludedEntity {
   @@index([userId, entityType])      // Primary query index
   @@index([entityType, entityId])    // For cascade lookups ("what users exclude this?")
 }
-
-// Pre-computed visible counts per entity type (avoids expensive COUNT queries)
-model UserEntityStats {
-  id           Int      @id @default(autoincrement())
-  userId       Int
-  entityType   String   // 'scene', 'performer', etc.
-  visibleCount Int      // total entities - excluded entities
-  updatedAt    DateTime @updatedAt
-
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@unique([userId, entityType])
-}
 ```
+
+Visible counts per type are not stored: they are counted per request (see [Processing Order](#processing-order)). A `UserEntityStats` table once held them; 3.4 dropped it.
 
 ### Key Design Decisions
 
@@ -286,7 +284,7 @@ Some Stash users have 100TB+ collections with millions of images and scenes. The
 | Concern | Mitigation |
 |---------|------------|
 | Full recomputation time | Never do full recompute except initial setup; use incremental updates |
-| COUNT queries | Pre-compute visible counts in `UserEntityStats` table |
+| COUNT queries | Count per request in SQL with the exclusion anti-join (`getLibraryStats`); nothing stored to keep current |
 | Index memory | ~250MB for 5M rows is acceptable for modern servers |
 | Cascade complexity | Track `sourceType`/`sourceId` to enable targeted updates |
 
@@ -296,13 +294,11 @@ Some Stash users have 100TB+ collections with millions of images and scenes. The
 1. Insert exclusion with `reason='hidden'`
 2. Find cascading entities via junction tables
 3. Insert cascade exclusions with `sourceType`/`sourceId`
-4. Decrement `visibleCount` in `UserEntityStats`
 
 **Unhide entity (medium, may need partial recompute):**
 1. Delete exclusion where `reason='hidden'` AND entity matches
 2. Delete cascade exclusions where `sourceId` matches
 3. Re-check if any cascades should remain (other hidden entities may still exclude them)
-4. Update `visibleCount` in `UserEntityStats`
 
 **Stash sync (diff-based):**
 1. Compare new entity list with cached list
@@ -338,12 +334,12 @@ Pre-computed exclusions need updating when:
 ## Migration Strategy
 
 1. Keep existing `UserContentRestriction` and `UserHiddenEntity` tables as source of truth
-2. Add new `UserExcludedEntity` and `UserEntityStats` tables
+2. Add new `UserExcludedEntity` table (a `UserEntityStats` table of visible counts came with it; 3.4 dropped it for counts per request)
 3. Implement `ExclusionComputationService` with incremental update logic
 4. Add trigger points for recomputation (sync complete, restriction change, hide/unhide)
 5. Migrate query patterns to use exclusion JOINs
 6. Add admin endpoints for manual recomputation
-7. Remove in-memory filtering code once stable
+7. Remove in-memory filtering code once stable (done in 3.4)
 
 ### API Changes
 
@@ -372,11 +368,10 @@ The backend uses SQL-based query builders with pre-computed exclusions for effic
 | `StashSyncService.ts` | Syncs data from Stash GraphQL API to local database |
 | `UserHiddenEntityService.ts` | CRUD for user-hidden entities |
 | `ExclusionComputationService.ts` | Computes and maintains `UserExcludedEntity` table |
-| `EntityExclusionHelper.ts` | Helper functions for exclusion logic |
 
 #### Query Builders
 
-Each entity type has a dedicated query builder that handles filtering, sorting, pagination, and exclusion JOINs:
+Each entity type has a dedicated query builder that handles filtering, sorting, pagination, and exclusion JOINs. They extend one base, `services/query/EntityQueryBuilder.ts`, which builds the list and count statements from an entity spec (table, per-user joins, columns, tiebreak) and owns what every list shares: the `deletedAt` filter, the exclusion join with the instance, the allowed-instances filter (an empty list matches nothing), the `ids` filter as (id, instance) pairs, the random sort with its seed bound, and the joined `COUNT(*)`. The clause helpers in `utils/sqlClauses.ts` (`refClause`, `idClause`, `viaSceneClause`, `instanceClause`, `randomOrder`, `combine`) match every ref as an (id, instance) pair, inline up to `PAIR_INLINE_LIMIT` refs and through a materialized set above it; the same module holds the exclusion join and the per-field number, date, text and favorite clauses. Every builder is on the base. A clip lists only while its scene does: the clip builder joins the scene, and the viewer's exclusions apply to the clip and to its scene.
 
 | Query Builder | Entity |
 |---------------|--------|
@@ -387,6 +382,7 @@ Each entity type has a dedicated query builder that handles filtering, sorting, 
 | `GroupQueryBuilder.ts` | Groups |
 | `GalleryQueryBuilder.ts` | Galleries |
 | `ImageQueryBuilder.ts` | Images |
+| `ClipQueryBuilder.ts` | Clips (scene markers) |
 
 #### Other Services
 
@@ -403,13 +399,13 @@ Each entity type has a dedicated query builder that handles filtering, sorting, 
 Library controllers use query builders for efficient SQL-based filtering:
 
 ```typescript
-// Query with exclusion JOIN — filtering, pagination, and count in one query
-const result = await sceneQueryBuilder
-  .forUser(userId)
-  .withFilters(filters)
-  .withSort(sort)
-  .paginate(offset, limit)
-  .execute();
+// The parsed request (utils/listRequest.ts) goes straight to the builder:
+// filtering, sorting, pagination and the count run in SQL
+const result = await sceneQueryBuilder.execute({
+  userId,
+  allowedInstanceIds,
+  request, // ParsedListRequest<"scene">
+});
 
 // Returns { items: Scene[], total: number }
 // Already filtered by user exclusions, already paginated
@@ -417,7 +413,36 @@ const result = await sceneQueryBuilder
 
 This replaces the old pattern of loading all entities into memory and filtering in JavaScript.
 
+### Scene list indexes
+
+`StashScene` has a `(deletedAt, X)` index for each sort the scene list reads in index order, so the first page of a 200,000-scene library comes back without sorting every scene:
+
+| Sort | Column | Index |
+|------|--------|-------|
+| Created at | `stashCreatedAt` | `StashScene_browse_idx` (`deletedAt`, `stashCreatedAt` DESC) |
+| Updated at | `stashUpdatedAt` | `StashScene_browse_updated_idx` |
+| Date | `date` | `StashScene_browse_date_idx` |
+| Duration | `duration` | `StashScene_browse_duration_idx` |
+| Title | `titleSort` | `StashScene_browse_titleSort_idx` (`deletedAt`, `titleSort`, `id`) |
+| Performer count | `performerCount` | `StashScene_browse_performerCount_idx` |
+| Tag count | `tagCount` | `StashScene_browse_tagCount_idx` |
+
+Sync stores `titleSort`, `performerCount` and `tagCount`: each scene page writes them after the page's performer and tag links, in the same transaction (`refreshSceneDerivedColumns` in `StashSyncService.ts`). `titleSort` is the title the card shows (the title, else the file name without its extension), lower-cased for ASCII letters; the two counts are the scene's `ScenePerformer` and `SceneTag` rows, and the performer and tag count filters read them too. On a 207,000-scene copy the first page by title takes 1 ms instead of 0.5 s, and by performer or tag count 1 ms instead of 0.6 to 0.7 s. The per-user sorts (rating, plays, O count) and the random order still sort the filtered rows: about 0.4 s by rating at that size.
+
+`server/scripts/db-bench/` builds such a copy from a Peek database and times each list query with its plan: see its README.
+
+### Database writes
+
+SQLite lets one connection write at a time. Peek orders its own writers in Node, in the writer queue `server/utils/dbWrite.ts`:
+
+- Every transaction, every statement that writes many rows, and every single-row write on a user's path (ratings, favorites, O counts, plays, image views, hides, stats, playlists, restrictions) runs as one unit: `dbWrite(label, fn)`, `dbWriteTransaction(label, fn)` or `dbWriteBatch(label, [...])`. Units run one at a time, in arrival order. Lint rejects `prisma.$transaction` anywhere else.
+- No unit holds the write lock longer than 1 s on a 200,000-scene library. Longer work is split: a sync writes each page of 500 in its own unit (about 0.1 s for scenes), a recompute swaps one user's rows at a time, and cleanups, purges and gallery inheritance write 500 to 5,000 rows a unit. So a user's rating waits behind at most one such unit. A unit that holds the lock longer logs `Database write held the lock` with its label.
+- Reads never queue: under WAL a read does not wait for a writer.
+- The single-row writes off those paths (settings, setup, auth and the like) stay outside the queue: SQLite makes each wait for the lock up to 5 s, which the 1 s bound keeps safe.
+
+Why not let SQLite's busy timeout order the writers: Prisma's SQLite driver waits for the lock on the query engine's worker threads, one per CPU, and a handful of waiting writers leave the lock holder no thread to finish on, so they all time out together (32 of 40 simultaneous hides failed on a 16-CPU machine; through the queue all 40 succeed). The full rule, with nesting and retries, is in `.claude/rules/server-sql.md`, "Writes".
+
 ---
 
-*Document Version: 3.2*
-*Last Updated: 2026-01-17*
+*Document Version: 3.4*
+*Last Updated: 2026-09-25*

@@ -7,6 +7,7 @@
  */
 
 export * from "./common.js";
+export * from "./auth.js";
 export * from "./user.js";
 export * from "./ratings.js";
 export * from "./watchHistory.js";
@@ -18,3 +19,10 @@ export * from "./groups.js";
 export * from "./clips.js";
 export * from "./timeline.js";
 export * from "./stats.js";
+export * from "./video.js";
+export * from "./databaseBackup.js";
+export * from "./sync.js";
+export * from "./library.js";
+export * from "./playlist.js";
+export * from "./carousel.js";
+export * from "./mergeRecovery.js";

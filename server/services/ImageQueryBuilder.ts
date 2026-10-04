@@ -1,61 +1,84 @@
 /**
- * ImageQueryBuilder - SQL-native image querying
+ * ImageQueryBuilder: the image list in SQL.
  *
- * Builds parameterized SQL queries for image filtering, sorting, and pagination.
- * Eliminates the need to load all images into memory.
+ * The image builder on the base (`query/EntityQueryBuilder.ts`): this file
+ * declares the image's spec (table, the viewer's rating and view joins,
+ * columns), its filter clauses from the parsed request, its sort map, its
+ * row transform and its relations. The instance filters, the exclusion join,
+ * the `ids` filter, the random sort, the primary key ending every order and
+ * the count are the base's.
+ *
+ * Rating and O count are the viewer's own (ImageRating, ImageViewHistory),
+ * never Stash's, for filtering, sorting and the row alike (QUERIES-17). Each
+ * image's performers, tags, galleries and studio are loaded by its
+ * (id, instance), one statement per relation for the page, only those the
+ * viewer may see.
  */
-import prisma from "../prisma/singleton.js";
-import { logger } from "../utils/logger.js";
+import type { SortDirection } from "@peek/shared-types/filters/index.js";
+import type { ImageListItem } from "../types/index.js";
+import type { ImageQueryRow } from "../types/internal/queryRows.js";
+import type {
+  ParsedFilter,
+  RefCriterion,
+  RefFieldCriterion,
+} from "../types/parsedFilters.js";
+import { type EntityRef, entityKey } from "../utils/entityRef.js";
+import { toProxyUrl } from "../utils/proxyUrl.js";
+import {
+  type ColumnTarget,
+  type FilterClause,
+  type JunctionTarget,
+  type PerformerAgeSource,
+  buildDayFilter,
+  buildFavoriteFilter,
+  buildInstantFilter,
+  buildNumericFilter,
+  buildTextFilter,
+  imageNameSql,
+  noClause,
+  orientationClause,
+  performerAgeExists,
+  performerCountClause,
+  performerCountSql,
+  performerTagsFieldClause,
+  refClause,
+  resolutionClause,
+  searchAll,
+} from "../utils/sqlClauses.js";
+import {
+  emptyToNull,
+  parseJsonArray,
+  searchTerms,
+} from "../utils/sqlHelpers.js";
 import { getImageFallbackTitle } from "../utils/titleUtils.js";
-import { buildFavoriteFilter, buildDateFilter, buildJunctionFilter, buildDirectFilter, type FilterClause } from "../utils/sqlFilterBuilders.js";
-import { coerceEntityRefs } from "@peek/shared-types/instanceAwareId.js";
-import type { NormalizedImage, PerformerRef, TagRef, GalleryRef } from "../types/index.js";
+import {
+  EntityQueryBuilder,
+  type EntitySpec,
+  type FieldClauses,
+  type LeafContext,
+  type QueryContext,
+  type SortExpr,
+  exclusionViewer,
+  favoriteRefs,
+  hierarchicalRefClause,
+  refFieldClause,
+  refOptionsOf,
+  refPresence,
+} from "./query/EntityQueryBuilder.js";
+import {
+  GALLERY_REF,
+  PERFORMER_REF,
+  STUDIO_REF,
+  TAG_REF,
+  loadNestedRefs,
+  loadRefsByKey,
+} from "./query/nestedRefs.js";
 
-// Query builder options
-export interface ImageQueryOptions {
-  userId: number;
-  filters?: ImageFilter;
-  applyExclusions?: boolean; // Default true - use pre-computed exclusions
-  allowedInstanceIds?: string[]; // Multi-instance support
-  sort: string;
-  sortDirection: "ASC" | "DESC";
-  page: number;
-  perPage: number;
-  randomSeed?: number;
-}
-
-// Image filter type
-export interface ImageFilter {
-  ids?: { value: string[]; modifier?: string };
-  favorite?: boolean;
-  rating100?: { value: number; value2?: number; modifier: string };
-  o_counter?: { value: number; value2?: number; modifier: string };
-  performers?: { value: string[]; modifier?: string };
-  tags?: { value: string[]; modifier?: string; depth?: number };
-  studios?: { value: string[]; modifier?: string; depth?: number };
-  galleries?: { value: string[]; modifier?: string };
-  q?: string; // Search query
-  // Date filters
-  date?: { value?: string; value2?: string; modifier?: string };
-  created_at?: { value?: string; value2?: string; modifier?: string };
-  updated_at?: { value?: string; value2?: string; modifier?: string };
-}
-
-// Query result
-export interface ImageQueryResult {
-  images: NormalizedImage[];
-  total: number;
-}
-
-/**
- * Builds and executes SQL queries for image filtering
- */
-class ImageQueryBuilder {
-  // Column list for SELECT - all StashImage fields plus user data
-  private readonly SELECT_COLUMNS = `
+// Column list for SELECT - the StashImage fields the list shows, plus the
+// viewer's rating (r) and views (v)
+const SELECT_COLUMNS = `
     i.id, i.stashInstanceId, i.title, i.code, i.details, i.photographer, i.urls, i.date,
-    i.studioId, i.rating100 AS stashRating100, i.oCounter AS stashOCounter,
-    i.organized, i.filePath, i.width, i.height, i.fileSize,
+    i.studioId, i.organized, i.filePath, i.width, i.height, i.fileSize,
     i.pathThumbnail, i.pathPreview, i.pathImage,
     i.stashCreatedAt, i.stashUpdatedAt,
     r.rating AS userRating, r.favorite AS userFavorite,
@@ -63,557 +86,398 @@ class ImageQueryBuilder {
     v.lastViewedAt AS userLastViewedAt
   `.trim();
 
-  // Base FROM clause with user data JOINs
-  private buildFromClause(
-    userId: number,
-    applyExclusions: boolean = true
-  ): { sql: string; params: number[] } {
-    const baseJoins = `
-        FROM StashImage i
-        LEFT JOIN ImageRating r ON i.id = r.imageId AND i.stashInstanceId = r.instanceId AND r.userId = ?
-        LEFT JOIN ImageViewHistory v ON i.id = v.imageId AND i.stashInstanceId = v.instanceId AND v.userId = ?
-    `.trim();
+/**
+ * The viewer's rating and O count as the sorts read them, none as 0; the
+ * rating filter reads `r.rating`, so an unrated image matches only IS_NULL
+ */
+const USER_RATING = "COALESCE(r.rating, 0)";
+const USER_O_COUNT = "COALESCE(v.oCount, 0)";
 
-    if (applyExclusions) {
-      return {
-        sql: `${baseJoins}
-        LEFT JOIN UserExcludedEntity e ON e.userId = ? AND e.entityType = 'image' AND e.entityId = i.id AND (e.instanceId = '' OR e.instanceId = i.stashInstanceId)`,
-        params: [userId, userId, userId],
-      };
-    }
+const IMAGE_SPEC: EntitySpec = {
+  table: "StashImage",
+  alias: "i",
+  entityType: "image",
+  userJoins: [
+    { table: "ImageRating", alias: "r", entityIdCol: "imageId" },
+    { table: "ImageViewHistory", alias: "v", entityIdCol: "imageId" },
+  ],
+  selectColumns: () => ({ sql: SELECT_COLUMNS, params: [] }),
+  defaultSort: "created_at",
+};
 
-    return {
-      sql: baseJoins,
-      params: [userId, userId],
-    };
-  }
+/** An image's studio, on the image's own row */
+const IMAGE_STUDIO: ColumnTarget = {
+  kind: "column",
+  parentTable: "StashImage",
+  parentAlias: "i",
+  idCol: "studioId",
+  instanceCol: "stashInstanceId",
+};
 
-  // Base WHERE clause (always filter deleted, optionally filter excluded)
-  private buildBaseWhere(applyExclusions: boolean = true): FilterClause {
-    if (applyExclusions) {
-      return {
-        sql: "i.deletedAt IS NULL AND e.id IS NULL",
-        params: [],
-      };
-    }
-    return {
-      sql: "i.deletedAt IS NULL",
+/** A junction from the image to one of its relations */
+function imageJunction(
+  table: string,
+  alias: string,
+  ref: "tag" | "performer" | "gallery"
+): JunctionTarget {
+  return {
+    kind: "junction",
+    table,
+    alias,
+    parentAlias: "i",
+    parentIdCol: "imageId",
+    parentInstanceCol: "imageInstanceId",
+    refIdCol: `${ref}Id`,
+    refInstanceCol: `${ref}InstanceId`,
+  };
+}
+
+const IMAGE_TAGS = imageJunction("ImageTag", "it", "tag");
+
+/**
+ * The image's tags: its `ImageTag` rows on its own instance, which hold the
+ * tags its galleries give it too (sync writes them)
+ */
+const IMAGE_TAG_COUNT =
+  "(SELECT COUNT(*) FROM ImageTag itc WHERE itc.imageId = i.id AND itc.imageInstanceId = i.stashInstanceId)";
+const IMAGE_PERFORMERS = imageJunction("ImagePerformer", "ip", "performer");
+const IMAGE_GALLERIES = imageJunction("ImageGallery", "ig", "gallery");
+
+/**
+ * The junction Performer Age reads an image's performers from. The date is
+ * read as `+i.date` (SQLite's no-op unary plus), so the clause's
+ * `IS NOT NULL` does not send the page through `StashImage_date_idx` and a
+ * temp B-tree sort of every match: on prod's 141,957 images a page by
+ * created_at took 176 ms that way, 10 walking the browse index.
+ */
+const IMAGE_PERFORMER_AGE: PerformerAgeSource = {
+  junction: {
+    table: "ImagePerformer",
+    itemId: "imageId",
+    itemInstance: "imageInstanceId",
+    performerId: "performerId",
+    performerInstance: "performerInstanceId",
+  },
+  item: { id: "i.id", instance: "i.stashInstanceId", date: "+i.date" },
+};
+
+/**
+ * The sorts a page walks an index for (StashImage_browse_idx and
+ * StashImage_browse_titleSort_idx), stopping at the page
+ */
+const INDEXED_SORTS = new Set(["created_at", "title"]);
+
+/**
+ * Builds and executes SQL queries for image filtering
+ */
+class ImageQueryBuilder extends EntityQueryBuilder<
+  ImageQueryRow,
+  ImageListItem,
+  "image"
+> {
+  protected readonly spec = IMAGE_SPEC;
+
+  protected sortMap(
+    dir: SortDirection,
+    _filter: ParsedFilter<"image">,
+    ctx: QueryContext
+  ): Record<string, SortExpr> {
+    const column = (sql: string): SortExpr => ({
+      sql: `${sql} ${dir}`,
       params: [],
+    });
+    return {
+      // The displayed title (the title, else the file name without its
+      // extension), ASCII lower-cased, stored by sync
+      // (IMAGE_DERIVED_COLUMNS_SQL): a page walks
+      // StashImage_browse_titleSort_idx instead of sorting every image
+      title: column("i.titleSort"),
+      date: column("i.date"),
+      created_at: column("i.stashCreatedAt"),
+      updated_at: column("i.stashUpdatedAt"),
+      path: column("i.filePath"),
+      filesize: column("COALESCE(i.fileSize, 0)"),
+      // The shorter side of the file, an image without one first ascending
+      resolution: column("MIN(i.width, i.height)"),
+
+      // The image's tag rows, and the performers the viewer can see: the
+      // values the filters of the same names read
+      tag_count: column(IMAGE_TAG_COUNT),
+      performer_count: this.countSort(
+        performerCountSql(
+          IMAGE_PERFORMERS,
+          ctx.applyExclusions ? ctx.userId : null
+        ),
+        dir
+      ),
+
+      // The viewer's rating and O count
+      rating: column(USER_RATING),
+      rating100: column(USER_RATING),
+      o_counter: column(USER_O_COUNT),
     };
   }
 
   /**
-   * Build instance filter clause for multi-instance support
+   * The image filter's clauses, one per field, in the order the statement
+   * ANDs them. A ref field's CTEs are named from the leaf (`ctx.name`).
    */
-  private buildInstanceFilter(allowedInstanceIds: string[] | undefined): FilterClause {
-    if (!allowedInstanceIds || allowedInstanceIds.length === 0) {
-      return { sql: "", params: [] };
-    }
-    const placeholders = allowedInstanceIds.map(() => "?").join(", ");
-    return {
-      sql: `(i.stashInstanceId IN (${placeholders}) OR i.stashInstanceId IS NULL)`,
-      params: allowedInstanceIds,
-    };
-  }
+  protected override readonly fieldClauses: FieldClauses<"image"> = {
+    // The viewer's own data
+    favorite: (favorite) => buildFavoriteFilter(favorite),
+    rating100: (c) => buildNumericFilter(c, "r.rating"),
+    o_counter: (c) => buildNumericFilter(c, USER_O_COUNT),
 
-  // Build rating filter
-  private buildRatingFilter(
-    filter: { value: number; value2?: number; modifier: string } | undefined
-  ): FilterClause {
-    if (!filter) {
-      return { sql: "", params: [] };
-    }
+    // The image's tag rows; EQUALS 0 is the folder view's Untagged
+    tag_count: (c) => buildNumericFilter(c, IMAGE_TAG_COUNT),
 
-    const { value, value2, modifier } = filter;
-    const ratingExpr = "COALESCE(r.rating, i.rating100, 0)";
-
-    switch (modifier) {
-      case "GREATER_THAN":
-        return { sql: `${ratingExpr} > ?`, params: [value] };
-      case "LESS_THAN":
-        return { sql: `${ratingExpr} < ?`, params: [value] };
-      case "EQUALS":
-        return { sql: `${ratingExpr} = ?`, params: [value] };
-      case "NOT_EQUALS":
-        return { sql: `${ratingExpr} != ?`, params: [value] };
-      case "BETWEEN":
-        return { sql: `${ratingExpr} BETWEEN ? AND ?`, params: [value, value2 ?? value] };
-      default:
-        return { sql: "", params: [] };
-    }
-  }
-
-  // Build o_counter filter
-  private buildOCounterFilter(
-    filter: { value: number; value2?: number; modifier: string } | undefined
-  ): FilterClause {
-    if (!filter) {
-      return { sql: "", params: [] };
-    }
-
-    const { value, value2, modifier } = filter;
-    const oExpr = "COALESCE(v.oCount, i.oCounter, 0)";
-
-    switch (modifier) {
-      case "GREATER_THAN":
-        return { sql: `${oExpr} > ?`, params: [value] };
-      case "LESS_THAN":
-        return { sql: `${oExpr} < ?`, params: [value] };
-      case "EQUALS":
-        return { sql: `${oExpr} = ?`, params: [value] };
-      case "NOT_EQUALS":
-        return { sql: `${oExpr} != ?`, params: [value] };
-      case "BETWEEN":
-        return { sql: `${oExpr} BETWEEN ? AND ?`, params: [value, value2 ?? value] };
-      default:
-        return { sql: "", params: [] };
-    }
-  }
-
-  // Build performer filter
-  private buildPerformerFilter(
-    filter: { value?: string[]; modifier?: string } | undefined
-  ): FilterClause {
-    if (!filter || !filter.value || filter.value.length === 0) {
-      return { sql: "", params: [] };
-    }
-
-    const { value, modifier = "INCLUDES" } = filter;
-    const ids = coerceEntityRefs(value);
-    return buildJunctionFilter(ids, "ImagePerformer", "imageId", "imageInstanceId", "performerId", "performerInstanceId", "i", modifier);
-  }
-
-  // Build tag filter
-  private buildTagFilter(
-    filter: { value?: string[]; modifier?: string } | undefined
-  ): FilterClause {
-    if (!filter || !filter.value || filter.value.length === 0) {
-      return { sql: "", params: [] };
-    }
-
-    const { value, modifier = "INCLUDES" } = filter;
-    const ids = coerceEntityRefs(value);
-    return buildJunctionFilter(ids, "ImageTag", "imageId", "imageInstanceId", "tagId", "tagInstanceId", "i", modifier);
-  }
-
-  // Build studio filter
-  private buildStudioFilter(
-    filter: { value?: string[]; modifier?: string } | undefined
-  ): FilterClause {
-    if (!filter || !filter.value || filter.value.length === 0) {
-      return { sql: "", params: [] };
-    }
-
-    const { value, modifier = "INCLUDES" } = filter;
-    const ids = coerceEntityRefs(value);
-    return buildDirectFilter(ids, "i.studioId", "i.stashInstanceId", modifier);
-  }
-
-  // Build gallery filter
-  private buildGalleryFilter(
-    filter: { value?: string[]; modifier?: string } | undefined
-  ): FilterClause {
-    if (!filter || !filter.value || filter.value.length === 0) {
-      return { sql: "", params: [] };
-    }
-
-    const { value, modifier = "INCLUDES" } = filter;
-    const ids = coerceEntityRefs(value);
-    return buildJunctionFilter(ids, "ImageGallery", "imageId", "imageInstanceId", "galleryId", "galleryInstanceId", "i", modifier);
-  }
-
-  // Build search query filter
-  private buildSearchFilter(q: string | undefined): FilterClause {
-    if (!q || q.trim() === "") {
-      return { sql: "", params: [] };
-    }
-
-    const searchTerm = `%${q.trim()}%`;
-    return {
-      sql: `(
-        i.title LIKE ? OR
-        i.details LIKE ? OR
-        i.photographer LIKE ? OR
-        i.filePath LIKE ?
-      )`,
-      params: [searchTerm, searchTerm, searchTerm, searchTerm],
-    };
-  }
-
-  // Build ID filter
-  private buildIdFilter(
-    filter: { value: string[]; modifier?: string } | undefined
-  ): FilterClause {
-    if (!filter || !filter.value || filter.value.length === 0) {
-      return { sql: "", params: [] };
-    }
-
-    const { value: ids, modifier = "INCLUDES" } = filter;
-    const placeholders = ids.map(() => "?").join(", ");
-
-    switch (modifier) {
-      case "INCLUDES":
-        return {
-          sql: `i.id IN (${placeholders})`,
-          params: ids,
-        };
-      case "EXCLUDES":
-        return {
-          sql: `i.id NOT IN (${placeholders})`,
-          params: ids,
-        };
-      default:
-        return { sql: "", params: [] };
-    }
-  }
-
-  // Build sort clause
-  private buildSortClause(
-    sort: string,
-    dir: "ASC" | "DESC",
-    randomSeed?: number
-  ): string {
-    // Extract filename from path: '/images/My Image.jpg' -> 'My Image.jpg'
-    // This matches the display logic in getImageFallbackTitle which uses basename
-    const filenameExpr = `REPLACE(i.filePath, RTRIM(i.filePath, REPLACE(i.filePath, '/', '')), '')`;
-
-    const sortMap: Record<string, string> = {
-      title: `COALESCE(NULLIF(i.title, ''), ${filenameExpr}) COLLATE NOCASE ${dir}`,
-      date: `i.date ${dir}`,
-      rating: `COALESCE(r.rating, i.rating100, 0) ${dir}`,
-      rating100: `COALESCE(r.rating, i.rating100, 0) ${dir}`,
-      o_counter: `COALESCE(v.oCount, i.oCounter, 0) ${dir}`,
-      filesize: `COALESCE(i.fileSize, 0) ${dir}`,
-      path: `i.filePath ${dir}`,
-      created_at: `i.stashCreatedAt ${dir}`,
-      updated_at: `i.stashUpdatedAt ${dir}`,
-      // Random with deterministic seed for stable pagination
-      // Uses Stash's formula with modulo at each step to prevent SQLite integer overflow
-      // Without intermediate modulo, large seeds cause overflow to float which breaks ordering
-      random: `(((((i.id + ${randomSeed || 12345}) % 2147483647) * ((i.id + ${randomSeed || 12345}) % 2147483647) % 2147483647) * 52959209 % 2147483647 + ((i.id + ${randomSeed || 12345}) * 1047483763 % 2147483647)) % 2147483647) ${dir}`,
-    };
-
-    const sortExpr = sortMap[sort] || sortMap["created_at"];
-    return `${sortExpr}, i.id ${dir}`;
-  }
-
-  /**
-   * Hydrate image rows with related entities
-   * Uses raw SQL to handle orphaned junction records gracefully
-   */
-  private async hydrateImages(rows: Record<string, unknown>[]): Promise<NormalizedImage[]> {
-    if (rows.length === 0) return [];
-
-    const imageIds = rows.map((r) => r.id as string);
-    const imageIdPlaceholders = imageIds.map(() => "?").join(",");
-
-    // Fetch all related data in parallel using raw SQL to handle orphaned records
-    const [performers, tags, galleries, studios] = await Promise.all([
-      // Performers - join with existence check
-      prisma.$queryRawUnsafe<Record<string, unknown>[]>(`
-        SELECT ip.imageId, p.*
-        FROM ImagePerformer ip
-        INNER JOIN StashPerformer p ON p.id = ip.performerId AND p.stashInstanceId = ip.performerInstanceId
-        WHERE ip.imageId IN (${imageIdPlaceholders}) AND p.deletedAt IS NULL
-      `, ...imageIds),
-      // Tags - join with existence check (handles orphaned ImageTag records)
-      prisma.$queryRawUnsafe<Record<string, unknown>[]>(`
-        SELECT it.imageId, t.*
-        FROM ImageTag it
-        INNER JOIN StashTag t ON t.id = it.tagId AND t.stashInstanceId = it.tagInstanceId
-        WHERE it.imageId IN (${imageIdPlaceholders}) AND t.deletedAt IS NULL
-      `, ...imageIds),
-      // Galleries - join with existence check
-      prisma.$queryRawUnsafe<Record<string, unknown>[]>(`
-        SELECT ig.imageId, g.*
-        FROM ImageGallery ig
-        INNER JOIN StashGallery g ON g.id = ig.galleryId AND g.stashInstanceId = ig.galleryInstanceId
-        WHERE ig.imageId IN (${imageIdPlaceholders}) AND g.deletedAt IS NULL
-      `, ...imageIds),
-      prisma.stashStudio.findMany({
-        where: { id: { in: rows.map((r) => r.studioId as string).filter(Boolean) } },
+    // Related entities
+    // "Has any" and "has none" count only related rows the viewer can see
+    performers: (c, ctx) =>
+      refFieldClause(IMAGE_PERFORMERS, c, ctx, {
+        table: "StashPerformer",
+        entityType: "performer",
       }),
+    tags: (c, ctx) => this.tagClause(c, ctx),
+    studios: (c, ctx) => this.studioClause(c, ctx),
+    galleries: (c, ctx) => this.galleryClause(c, ctx),
+    // Through the tags of the image's performers; a page under a sort with
+    // an index walks it
+    performer_tags: (c, ctx) =>
+      performerTagsFieldClause(IMAGE_PERFORMERS, c, {
+        ...refOptionsOf(ctx),
+        viewerId: ctx.applyExclusions ? ctx.userId : null,
+        sortedByIndex: INDEXED_SORTS.has(ctx.sortField) && !ctx.underAny,
+      }),
+
+    // The image's performers the viewer can see: how many, and their age
+    // on the image's date
+    performer_count: async (c, ctx) =>
+      performerCountClause(
+        c,
+        IMAGE_PERFORMERS,
+        await exclusionViewer(ctx, "performer")
+      ),
+    performer_age: (c, ctx) =>
+      performerAgeExists(
+        c,
+        IMAGE_PERFORMER_AGE,
+        ctx.applyExclusions ? ctx.userId : null
+      ),
+
+    // The viewer's favorite entities; false is the negation of true
+    performer_favorite: (on, ctx) => this.favoriteClause("performer", on, ctx),
+    studio_favorite: (on, ctx) => this.favoriteClause("studio", on, ctx),
+    tag_favorite: (on, ctx) => this.favoriteClause("tag", on, ctx),
+
+    // Text; the URL is matched one element of the list at a time
+    title: (c) => buildTextFilter(c, imageNameSql("i")),
+    details: (c) => buildTextFilter(c, "i.details"),
+    code: (c) => buildTextFilter(c, "i.code"),
+    photographer: (c) => buildTextFilter(c, "i.photographer"),
+    path: (c) => buildTextFilter(c, "i.filePath"),
+    url: (c) => buildTextFilter(c, null, { lists: ["i.urls"] }),
+
+    organized: (organized) => ({
+      sql: "i.organized = ?",
+      params: [organized ? 1 : 0],
+    }),
+
+    // The shorter side against Stash's ranges, as the scene list reads it
+    resolution: (c) => resolutionClause(c, "i.width", "i.height"),
+    orientation: (c) => orientationClause(c, "i.width", "i.height"),
+
+    // Dates
+    date: (c) => buildDayFilter(c, "i.date"),
+    created_at: (c, ctx) =>
+      buildInstantFilter(c, "i.stashCreatedAt", ctx.timeZone),
+    updated_at: (c, ctx) =>
+      buildInstantFilter(c, "i.stashUpdatedAt", ctx.timeZone),
+  };
+
+  /**
+   * The tag filter, with the tags' descendants to the depth, as the scene
+   * list expands them: INCLUDES_ALL with a depth is one clause per selected
+   * tag, each with its own descendants (QUERIES-08).
+   */
+  private async tagClause(
+    criterion: RefFieldCriterion,
+    ctx: LeafContext
+  ): Promise<FilterClause> {
+    return hierarchicalRefClause("tag", IMAGE_TAGS, criterion, ctx, {
+      name: ctx.name,
+      related: { table: "StashTag", entityType: "tag" },
+    });
+  }
+
+  /**
+   * The studio filter, with the studios' descendants to the depth. An
+   * image has one studio, so the parser never sends INCLUDES_ALL here; an
+   * EXCLUDES keeps the images with no studio.
+   */
+  private async studioClause(
+    criterion: RefFieldCriterion,
+    ctx: LeafContext
+  ): Promise<FilterClause> {
+    return hierarchicalRefClause("studio", IMAGE_STUDIO, criterion, ctx, {
+      name: ctx.name,
+    });
+  }
+
+  /**
+   * `tag_favorite`, `studio_favorite` and `performer_favorite`: the image
+   * has (`true`) or lacks (`false`) one of the viewer's favourites, through
+   * the same shapes as the tag, studio and performer filters. Tags count
+   * the image's tag rows (its galleries' included) and every sub-tag,
+   * studios their sub-studios (depth -1, as the Tags and Studios filters
+   * take it). A favourite the viewer hid is dropped (`favoriteRefs`). With
+   * no favourites `true` matches nothing and `false` is no filter.
+   */
+  private async favoriteClause(
+    kind: "tag" | "studio" | "performer",
+    on: boolean,
+    ctx: LeafContext
+  ): Promise<FilterClause> {
+    const refs = await favoriteRefs(kind, ctx);
+    if (refs.length === 0) {
+      return on ? { sql: "1 = 0", params: [] } : noClause();
+    }
+    const criterion: RefCriterion = {
+      refs,
+      modifier: on ? "INCLUDES" : "EXCLUDES",
+      depth: -1,
+    };
+    if (kind === "tag") return this.tagClause(criterion, ctx);
+    if (kind === "studio") return this.studioClause(criterion, ctx);
+    return refClause(
+      IMAGE_PERFORMERS,
+      refs,
+      criterion.modifier,
+      refOptionsOf(ctx)
+    );
+  }
+
+  /**
+   * The gallery filter (a gallery page lists its images this way). Up to
+   * the inline limit an INCLUDES reads the galleries' images once from
+   * ImageGallery's gallery index as a row-value IN (`sortedByIndex: false`,
+   * `junctionInList`), under every sort and for the count alike: a gallery
+   * is a small share of the library, so the page sorts its few rows where
+   * the correlated EXISTS walked the sort index and probed the junction for
+   * every live image. On prod's 141,957 images a 1,074-image gallery's page
+   * takes 2 to 3 ms against up to 45, its count 1.5 against 42, sorted by
+   * title or created_at; the created_at index walk wins on no page, the
+   * first included (2.4 against 27) (S2, C7). Above the limit, and for
+   * EXCLUDES, the default shapes. "Has any" and "has none" count only
+   * galleries the viewer can see.
+   */
+  private galleryClause(
+    criterion: RefFieldCriterion,
+    ctx: LeafContext
+  ): FilterClause {
+    if (criterion.modifier === "IS_NULL" || criterion.modifier === "NOT_NULL") {
+      return refPresence(IMAGE_GALLERIES, criterion.modifier, ctx, {
+        related: { table: "StashGallery", entityType: "gallery" },
+      });
+    }
+    return refClause(IMAGE_GALLERIES, criterion.refs, criterion.modifier, {
+      ...refOptionsOf(ctx),
+      sortedByIndex: false,
+    });
+  }
+
+  /**
+   * The search across the name the card shows (the title, else the file's
+   * name without its extension), details and photographer: every word must
+   * match (`searchAll`), each as `likeContains` with `ESCAPE '\'`
+   */
+  protected override searchClause(q: string): FilterClause {
+    return searchAll(searchTerms(q), (pattern) => ({
+      sql: `(${imageNameSql("i")} LIKE ? ESCAPE '\\' OR i.details LIKE ? ESCAPE '\\' OR i.photographer LIKE ? ESCAPE '\\')`,
+      params: [pattern, pattern, pattern],
+    }));
+  }
+
+  /**
+   * A raw row as the list returns it: the title's fallback, the file size as
+   * a number, dates as ISO strings, media paths as proxy URLs, and the
+   * viewer's own rating, favorite, O count and views. Relations are empty
+   * until populateRelations.
+   */
+  protected transformRow(row: ImageQueryRow): ImageListItem {
+    const instanceId = row.stashInstanceId;
+    const thumbnail = toProxyUrl(row.pathThumbnail, instanceId);
+    const preview = toProxyUrl(row.pathPreview, instanceId);
+    const image = toProxyUrl(row.pathImage, instanceId);
+    return {
+      id: row.id,
+      instanceId,
+      title: emptyToNull(row.title) ?? getImageFallbackTitle(row.filePath),
+      code: row.code,
+      details: row.details,
+      photographer: row.photographer,
+      urls: parseJsonArray(row.urls),
+      date: row.date,
+      studioId: row.studioId,
+      organized: row.organized,
+      filePath: row.filePath,
+      width: row.width,
+      height: row.height,
+      fileSize: row.fileSize === null ? null : Number(row.fileSize),
+      paths: { thumbnail, preview, image },
+      stashCreatedAt: row.stashCreatedAt?.toISOString() ?? null,
+      stashUpdatedAt: row.stashUpdatedAt?.toISOString() ?? null,
+
+      // User data - Peek user data ONLY: Stash's rating and O count belong
+      // to the Stash user
+      rating100: row.userRating,
+      favorite: row.userFavorite ?? false,
+      oCounter: row.userOCount ?? 0,
+      viewCount: row.userViewCount ?? 0,
+      lastViewedAt: row.userLastViewedAt?.toISOString() ?? null,
+
+      // Filled by populateRelations
+      performers: [],
+      tags: [],
+      galleries: [],
+      studio: null,
+    };
+  }
+
+  /**
+   * Each image's performers, tags, galleries and studio, only those the
+   * viewer may see (`query/nestedRefs.ts`): one statement per relation for
+   * the page, driven from its (id, instance) pairs into each junction's
+   * key. An image's studio is on the image's own instance.
+   */
+  protected async populateRelations(
+    images: ImageListItem[],
+    ctx: QueryContext
+  ): Promise<void> {
+    if (images.length === 0) return;
+
+    const studioRefs = images.flatMap((image): EntityRef[] =>
+      image.studioId === null
+        ? []
+        : [{ id: image.studioId, instanceId: image.instanceId }]
+    );
+    const [performers, tags, galleries, studios] = await Promise.all([
+      loadNestedRefs(PERFORMER_REF, IMAGE_PERFORMERS, images, ctx),
+      loadNestedRefs(TAG_REF, IMAGE_TAGS, images, ctx),
+      loadNestedRefs(GALLERY_REF, IMAGE_GALLERIES, images, ctx),
+      loadRefsByKey(STUDIO_REF, studioRefs, ctx),
     ]);
 
-    // Build lookup maps with transformed URLs including instanceId for multi-instance routing
-    // Note: Frontend expects snake_case field names (image_path) and paths.cover for galleries
-    const performersByImage = new Map<string, PerformerRef[]>();
-    for (const row of performers) {
-      const imageId = row.imageId as string;
-      if (!performersByImage.has(imageId)) {
-        performersByImage.set(imageId, []);
-      }
-      performersByImage.get(imageId)?.push({
-        id: row.id as string,
-        instanceId: row.stashInstanceId as string,
-        name: row.name as string,
-        disambiguation: row.disambiguation as string | null,
-        gender: row.gender as string | null,
-        favorite: row.favorite as boolean | null,
-        rating100: row.rating100 as number | null,
-        image_path: this.transformUrl(row.imagePath as string | null, row.stashInstanceId as string),
-      });
+    for (const image of images) {
+      const key = entityKey(image.id, image.instanceId);
+      image.performers = performers.get(key) ?? [];
+      image.tags = tags.get(key) ?? [];
+      image.galleries = galleries.get(key) ?? [];
+      image.studio =
+        image.studioId === null
+          ? null
+          : (studios.get(entityKey(image.studioId, image.instanceId)) ?? null);
     }
-
-    const tagsByImage = new Map<string, TagRef[]>();
-    for (const row of tags) {
-      const imageId = row.imageId as string;
-      if (!tagsByImage.has(imageId)) {
-        tagsByImage.set(imageId, []);
-      }
-      tagsByImage.get(imageId)?.push({
-        id: row.id as string,
-        instanceId: row.stashInstanceId as string,
-        name: row.name as string,
-        favorite: row.favorite as boolean | null,
-        image_path: this.transformUrl(row.imagePath as string | null, row.stashInstanceId as string),
-      });
-    }
-
-    const galleriesByImage = new Map<string, GalleryRef[]>();
-    for (const row of galleries) {
-      const imageId = row.imageId as string;
-      if (!galleriesByImage.has(imageId)) {
-        galleriesByImage.set(imageId, []);
-      }
-      galleriesByImage.get(imageId)?.push({
-        id: row.id as string,
-        instanceId: row.stashInstanceId as string,
-        title: row.title as string | null,
-        cover: this.transformUrl(row.coverPath as string | null, row.stashInstanceId as string),
-      });
-    }
-
-    const studiosById = new Map(
-      studios.map((s) => [
-        s.id,
-        { ...s, image_path: this.transformUrl(s.imagePath, s.stashInstanceId) },
-      ])
-    );
-
-    // Hydrate each row
-    return rows.map((row) => ({
-      ...row,
-      performers: performersByImage.get(row.id as string) || [],
-      tags: tagsByImage.get(row.id as string) || [],
-      galleries: galleriesByImage.get(row.id as string) || [],
-      studio: row.studioId ? studiosById.get(row.studioId as string) : null,
-    })) as unknown as NormalizedImage[];
-  }
-
-  async execute(options: ImageQueryOptions): Promise<ImageQueryResult> {
-    const startTime = Date.now();
-    const { userId, page, perPage, applyExclusions = true, allowedInstanceIds, filters } = options;
-
-    // Build FROM clause with optional exclusion JOIN
-    const fromClause = this.buildFromClause(userId, applyExclusions);
-
-    // Build WHERE clauses
-    const whereClauses: FilterClause[] = [this.buildBaseWhere(applyExclusions)];
-
-    // Instance filter (multi-instance support)
-    const instanceFilter = this.buildInstanceFilter(allowedInstanceIds);
-    if (instanceFilter.sql) {
-      whereClauses.push(instanceFilter);
-    }
-
-    // Add user data filters
-    if (filters?.favorite !== undefined) {
-      const favoriteFilter = buildFavoriteFilter(filters.favorite);
-      if (favoriteFilter.sql) whereClauses.push(favoriteFilter);
-    }
-
-    if (filters?.rating100) {
-      const ratingFilter = this.buildRatingFilter(filters.rating100);
-      if (ratingFilter.sql) whereClauses.push(ratingFilter);
-    }
-
-    if (filters?.o_counter) {
-      const oCounterFilter = this.buildOCounterFilter(filters.o_counter);
-      if (oCounterFilter.sql) whereClauses.push(oCounterFilter);
-    }
-
-    // Add entity filters
-    if (filters?.performers) {
-      const performerFilter = this.buildPerformerFilter(filters.performers);
-      if (performerFilter.sql) whereClauses.push(performerFilter);
-    }
-
-    if (filters?.tags) {
-      const tagFilter = this.buildTagFilter(filters.tags);
-      if (tagFilter.sql) whereClauses.push(tagFilter);
-    }
-
-    if (filters?.studios) {
-      const studioFilter = this.buildStudioFilter(filters.studios);
-      if (studioFilter.sql) whereClauses.push(studioFilter);
-    }
-
-    if (filters?.galleries) {
-      const galleryFilter = this.buildGalleryFilter(filters.galleries);
-      if (galleryFilter.sql) whereClauses.push(galleryFilter);
-    }
-
-    // Add search filter
-    if (filters?.q) {
-      const searchFilter = this.buildSearchFilter(filters.q);
-      if (searchFilter.sql) whereClauses.push(searchFilter);
-    }
-
-    // Add ID filter
-    if (filters?.ids) {
-      const idFilter = this.buildIdFilter(filters.ids);
-      if (idFilter.sql) whereClauses.push(idFilter);
-    }
-
-    // Add date filters
-    if (filters?.date) {
-      const dateFilter = buildDateFilter(filters.date, "i.date");
-      if (dateFilter.sql) whereClauses.push(dateFilter);
-    }
-
-    if (filters?.created_at) {
-      const createdAtFilter = buildDateFilter(filters.created_at, "i.stashCreatedAt");
-      if (createdAtFilter.sql) whereClauses.push(createdAtFilter);
-    }
-
-    if (filters?.updated_at) {
-      const updatedAtFilter = buildDateFilter(filters.updated_at, "i.stashUpdatedAt");
-      if (updatedAtFilter.sql) whereClauses.push(updatedAtFilter);
-    }
-
-    // Combine WHERE clauses
-    const whereSQL = whereClauses
-      .map((c) => c.sql)
-      .filter(Boolean)
-      .join(" AND ");
-    const whereParams = whereClauses.flatMap((c) => c.params);
-
-    // Build sort
-    const sortClause = this.buildSortClause(
-      options.sort,
-      options.sortDirection,
-      options.randomSeed
-    );
-
-    // Calculate offset
-    const offset = (page - 1) * perPage;
-
-    // Build main query
-    const sql = `
-      SELECT ${this.SELECT_COLUMNS}
-      ${fromClause.sql}
-      WHERE ${whereSQL}
-      ORDER BY ${sortClause}
-      LIMIT ? OFFSET ?
-    `;
-
-    const params = [...fromClause.params, ...whereParams, perPage, offset];
-
-    logger.debug("ImageQueryBuilder.execute", {
-      whereClauseCount: whereClauses.length,
-      applyExclusions,
-      sort: options.sort,
-      paramCount: params.length,
-    });
-
-    // Execute query
-    const rows = await prisma.$queryRawUnsafe<Record<string, unknown>[]>(sql, ...params);
-
-    // Convert BigInt fields to Number and transform URLs to proxy paths with instanceId
-    const transformedRows = rows.map((row) => ({
-      ...row,
-      title: (row.title as string) || getImageFallbackTitle(row.filePath as string | null),
-      fileSize: row.fileSize != null ? Number(row.fileSize) : null,
-      pathThumbnail: this.transformUrl(row.pathThumbnail as string | null, row.stashInstanceId as string),
-      pathPreview: this.transformUrl(row.pathPreview as string | null, row.stashInstanceId as string),
-      pathImage: this.transformUrl(row.pathImage as string | null, row.stashInstanceId as string),
-    }));
-
-    // Hydrate with related entities
-    const hydratedImages = await this.hydrateImages(transformedRows);
-
-    // Count query
-    const countSql = `
-      SELECT COUNT(DISTINCT i.id || ':' || i.stashInstanceId) as total
-      ${fromClause.sql}
-      WHERE ${whereSQL}
-    `;
-    const countParams = [...fromClause.params, ...whereParams];
-    const countResult = await prisma.$queryRawUnsafe<{ total: number }[]>(
-      countSql,
-      ...countParams
-    );
-    const total = Number(countResult[0]?.total || 0);
-
-    const duration = Date.now() - startTime;
-    logger.debug("ImageQueryBuilder.execute completed", {
-      total,
-      returned: hydratedImages.length,
-      durationMs: duration,
-    });
-
-    return { images: hydratedImages, total };
-  }
-
-  /**
-   * Get images by IDs with user data
-   */
-  async getByIds(options: { userId: number; ids: string[] }): Promise<ImageQueryResult> {
-    const { userId, ids } = options;
-
-    if (ids.length === 0) {
-      return { images: [], total: 0 };
-    }
-
-    return this.execute({
-      userId,
-      filters: { ids: { value: ids, modifier: "INCLUDES" } },
-      applyExclusions: false, // IDs explicitly requested, don't filter
-      sort: "created_at",
-      sortDirection: "DESC",
-      page: 1,
-      perPage: ids.length,
-    });
-  }
-
-  /**
-   * Transform a Stash URL/path to a proxy URL
-   * @param urlOrPath - The URL or path to transform
-   * @param instanceId - Optional Stash instance ID for multi-instance routing
-   */
-  private transformUrl(urlOrPath: string | null, instanceId?: string | null): string | null {
-    if (!urlOrPath) return null;
-
-    // If it's already a proxy URL, return as-is
-    if (urlOrPath.startsWith("/api/proxy/stash")) {
-      return urlOrPath;
-    }
-
-    // Build base proxy URL
-    let proxyPath: string;
-
-    // If it's a full URL (http://...), extract path + query
-    if (urlOrPath.startsWith("http://") || urlOrPath.startsWith("https://")) {
-      try {
-        const url = new URL(urlOrPath);
-        const pathWithQuery = url.pathname + url.search;
-        proxyPath = `/api/proxy/stash?path=${encodeURIComponent(pathWithQuery)}`;
-      } catch {
-        // If URL parsing fails, treat as path
-        proxyPath = `/api/proxy/stash?path=${encodeURIComponent(urlOrPath)}`;
-      }
-    } else {
-      // Otherwise treat as path and encode it
-      proxyPath = `/api/proxy/stash?path=${encodeURIComponent(urlOrPath)}`;
-    }
-
-    // Add instanceId for multi-instance routing
-    if (instanceId) {
-      proxyPath += `&instanceId=${encodeURIComponent(instanceId)}`;
-    }
-
-    return proxyPath;
   }
 }
 

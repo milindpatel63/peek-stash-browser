@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { LucideDroplets } from "lucide-react";
 import { useIncrementOCounter } from "../../api/hooks";
+import { useCoarsePointer } from "../../hooks/useHoverCapable";
 
 /**
  * Interactive O Counter button component
@@ -9,6 +10,7 @@ import { useIncrementOCounter } from "../../api/hooks";
  *
  * @param {string} sceneId - Stash scene ID (for scene interactive mode)
  * @param {string} imageId - Stash image ID (for image interactive mode)
+ * @param {string} instanceId - The entity's Stash instance, sent with the increment; required with sceneId or imageId (there is no press without it)
  * @param {number} initialCount - Initial O counter value
  * @param {Function} onChange - Optional callback after successful increment (receives new count)
  * @param {string} size - Size variant: small, medium, large
@@ -18,6 +20,7 @@ import { useIncrementOCounter } from "../../api/hooks";
 interface Props {
   sceneId?: string;
   imageId?: string;
+  instanceId?: string;
   initialCount?: number;
   onChange?: (count: number) => void;
   size?: "small" | "medium" | "large";
@@ -29,20 +32,28 @@ interface Props {
 const OCounterButton = ({
   sceneId,
   imageId,
+  instanceId,
   initialCount = 0,
   onChange,
   size = "small",
   variant = "card",
   interactive = true,
 }: Props) => {
-  const [count, setCount] = useState(initialCount ?? 0);
+  const shownCount = initialCount ?? 0;
+  // The count after this button's presses, shown over `initialCount` until
+  // the prop moves on (the caller caught up, or the server sent another
+  // count): read from props, not copied into state, so a new count renders
+  // once
+  const [pressed, setPressed] = useState<{
+    count: number;
+    over: number;
+  } | null>(null);
+  if (pressed && pressed.over !== shownCount) setPressed(null);
+  const count =
+    pressed && pressed.over === shownCount ? pressed.count : shownCount;
   const [isAnimating, setIsAnimating] = useState(false);
   const incrementMutation = useIncrementOCounter();
-
-  // Sync count when initialCount changes
-  useEffect(() => {
-    setCount(initialCount ?? 0);
-  }, [initialCount]);
+  const coarsePointer = useCoarsePointer();
 
   // Size configurations
   const sizes = {
@@ -50,11 +61,20 @@ const OCounterButton = ({
     medium: { icon: 24, text: "text-base", padding: "p-2", gap: "gap-1.5" },
     large: { icon: 28, text: "text-lg", padding: "p-2.5", gap: "gap-2" },
   };
+  // On a finger the button's box (32, 40 and 48 px) gets a 44 px hit area
+  // from a ::before; the box itself does not change
+  const coarseHitAreas = {
+    small: "before:absolute before:-inset-[6px]",
+    medium: "before:absolute before:-inset-0.5",
+    large: "",
+  };
 
   const config = sizes[size] || sizes.small;
+  const hitArea = coarsePointer ? coarseHitAreas[size] : "";
 
   // Determine which entity ID to use
   const entityId = sceneId || imageId;
+  const canPress = interactive && !!entityId && !!instanceId;
   const entityType = sceneId ? "scene" : imageId ? "image" : null;
 
   const handleClick = async (e: React.MouseEvent<HTMLButtonElement>) => {
@@ -63,25 +83,36 @@ const OCounterButton = ({
     e.stopPropagation();
 
     // Only allow incrementing for scenes/images with interactive mode
-    if (!interactive || incrementMutation.isPending || !entityId) {
+    if (
+      !interactive ||
+      incrementMutation.isPending ||
+      !entityId ||
+      !instanceId
+    ) {
       return;
     }
 
-    const previousCount = count;
+    const previous = pressed;
     const newCount = count + 1;
-    setCount(newCount); // Optimistic update
+    setPressed({ count: newCount, over: shownCount }); // Optimistic update
     setIsAnimating(true);
 
     try {
-      const response = await incrementMutation.mutateAsync({ sceneId, imageId });
+      const response = await incrementMutation.mutateAsync({
+        sceneId,
+        imageId,
+        instanceId,
+      });
 
       if (response?.success) {
-        setCount(response.oCount ?? newCount); // Update with server value
-        onChange?.(response.oCount ?? newCount);
+        // The server's count
+        const serverCount = response.oCount ?? newCount;
+        setPressed({ count: serverCount, over: shownCount });
+        onChange?.(serverCount);
       }
     } catch (err) {
       console.error(`Error incrementing O counter for ${entityType}:`, err);
-      setCount(previousCount); // Revert on error
+      setPressed(previous); // Revert on error
     } finally {
       setTimeout(() => {
         setIsAnimating(false);
@@ -91,30 +122,34 @@ const OCounterButton = ({
 
   return (
     <button
-      onClick={handleClick}
+      onClick={(e) => void handleClick(e)}
       disabled={incrementMutation.isPending}
-      className={`flex items-center ${config.gap} ${config.padding} rounded transition-all hover:scale-105 active:scale-95 relative ${
+      className={`flex items-center ${config.gap} ${config.padding} rounded transition-all hover:scale-105 active:scale-95 relative ${hitArea} ${
         isAnimating ? "animate-pulse" : ""
       }`}
       style={{
         backgroundColor:
-          variant === "card" || variant === "lightbox" ? "transparent" : "var(--bg-tertiary)",
-        border: variant === "card" || variant === "lightbox" ? "none" : "1px solid var(--border-color)",
-        cursor:
-          interactive && entityId
-            ? incrementMutation.isPending
-              ? "not-allowed"
-              : "pointer"
-            : "default",
+          variant === "card" || variant === "lightbox"
+            ? "transparent"
+            : "var(--bg-tertiary)",
+        border:
+          variant === "card" || variant === "lightbox"
+            ? "none"
+            : "1px solid var(--border-color)",
+        cursor: canPress
+          ? incrementMutation.isPending
+            ? "not-allowed"
+            : "pointer"
+          : "default",
         opacity: incrementMutation.isPending ? 0.7 : 1,
       }}
       aria-label={
-        interactive && entityId
+        canPress
           ? `Increment O counter (current: ${count})`
           : `O Counter: ${count}`
       }
       title={
-        interactive && entityId
+        canPress
           ? `O Counter: ${count} (click to increment)`
           : `O Counter: ${count}`
       }

@@ -1,12 +1,14 @@
-import { renderHook, waitFor } from "@testing-library/react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { describe, it, expect, vi, beforeEach } from "vitest";
 import React from "react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { renderHook, waitFor } from "@testing-library/react";
+import { must } from "@tests/testUtils";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { useGroupList } from "../../../src/api/hooks/useGroups";
+import { libraryApi } from "../../../src/api/library";
 
 vi.mock("../../../src/api/library", () => ({
   libraryApi: {
     findGroups: vi.fn(),
-    findGroupById: vi.fn(),
   },
 }));
 
@@ -14,12 +16,10 @@ vi.mock("../../../src/api/queryKeys", () => ({
   queryKeys: {
     groups: {
       all: () => ["groups"],
-      list: (instanceId: string | undefined, params: Record<string, unknown>) => [
-        "groups",
-        instanceId,
-        "list",
-        params,
-      ],
+      list: (
+        instanceId: string | undefined,
+        params: Record<string, unknown>
+      ) => ["groups", instanceId, "list", params],
       detail: (instanceId: string | undefined, id: string) => [
         "groups",
         instanceId,
@@ -29,9 +29,6 @@ vi.mock("../../../src/api/queryKeys", () => ({
     },
   },
 }));
-
-import { libraryApi } from "../../../src/api/library";
-import { useGroupList, useGroupDetail } from "../../../src/api/hooks/useGroups";
 
 function createWrapper() {
   const queryClient = new QueryClient({
@@ -57,66 +54,56 @@ describe("useGroupList", () => {
 
   it("fires query with correct params", async () => {
     const mockData = { groups: [], total: 0 };
-    (libraryApi.findGroups as ReturnType<typeof vi.fn>).mockResolvedValue(mockData);
+    (libraryApi.findGroups as ReturnType<typeof vi.fn>).mockResolvedValue(
+      mockData
+    );
 
-    const params = { page: 1, perPage: 24 };
+    const params = { filter: { page: 1, per_page: 24 } };
     const { result } = renderHook(() => useGroupList(params), {
       wrapper: createWrapper(),
     });
 
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(result.current.data).toEqual(mockData);
-    expect(libraryApi.findGroups).toHaveBeenCalledWith(params, expect.any(AbortSignal));
+    expect(libraryApi.findGroups).toHaveBeenCalledWith(
+      params,
+      expect.any(AbortSignal)
+    );
   });
 
   it("passes signal to queryFn", async () => {
     const mockData = { groups: [], total: 0 };
-    (libraryApi.findGroups as ReturnType<typeof vi.fn>).mockResolvedValue(mockData);
+    (libraryApi.findGroups as ReturnType<typeof vi.fn>).mockResolvedValue(
+      mockData
+    );
 
-    const params = { page: 1, perPage: 24 };
+    const params = { filter: { page: 1, per_page: 24 } };
     renderHook(() => useGroupList(params), { wrapper: createWrapper() });
 
     await waitFor(() => expect(libraryApi.findGroups).toHaveBeenCalled());
-    const callArgs = (libraryApi.findGroups as ReturnType<typeof vi.fn>).mock.calls[0];
+    const callArgs = must(
+      (libraryApi.findGroups as ReturnType<typeof vi.fn>).mock.calls[0]
+    );
     expect(callArgs[1]).toBeInstanceOf(AbortSignal);
   });
-});
 
-describe("useGroupDetail", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
+  it("keeps the previous page's data while the next page loads", async () => {
+    const page1 = { findGroups: { groups: [{ id: "1" }], count: 2 } };
+    (libraryApi.findGroups as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(page1)
+      .mockReturnValueOnce(new Promise(() => {}));
 
-  it("does not fire query when id is undefined", () => {
-    const { result } = renderHook(() => useGroupDetail(undefined), {
-      wrapper: createWrapper(),
-    });
-    expect(result.current.isFetching).toBe(false);
-    expect(libraryApi.findGroupById).not.toHaveBeenCalled();
-  });
-
-  it("fires query and returns data on success", async () => {
-    const mockGroup = { id: "group-1", name: "Test Group" };
-    (libraryApi.findGroupById as ReturnType<typeof vi.fn>).mockResolvedValue(mockGroup);
-
-    const { result } = renderHook(() => useGroupDetail("group-1"), {
-      wrapper: createWrapper(),
-    });
-
+    const { result, rerender } = renderHook(
+      ({ page }: { page: number }) =>
+        useGroupList({ filter: { page, per_page: 1 } }),
+      { wrapper: createWrapper(), initialProps: { page: 1 } }
+    );
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
-    expect(result.current.data).toEqual(mockGroup);
-    expect(libraryApi.findGroupById).toHaveBeenCalledWith("group-1", null);
-  });
 
-  it("passes instanceId to findGroupById", async () => {
-    const mockGroup = { id: "group-1", name: "Test Group" };
-    (libraryApi.findGroupById as ReturnType<typeof vi.fn>).mockResolvedValue(mockGroup);
+    rerender({ page: 2 });
+    await waitFor(() => expect(libraryApi.findGroups).toHaveBeenCalledTimes(2));
 
-    const { result } = renderHook(() => useGroupDetail("group-1", "instance-6"), {
-      wrapper: createWrapper(),
-    });
-
-    await waitFor(() => expect(result.current.isSuccess).toBe(true));
-    expect(libraryApi.findGroupById).toHaveBeenCalledWith("group-1", "instance-6");
+    expect(result.current.data).toEqual(page1);
+    expect(result.current.isPlaceholderData).toBe(true);
   });
 });

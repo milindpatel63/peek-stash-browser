@@ -9,9 +9,10 @@
  * - Keyboard navigation
  * - Search filtering auto-expand
  */
-import { describe, it, expect } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
+import { act, fireEvent, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import TagHierarchyView from "../../../src/components/tags/TagHierarchyView";
 
 // Wrapper to provide router context
@@ -19,8 +20,31 @@ const renderWithRouter = (ui: React.ReactElement) => {
   return render(<MemoryRouter>{ui}</MemoryRouter>);
 };
 
-// Cast component for untyped props
-const TagHierarchy = TagHierarchyView as React.FC<any>;
+/** The current path, shown beside the tree */
+const LocationPath = () => (
+  <span data-testid="location">{useLocation().pathname}</span>
+);
+
+/** The tree at /tags with the current path shown, to see where Enter goes */
+const renderAtTags = (ui: React.ReactElement) =>
+  render(
+    <MemoryRouter initialEntries={["/tags"]}>
+      <Routes>
+        <Route path="*" element={ui} />
+      </Routes>
+      <LocationPath />
+    </MemoryRouter>
+  );
+
+/** The tree row showing `name`; the nth when several do */
+const row = (name: string, nth = 0) => {
+  const found = screen
+    .getAllByRole("treeitem")
+    .filter((item) => item.textContent?.includes(name));
+  const item = found[nth];
+  if (!item) throw new Error(`no row ${nth} for ${name}`);
+  return item;
+};
 
 // Mock tags with hierarchy - includes parents array for buildTagTree
 const mockTags = [
@@ -68,7 +92,7 @@ describe("TagHierarchyView", () => {
   describe("rendering", () => {
     it("renders tree container with correct role", () => {
       renderWithRouter(
-        <TagHierarchy tags={mockTags} isLoading={false} />
+        <TagHierarchyView searchQuery="" tags={mockTags} isLoading={false} />
       );
       expect(screen.getByRole("tree")).toBeInTheDocument();
       expect(screen.getByRole("tree")).toHaveAttribute(
@@ -79,7 +103,7 @@ describe("TagHierarchyView", () => {
 
     it("renders root tags", () => {
       renderWithRouter(
-        <TagHierarchy tags={mockTags} isLoading={false} />
+        <TagHierarchyView searchQuery="" tags={mockTags} isLoading={false} />
       );
       // Parent Tag should be visible (it has no parents)
       expect(screen.getByText("Parent Tag")).toBeInTheDocument();
@@ -87,7 +111,7 @@ describe("TagHierarchyView", () => {
 
     it("expands first level by default", () => {
       renderWithRouter(
-        <TagHierarchy tags={mockTags} isLoading={false} />
+        <TagHierarchyView searchQuery="" tags={mockTags} isLoading={false} />
       );
       // Root nodes should be expanded, showing their children
       expect(screen.getByText("Child 1")).toBeInTheDocument();
@@ -96,7 +120,7 @@ describe("TagHierarchyView", () => {
 
     it("does not show grandchildren initially", () => {
       renderWithRouter(
-        <TagHierarchy tags={mockTags} isLoading={false} />
+        <TagHierarchyView searchQuery="" tags={mockTags} isLoading={false} />
       );
       // Grandchild should not be visible until Child 2 is expanded
       expect(screen.queryByText("Grandchild")).not.toBeInTheDocument();
@@ -106,7 +130,7 @@ describe("TagHierarchyView", () => {
   describe("loading state", () => {
     it("renders skeleton placeholders when loading", () => {
       renderWithRouter(
-        <TagHierarchy tags={[]} isLoading={true} />
+        <TagHierarchyView searchQuery="" tags={[]} isLoading={true} />
       );
       // Should show animated placeholders
       const placeholders = document.querySelectorAll(".animate-pulse");
@@ -115,7 +139,7 @@ describe("TagHierarchyView", () => {
 
     it("does not render tree when loading", () => {
       renderWithRouter(
-        <TagHierarchy tags={mockTags} isLoading={true} />
+        <TagHierarchyView searchQuery="" tags={mockTags} isLoading={true} />
       );
       expect(screen.queryByRole("tree")).not.toBeInTheDocument();
     });
@@ -124,14 +148,14 @@ describe("TagHierarchyView", () => {
   describe("empty state", () => {
     it("renders empty message when no tags", () => {
       renderWithRouter(
-        <TagHierarchy tags={[]} isLoading={false} />
+        <TagHierarchyView searchQuery="" tags={[]} isLoading={false} />
       );
       expect(screen.getByText("No tags found")).toBeInTheDocument();
     });
 
     it("does not render tree when empty", () => {
       renderWithRouter(
-        <TagHierarchy tags={[]} isLoading={false} />
+        <TagHierarchyView searchQuery="" tags={[]} isLoading={false} />
       );
       expect(screen.queryByRole("tree")).not.toBeInTheDocument();
     });
@@ -140,7 +164,7 @@ describe("TagHierarchyView", () => {
   describe("expand/collapse", () => {
     it("expands node when clicked", () => {
       renderWithRouter(
-        <TagHierarchy tags={mockTags} isLoading={false} />
+        <TagHierarchyView searchQuery="" tags={mockTags} isLoading={false} />
       );
       // Child 2 should be visible but Grandchild should not
       expect(screen.getByText("Child 2")).toBeInTheDocument();
@@ -155,7 +179,7 @@ describe("TagHierarchyView", () => {
 
     it("collapses node when clicked again", () => {
       renderWithRouter(
-        <TagHierarchy tags={mockTags} isLoading={false} />
+        <TagHierarchyView searchQuery="" tags={mockTags} isLoading={false} />
       );
       // First expand Child 2
       fireEvent.click(screen.getByText("Child 2"));
@@ -170,7 +194,8 @@ describe("TagHierarchyView", () => {
   describe("sorting", () => {
     it("sorts tags by name ascending by default", () => {
       renderWithRouter(
-        <TagHierarchy
+        <TagHierarchyView
+          searchQuery=""
           tags={mockFlatTags}
           isLoading={false}
           sortField="name"
@@ -178,15 +203,16 @@ describe("TagHierarchyView", () => {
         />
       );
       const items = screen.getAllByRole("treeitem");
-      const names = items.map((item) =>
-        item.querySelector(".font-medium")?.textContent
+      const names = items.map(
+        (item) => item.querySelector(".font-medium")?.textContent
       );
       expect(names).toEqual(["Alpha", "Beta", "Gamma"]);
     });
 
     it("sorts tags by name descending when specified", () => {
       renderWithRouter(
-        <TagHierarchy
+        <TagHierarchyView
+          searchQuery=""
           tags={mockFlatTags}
           isLoading={false}
           sortField="name"
@@ -194,15 +220,16 @@ describe("TagHierarchyView", () => {
         />
       );
       const items = screen.getAllByRole("treeitem");
-      const names = items.map((item) =>
-        item.querySelector(".font-medium")?.textContent
+      const names = items.map(
+        (item) => item.querySelector(".font-medium")?.textContent
       );
       expect(names).toEqual(["Gamma", "Beta", "Alpha"]);
     });
 
     it("sorts tags by scene count", () => {
       renderWithRouter(
-        <TagHierarchy
+        <TagHierarchyView
+          searchQuery=""
           tags={mockFlatTags}
           isLoading={false}
           sortField="scenes_count"
@@ -210,8 +237,8 @@ describe("TagHierarchyView", () => {
         />
       );
       const items = screen.getAllByRole("treeitem");
-      const names = items.map((item) =>
-        item.querySelector(".font-medium")?.textContent
+      const names = items.map(
+        (item) => item.querySelector(".font-medium")?.textContent
       );
       // Gamma (8) > Alpha (5) > Beta (3)
       expect(names).toEqual(["Gamma", "Alpha", "Beta"]);
@@ -221,7 +248,11 @@ describe("TagHierarchyView", () => {
   describe("keyboard navigation", () => {
     it("navigates down with ArrowDown", () => {
       renderWithRouter(
-        <TagHierarchy tags={mockFlatTags} isLoading={false} />
+        <TagHierarchyView
+          searchQuery=""
+          tags={mockFlatTags}
+          isLoading={false}
+        />
       );
       const tree = screen.getByRole("tree");
 
@@ -239,7 +270,11 @@ describe("TagHierarchyView", () => {
 
     it("navigates up with ArrowUp", () => {
       renderWithRouter(
-        <TagHierarchy tags={mockFlatTags} isLoading={false} />
+        <TagHierarchyView
+          searchQuery=""
+          tags={mockFlatTags}
+          isLoading={false}
+        />
       );
       const tree = screen.getByRole("tree");
       const items = screen.getAllByRole("treeitem");
@@ -257,7 +292,7 @@ describe("TagHierarchyView", () => {
 
     it("expands node with ArrowRight", () => {
       renderWithRouter(
-        <TagHierarchy tags={mockTags} isLoading={false} />
+        <TagHierarchyView searchQuery="" tags={mockTags} isLoading={false} />
       );
       const tree = screen.getByRole("tree");
 
@@ -276,7 +311,11 @@ describe("TagHierarchyView", () => {
 
     it("jumps to start with Home key", () => {
       renderWithRouter(
-        <TagHierarchy tags={mockFlatTags} isLoading={false} />
+        <TagHierarchyView
+          searchQuery=""
+          tags={mockFlatTags}
+          isLoading={false}
+        />
       );
       const tree = screen.getByRole("tree");
       const items = screen.getAllByRole("treeitem");
@@ -292,7 +331,11 @@ describe("TagHierarchyView", () => {
 
     it("jumps to end with End key", () => {
       renderWithRouter(
-        <TagHierarchy tags={mockFlatTags} isLoading={false} />
+        <TagHierarchyView
+          searchQuery=""
+          tags={mockFlatTags}
+          isLoading={false}
+        />
       );
       const tree = screen.getByRole("tree");
       const items = screen.getAllByRole("treeitem");
@@ -306,10 +349,135 @@ describe("TagHierarchyView", () => {
     });
   });
 
+  describe("keyboard focus", () => {
+    afterEach(() => {
+      document.documentElement.classList.remove("tv-mode");
+    });
+
+    it("Down then Enter opens the tag that has focus, not the one clicked before", async () => {
+      const user = userEvent.setup();
+      renderAtTags(
+        <TagHierarchyView
+          searchQuery=""
+          tags={mockFlatTags}
+          isLoading={false}
+        />
+      );
+
+      await user.click(row("Alpha"));
+      await user.keyboard("{ArrowDown}");
+      expect(row("Beta")).toHaveFocus();
+      await user.keyboard("{Enter}");
+
+      expect(screen.getByTestId("location")).toHaveTextContent("/tag/11");
+    });
+
+    it("a tag under two parents is two nodes; Down from the second parent's child continues under the second parent", async () => {
+      const user = userEvent.setup();
+      const tags = [
+        { id: "1", name: "Parent One", parents: [] },
+        { id: "2", name: "Parent Two", parents: [] },
+        {
+          id: "3",
+          name: "Shared",
+          parents: [{ id: "1" }, { id: "2" }],
+        },
+        { id: "4", name: "Zed", parents: [{ id: "2" }] },
+      ];
+      renderWithRouter(
+        <TagHierarchyView searchQuery="" tags={tags} isLoading={false} />
+      );
+
+      await user.click(row("Shared", 1));
+      // Only the row clicked is selected, not the same tag under Parent One
+      expect(row("Shared", 0)).toHaveAttribute("aria-selected", "false");
+      expect(row("Shared", 1)).toHaveAttribute("aria-selected", "true");
+
+      await user.keyboard("{ArrowDown}");
+      expect(row("Zed")).toHaveFocus();
+      expect(row("Zed")).toHaveAttribute("aria-selected", "true");
+      expect(row("Shared", 1)).toHaveAttribute("tabindex", "-1");
+    });
+
+    it("a row focused from outside the tree becomes its selected, tabbable row", () => {
+      renderWithRouter(
+        <TagHierarchyView
+          searchQuery=""
+          tags={mockFlatTags}
+          isLoading={false}
+        />
+      );
+      // TV focus moves focus with .focus(), not through the tree's keys
+      act(() => row("Gamma").focus());
+      expect(row("Gamma")).toHaveAttribute("aria-selected", "true");
+      expect(row("Gamma")).toHaveAttribute("tabindex", "0");
+      expect(row("Alpha")).toHaveAttribute("tabindex", "-1");
+    });
+
+    it("rows are TV items, so TV focus can land on them", () => {
+      renderWithRouter(
+        <TagHierarchyView searchQuery="" tags={mockTags} isLoading={false} />
+      );
+      for (const item of screen.getAllByRole("treeitem")) {
+        expect(item).toHaveAttribute("data-tv-item");
+      }
+    });
+
+    it("in TV mode the tree leaves an arrow with nowhere to go in it to TV focus", async () => {
+      document.documentElement.classList.add("tv-mode");
+      const user = userEvent.setup();
+      renderWithRouter(
+        <TagHierarchyView searchQuery="" tags={mockTags} isLoading={false} />
+      );
+      await user.click(row("Child 1"));
+      await user.keyboard("{Home}");
+      const root = row("Parent Tag");
+      expect(root).toHaveFocus();
+
+      // Up from the first row: not handled, TV focus takes it
+      expect(fireEvent.keyDown(root, { key: "ArrowUp" })).toBe(true);
+      // Left on an open root closes it
+      expect(fireEvent.keyDown(root, { key: "ArrowLeft" })).toBe(false);
+      expect(root).toHaveAttribute("aria-expanded", "false");
+      // Left on a closed root: not handled, TV focus goes to the sidebar
+      expect(fireEvent.keyDown(root, { key: "ArrowLeft" })).toBe(true);
+      // Down from the last row: not handled
+      expect(fireEvent.keyDown(root, { key: "ArrowDown" })).toBe(true);
+    });
+
+    it("in TV mode Left on a root with no children goes straight to TV focus", async () => {
+      document.documentElement.classList.add("tv-mode");
+      const user = userEvent.setup();
+      renderWithRouter(
+        <TagHierarchyView
+          searchQuery=""
+          tags={mockFlatTags}
+          isLoading={false}
+        />
+      );
+      await user.click(row("Alpha"));
+      expect(fireEvent.keyDown(row("Alpha"), { key: "ArrowLeft" })).toBe(true);
+    });
+
+    it("outside TV mode the tree keeps every arrow, so the page does not scroll", async () => {
+      const user = userEvent.setup();
+      renderWithRouter(
+        <TagHierarchyView
+          searchQuery=""
+          tags={mockFlatTags}
+          isLoading={false}
+        />
+      );
+      await user.click(row("Alpha"));
+      expect(fireEvent.keyDown(row("Alpha"), { key: "ArrowUp" })).toBe(false);
+      expect(fireEvent.keyDown(row("Alpha"), { key: "ArrowLeft" })).toBe(false);
+    });
+  });
+
   describe("search filtering", () => {
     it("filters to show matching tags", () => {
       renderWithRouter(
-        <TagHierarchy
+        <TagHierarchyView
           tags={mockFlatTags}
           isLoading={false}
           searchQuery="Beta"
@@ -323,7 +491,7 @@ describe("TagHierarchyView", () => {
 
     it("shows empty state when no matches", () => {
       renderWithRouter(
-        <TagHierarchy
+        <TagHierarchyView
           tags={mockFlatTags}
           isLoading={false}
           searchQuery="NonExistent"
@@ -334,7 +502,7 @@ describe("TagHierarchyView", () => {
 
     it("auto-expands ancestors to show matching child", () => {
       renderWithRouter(
-        <TagHierarchy
+        <TagHierarchyView
           tags={mockTags}
           isLoading={false}
           searchQuery="Grandchild"
@@ -345,6 +513,210 @@ describe("TagHierarchyView", () => {
       // Ancestors should be visible (dimmed)
       expect(screen.getByText("Parent Tag")).toBeInTheDocument();
       expect(screen.getByText("Child 2")).toBeInTheDocument();
+    });
+  });
+
+  describe("across instances", () => {
+    // Tag 5 on A and tag 5 on B, each with a child of its own (the tree
+    // reads parents; children as the list endpoint sent them)
+    const twoInstanceTags = [
+      {
+        id: "5",
+        instanceId: "a",
+        name: "Five on A",
+        parents: [],
+        children: [{ id: "6" }],
+      },
+      { id: "6", instanceId: "a", name: "Six on A", parents: [{ id: "5" }] },
+      {
+        id: "5",
+        instanceId: "b",
+        name: "Five on B",
+        parents: [],
+        children: [{ id: "7" }],
+      },
+      { id: "7", instanceId: "b", name: "Seven on B", parents: [{ id: "5" }] },
+    ];
+
+    it("expanding tag 5 on A leaves B's tag 5 collapsed", () => {
+      renderWithRouter(
+        <TagHierarchyView
+          searchQuery=""
+          tags={twoInstanceTags}
+          isLoading={false}
+        />
+      );
+      fireEvent.click(screen.getByText("Collapse All"));
+      expect(screen.queryByText("Six on A")).not.toBeInTheDocument();
+      expect(screen.queryByText("Seven on B")).not.toBeInTheDocument();
+
+      fireEvent.click(screen.getByText("Five on A"));
+
+      expect(screen.getByText("Six on A")).toBeInTheDocument();
+      expect(screen.queryByText("Seven on B")).not.toBeInTheDocument();
+    });
+  });
+
+  describe("large trees", () => {
+    /** Every observer built, so a test can report the sentinel in view */
+    const observers: Array<{
+      watched: Set<Element>;
+      callback: IntersectionObserverCallback;
+    }> = [];
+
+    class FakeObserver {
+      watched = new Set<Element>();
+      callback: IntersectionObserverCallback;
+      constructor(callback: IntersectionObserverCallback) {
+        this.callback = callback;
+        observers.push(this);
+      }
+      observe(target: Element) {
+        this.watched.add(target);
+      }
+      unobserve(target: Element) {
+        this.watched.delete(target);
+      }
+      disconnect() {
+        this.watched.clear();
+      }
+    }
+
+    const reachSentinel = () =>
+      observers.forEach((o) =>
+        act(() =>
+          o.callback(
+            [...o.watched].map(
+              (target) =>
+                ({
+                  target,
+                  isIntersecting: true,
+                  intersectionRatio: 1,
+                }) as IntersectionObserverEntry
+            ),
+            o as unknown as IntersectionObserver
+          )
+        )
+      );
+
+    beforeEach(() => {
+      observers.length = 0;
+      vi.stubGlobal("IntersectionObserver", FakeObserver);
+    });
+
+    afterEach(() => {
+      vi.unstubAllGlobals();
+    });
+
+    const rootTags = (n: number) =>
+      Array.from({ length: n }, (_, i) => ({
+        id: String(i),
+        instanceId: "a",
+        name: `Tag ${String(i).padStart(5, "0")}`,
+        parents: [],
+      }));
+
+    it("10,000 root tags mount at most 200 rows, and the sentinel mounts 200 more", () => {
+      renderWithRouter(
+        <TagHierarchyView
+          searchQuery=""
+          tags={rootTags(10000)}
+          isLoading={false}
+        />
+      );
+      expect(screen.getAllByRole("treeitem")).toHaveLength(200);
+
+      reachSentinel();
+      expect(screen.getAllByRole("treeitem")).toHaveLength(400);
+    });
+
+    it("the last chunk leaves no sentinel", () => {
+      renderWithRouter(
+        <TagHierarchyView
+          searchQuery=""
+          tags={rootTags(250)}
+          isLoading={false}
+        />
+      );
+      expect(screen.getAllByRole("treeitem")).toHaveLength(200);
+      reachSentinel();
+      expect(screen.getAllByRole("treeitem")).toHaveLength(250);
+      expect(screen.queryByTestId("tree-sentinel")).not.toBeInTheDocument();
+    });
+
+    it("269 tags with 11 roots render every root expanded, as today", () => {
+      const tags = [
+        ...Array.from({ length: 11 }, (_, i) => ({
+          id: `r${i}`,
+          instanceId: "a",
+          name: `Root ${String(i).padStart(2, "0")}`,
+          parents: [],
+        })),
+        ...Array.from({ length: 258 }, (_, i) => ({
+          id: `c${i}`,
+          instanceId: "a",
+          name: `Child ${i}`,
+          parents: [{ id: `r${i % 11}` }],
+        })),
+      ];
+      renderWithRouter(
+        <TagHierarchyView searchQuery="" tags={tags} isLoading={false} />
+      );
+      // Every root open: the 11 roots and their 258 children
+      expect(screen.getAllByRole("treeitem")).toHaveLength(269);
+      expect(screen.getByText("Child 257")).toBeInTheDocument();
+    });
+
+    it("opens no root at first when that would show 500 rows or more", () => {
+      const tags = [
+        { id: "r", instanceId: "a", name: "Root", parents: [] },
+        ...Array.from({ length: 600 }, (_, i) => ({
+          id: `c${i}`,
+          instanceId: "a",
+          name: `Child ${i}`,
+          parents: [{ id: "r" }],
+        })),
+      ];
+      renderWithRouter(
+        <TagHierarchyView searchQuery="" tags={tags} isLoading={false} />
+      );
+      expect(screen.getAllByRole("treeitem")).toHaveLength(1);
+
+      // A click still opens it
+      fireEvent.click(screen.getByText("Root"));
+      expect(screen.getAllByRole("treeitem")).toHaveLength(601);
+    });
+
+    it("End mounts the rest and focuses the true last row", () => {
+      renderWithRouter(
+        <TagHierarchyView
+          searchQuery=""
+          tags={rootTags(500)}
+          isLoading={false}
+        />
+      );
+      expect(screen.getAllByRole("treeitem")).toHaveLength(200);
+      fireEvent.keyDown(screen.getByRole("tree"), { key: "End" });
+
+      expect(screen.getAllByRole("treeitem")).toHaveLength(500);
+      expect(row("Tag 00499")).toHaveFocus();
+      expect(row("Tag 00499")).toHaveAttribute("aria-selected", "true");
+    });
+
+    it("Down from the last mounted row mounts the next chunk and moves on", async () => {
+      const user = userEvent.setup();
+      renderWithRouter(
+        <TagHierarchyView
+          searchQuery=""
+          tags={rootTags(500)}
+          isLoading={false}
+        />
+      );
+      await user.click(row("Tag 00199"));
+      await user.keyboard("{ArrowDown}");
+
+      expect(screen.getAllByRole("treeitem")).toHaveLength(400);
+      expect(row("Tag 00200")).toHaveFocus();
     });
   });
 });

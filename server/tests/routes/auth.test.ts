@@ -1,0 +1,320 @@
+/**
+ * HTTP tests for the auth routes (sweep item 8): recovery keys are compared by
+ * their SHA-256 hash, a recovery-key reset stamps passwordChangedAt, and login
+ * issues a token carrying the sign-in time without writing a recovery key, and
+ * starts a ranking refresh without waiting for it.
+ * The setup-window `/first-time-password` route is gone (sweep item 7).
+ *
+ * `authRateLimiter` is module-level and counts failed requests per address, so
+ * this file keeps well under its 10 failures.
+ */
+import bcrypt from "bcryptjs";
+import { createHash } from "crypto";
+import jwt from "jsonwebtoken";
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
+import { _trackedCountForTesting } from "../../middleware/accountLockout.js";
+import { generateToken } from "../../middleware/auth.js";
+import { errorHandler } from "../../middleware/errorHandler.js";
+import prisma from "../../prisma/singleton.js";
+import authRoutes from "../../routes/auth.js";
+import rankingComputeService from "../../services/RankingComputeService.js";
+import {
+  formatRecoveryKey,
+  generateRecoveryKey,
+} from "../../utils/recoveryKey.js";
+import { userRow } from "../helpers/fixtures.js";
+import { startTestApp } from "../helpers/httpTestApp.js";
+import { anyOf } from "../helpers/matchers.js";
+import { must } from "../helpers/must.js";
+import { partialRow } from "../helpers/prismaMock.js";
+
+vi.mock(
+  "../../prisma/singleton.js",
+  () => import("../helpers/prismaSingletonMock.js")
+);
+
+vi.mock("../../services/RankingComputeService.js", () => ({
+  default: {
+    ensureFresh: vi.fn().mockResolvedValue(undefined),
+  },
+}));
+
+vi.mock("../../utils/logger.js", () => ({
+  logger: {
+    error: vi.fn(),
+    warn: vi.fn(),
+    info: vi.fn(),
+    debug: vi.fn(),
+    verbose: vi.fn(),
+  },
+}));
+
+const mockPrisma = vi.mocked(prisma, true);
+const mockRankingService = vi.mocked(rankingComputeService, true);
+
+// The stored form: SHA-256 hex of the key without dashes, upper case.
+const KEY = generateRecoveryKey();
+const KEY_HASH = createHash("sha256").update(KEY).digest("hex");
+const PASSWORD = "CorrectPass1";
+
+describe("auth routes", () => {
+  let baseUrl: string;
+  let close: () => Promise<void>;
+  let fixtureHash: string;
+
+  const post = (path: string, body: unknown) =>
+    fetch(`${baseUrl}/api/auth${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+  beforeAll(async () => {
+    fixtureHash = await bcrypt.hash(PASSWORD, 4);
+    ({ baseUrl, close } = await startTestApp((app) => {
+      app.use("/api/auth", authRoutes);
+      app.use(errorHandler);
+    }));
+  });
+
+  afterAll(async () => {
+    await close();
+  });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockPrisma.user.update.mockResolvedValue(userRow());
+  });
+
+  describe("POST /forgot-password/reset", () => {
+    it("forgot-password/reset accepts the key by its hash and stamps passwordChangedAt", async () => {
+      mockPrisma.user.findUnique.mockResolvedValue(
+        partialRow({
+          id: 7,
+          recoveryKeyHash: KEY_HASH,
+        })
+      );
+
+      const res = await post("/forgot-password/reset", {
+        username: "alice",
+        recoveryKey: formatRecoveryKey(KEY).toLowerCase(),
+        newPassword: "NewPassw0rd",
+      });
+
+      expect(res.status).toBe(200);
+      expect(mockPrisma.user.update).toHaveBeenCalledWith({
+        where: { id: 7 },
+        data: {
+          password: anyOf(String),
+          passwordChangedAt: anyOf(Date),
+        },
+      });
+    });
+
+    it("forgot-password/reset rejects the stored hash used as a key", async () => {
+      mockPrisma.user.findUnique.mockResolvedValue(
+        partialRow({
+          id: 7,
+          recoveryKeyHash: KEY_HASH,
+        })
+      );
+
+      const res = await post("/forgot-password/reset", {
+        username: "alice",
+        recoveryKey: KEY_HASH,
+        newPassword: "NewPassw0rd",
+      });
+
+      expect(res.status).toBe(401);
+      expect(mockPrisma.user.update).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("POST /forgot-password/init", () => {
+    it("forgot-password/init reports hasRecoveryKey from the hash column", async () => {
+      mockPrisma.user.findUnique.mockResolvedValue(
+        partialRow({
+          id: 7,
+          recoveryKeyHash: KEY_HASH,
+        })
+      );
+
+      const res = await post("/forgot-password/init", { username: "alice" });
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ hasRecoveryKey: true });
+    });
+  });
+
+  it("a database failure answers 500 with fixed text and never its message", async () => {
+    mockPrisma.user.findUnique.mockRejectedValue(
+      new Error("SQLITE_BUSY at /data/peek.db")
+    );
+
+    const res = await post("/forgot-password/init", { username: "alice" });
+
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: "Internal server error" });
+  });
+
+  it("POST /api/auth/first-time-password is gone", async () => {
+    const res = await post("/first-time-password", {
+      username: "admin",
+      newPassword: "NewPassw0rd",
+    });
+
+    expect(res.status).toBe(404);
+  });
+
+  describe("GET /check and /me", () => {
+    const signedIn = (path: string) =>
+      fetch(`${baseUrl}/api/auth${path}`, {
+        headers: {
+          Cookie: `token=${generateToken({ id: 1, username: "testuser", role: "USER" })}`,
+        },
+      });
+
+    beforeEach(() => {
+      mockPrisma.user.findUnique.mockResolvedValue(userRow());
+    });
+
+    it("GET /auth/check answers id, username, role and setupCompleted, and no preference or password timestamp", async () => {
+      const res = await signedIn("/check");
+
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        authenticated: boolean;
+        user: object;
+      };
+      expect(body.authenticated).toBe(true);
+      expect(Object.keys(body.user)).toEqual([
+        "id",
+        "username",
+        "role",
+        "setupCompleted",
+      ]);
+    });
+
+    it("GET /auth/me answers the same identity-only user", async () => {
+      const res = await signedIn("/me");
+
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { user: object };
+      expect(Object.keys(body.user)).toEqual([
+        "id",
+        "username",
+        "role",
+        "setupCompleted",
+      ]);
+    });
+  });
+
+  describe("POST /login", () => {
+    beforeEach(() => {
+      mockPrisma.user.findUnique.mockResolvedValue(
+        partialRow({
+          id: 7,
+          username: "alice",
+          password: fixtureHash,
+          role: "USER",
+          landingPagePreference: null,
+          setupCompleted: true,
+        })
+      );
+    });
+
+    it("login with a numeric username answers 400 and records no failed attempt", async () => {
+      const before = _trackedCountForTesting();
+
+      const res = await post("/login", { username: 12345, password: PASSWORD });
+
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({
+        error: "Username and password are required",
+      });
+      expect(_trackedCountForTesting()).toBe(before);
+      expect(mockPrisma.user.findUnique).not.toHaveBeenCalled();
+    });
+
+    it("login with a 256-character username answers 400 and the lockout map does not grow", async () => {
+      const before = _trackedCountForTesting();
+
+      const res = await post("/login", {
+        username: "a".repeat(256),
+        password: PASSWORD,
+      });
+
+      expect(res.status).toBe(400);
+      expect(_trackedCountForTesting()).toBe(before);
+      expect(mockPrisma.user.findUnique).not.toHaveBeenCalled();
+    });
+
+    it("login answers the landing page beside an identity-only user", async () => {
+      const res = await post("/login", {
+        username: "alice",
+        password: PASSWORD,
+      });
+
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        success: boolean;
+        user: object;
+        landingPagePreference: unknown;
+      };
+      expect(body.success).toBe(true);
+      expect(Object.keys(body.user)).toEqual([
+        "id",
+        "username",
+        "role",
+        "setupCompleted",
+      ]);
+      expect(body.landingPagePreference).toEqual({
+        pages: ["home"],
+        randomize: false,
+      });
+    });
+
+    it("login no longer writes a recovery key", async () => {
+      const res = await post("/login", {
+        username: "alice",
+        password: PASSWORD,
+      });
+
+      expect(res.status).toBe(200);
+      expect(mockPrisma.user.update).not.toHaveBeenCalled();
+    });
+
+    it("login starts a ranking refresh without waiting for it", async () => {
+      const res = await post("/login", {
+        username: "alice",
+        password: PASSWORD,
+      });
+
+      expect(res.status).toBe(200);
+      expect(mockRankingService.ensureFresh).toHaveBeenCalledExactlyOnceWith(7);
+    });
+
+    it("login issues a token whose authTime is the sign-in time", async () => {
+      const res = await post("/login", {
+        username: "alice",
+        password: PASSWORD,
+      });
+
+      expect(res.status).toBe(200);
+      const token = res.headers.get("set-cookie")?.match(/token=([^;]+)/)?.[1];
+      expect(token).toBeDefined();
+      const claims = jwt.decode(must(token)) as { authTime?: number };
+      const now = Date.now() / 1000;
+      expect(claims.authTime).toBeGreaterThan(now - 5);
+      expect(claims.authTime).toBeLessThanOrEqual(now + 5);
+    });
+  });
+});

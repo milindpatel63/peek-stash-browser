@@ -1,14 +1,77 @@
-import { useState, useCallback } from "react";
-import { useAuth } from "./useAuth";
-import { apiPost, apiPut, apiDelete, apiGet } from "../api";
-import { showSuccess, showError } from "../utils/toast";
+import { useCallback, useState } from "react";
+import type {
+  GetHiddenEntitiesResponse,
+  HiddenEntityType,
+} from "@peek/shared-types";
+import type { GetUserSettingsResponse } from "@peek/shared-types";
+import {
+  keepPreviousData,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
+import { apiDelete, apiGet, apiPost, apiPut } from "../api";
+import { useUserSettings } from "../api/hooks/useUserSettings";
+import { invalidateExclusionDependents } from "../api/invalidateExclusionDependents";
+import { queryKeys } from "../api/queryKeys";
+import { showError, showSuccess } from "../utils/toast";
+
+/** The server's error message on a failed request (`ApiError.data`) */
+interface ApiErrorBody {
+  data?: { error?: string };
+}
+
+/** Rows per page of the Hidden Items list */
+export const HIDDEN_ITEMS_PER_PAGE = 50;
+
+/**
+ * One page of the user's hidden items, of one type or "all", with the
+ * number of each type. Restore and Restore All invalidate
+ * `queryKeys.user.hiddenEntities()`, which every page's key starts with.
+ */
+export const useHiddenItems = (type: HiddenEntityType | "all", page: number) =>
+  useQuery({
+    queryKey: queryKeys.user.hiddenItems(type, page),
+    queryFn: () => {
+      const params = new URLSearchParams();
+      if (type !== "all") params.set("entityType", type);
+      params.set("page", String(page));
+      params.set("per_page", String(HIDDEN_ITEMS_PER_PAGE));
+      return apiGet<GetHiddenEntitiesResponse>(
+        `/user/hidden-entities?${params.toString()}`
+      );
+    },
+    placeholderData: keepPreviousData,
+  });
 
 /**
  * Hook for managing hidden entities
  */
 export const useHiddenEntities = () => {
-  const { user, updateUser } = useAuth();
+  const queryClient = useQueryClient();
+  const { data: settings } = useUserSettings();
+  const hideConfirmationDisabled =
+    settings?.settings.hideConfirmationDisabled ?? false;
   const [isHiding, setIsHiding] = useState(false);
+
+  /**
+   * Save "Don't ask again" (or its reversal). The settings cache takes the
+   * answer, so every reader skips the dialog at once, with no reload.
+   */
+  const saveHideConfirmation = useCallback(
+    async (disabled: boolean) => {
+      await apiPut("/user/hide-confirmation", {
+        hideConfirmationDisabled: disabled,
+      });
+      queryClient.setQueryData<GetUserSettingsResponse>(
+        queryKeys.user.settings(),
+        (old) =>
+          old && {
+            settings: { ...old.settings, hideConfirmationDisabled: disabled },
+          }
+      );
+    },
+    [queryClient]
+  );
 
   /**
    * Hide an entity
@@ -16,63 +79,88 @@ export const useHiddenEntities = () => {
    * @param {string} params.entityType - Type of entity (scene, performer, etc.)
    * @param {string} params.entityId - Entity ID
    * @param {string} params.entityName - Entity name (for display)
+   * @param {string} params.instanceId - The entity's Stash instance
    * @param {boolean} params.skipConfirmation - Skip confirmation dialog
    */
   const hideEntity = useCallback(
-    async ({ entityType, entityId, entityName, skipConfirmation = false }: { entityType: string; entityId: string; entityName: string; skipConfirmation?: boolean }) => {
+    async ({
+      entityType,
+      entityId,
+      entityName,
+      instanceId,
+      skipConfirmation = false,
+    }: {
+      entityType: string;
+      entityId: string;
+      entityName: string;
+      instanceId: string;
+      skipConfirmation?: boolean;
+    }) => {
       setIsHiding(true);
       try {
         await apiPost("/user/hidden-entities", {
           entityType,
           entityId,
+          instanceId,
         });
 
+        void invalidateExclusionDependents(queryClient);
         showSuccess(`${entityName} has been hidden`);
 
-        // If "don't ask again" was checked, update user preference
-        if (skipConfirmation && !user?.hideConfirmationDisabled) {
-          await apiPut("/user/hide-confirmation", {
-            hideConfirmationDisabled: true,
-          });
-          // Update user context
-          updateUser?.({ hideConfirmationDisabled: true });
+        // If "don't ask again" was checked, remember it in the settings
+        if (skipConfirmation && !hideConfirmationDisabled) {
+          await saveHideConfirmation(true);
         }
 
         return true;
-      } catch (error: any) {
+      } catch (error) {
         console.error("Failed to hide entity:", error);
         showError(
-          error.data?.error || "Failed to hide entity. Please try again."
+          (error as ApiErrorBody).data?.error ||
+            "Failed to hide entity. Please try again."
         );
         return false;
       } finally {
         setIsHiding(false);
       }
     },
-    [user, updateUser]
+    [hideConfirmationDisabled, saveHideConfirmation, queryClient]
   );
 
   /**
    * Hide multiple entities at once
    * @param {Object} params - Hide parameters
-   * @param {Array} params.entities - Array of {entityType, entityId} objects
+   * @param {Array} params.entities - Array of {entityType, entityId, instanceId} objects
    * @param {boolean} params.skipConfirmation - Skip confirmation dialog
    * @returns {Object} Result with successCount and failCount
    */
   const hideEntities = useCallback(
-    async ({ entities, skipConfirmation = false }: { entities: Array<{ entityType: string; entityId: string }>; skipConfirmation?: boolean }) => {
+    async ({
+      entities,
+      skipConfirmation = false,
+    }: {
+      entities: Array<{
+        entityType: string;
+        entityId: string;
+        instanceId: string;
+      }>;
+      skipConfirmation?: boolean;
+    }) => {
       setIsHiding(true);
       try {
-        const response = await apiPost<{ successCount: number; failCount: number }>("/user/hidden-entities/bulk", {
+        const response = await apiPost<{
+          successCount: number;
+          failCount: number;
+        }>("/user/hidden-entities/bulk", {
           entities,
         });
+        if (response.successCount > 0) {
+          void invalidateExclusionDependents(queryClient);
+        }
 
-        // If "don't ask again" was checked, update user preference
-        if (skipConfirmation && !user?.hideConfirmationDisabled) {
-          await apiPut("/user/hide-confirmation", {
-            hideConfirmationDisabled: true,
-          });
-          updateUser?.({ hideConfirmationDisabled: true });
+        // If "don't ask again" was checked, remember it in the settings
+        if (skipConfirmation && !hideConfirmationDisabled) {
+          await saveHideConfirmation(true);
         }
 
         return {
@@ -91,66 +179,72 @@ export const useHiddenEntities = () => {
         setIsHiding(false);
       }
     },
-    [user, updateUser]
+    [hideConfirmationDisabled, saveHideConfirmation, queryClient]
   );
 
   /**
-   * Unhide (restore) an entity
+   * Unhide (restore) an entity. Pass the hidden row's instanceId; a row
+   * stored for every instance has none.
    */
   const unhideEntity = useCallback(
-    async ({ entityType, entityId, entityName }: { entityType: string; entityId: string; entityName: string }) => {
+    async ({
+      entityType,
+      entityId,
+      entityName,
+      instanceId,
+    }: {
+      entityType: string;
+      entityId: string;
+      entityName: string;
+      instanceId?: string;
+    }) => {
       try {
-        await apiDelete(`/user/hidden-entities/${entityType}/${entityId}`);
+        const query = instanceId
+          ? `?instanceId=${encodeURIComponent(instanceId)}`
+          : "";
+        await apiDelete(
+          `/user/hidden-entities/${entityType}/${entityId}${query}`
+        );
+        void invalidateExclusionDependents(queryClient);
         showSuccess(`${entityName} has been restored`);
         return true;
-      } catch (error: any) {
+      } catch (error) {
         console.error("Failed to unhide entity:", error);
         showError(
-          error.data?.error || "Failed to restore entity. Please try again."
+          (error as ApiErrorBody).data?.error ||
+            "Failed to restore entity. Please try again."
         );
         return false;
       }
     },
-    []
+    [queryClient]
   );
-
-  /**
-   * Get all hidden entities (optionally filtered by type)
-   */
-  const getHiddenEntities = useCallback(async (entityType?: string) => {
-    try {
-      const endpoint = entityType
-        ? `/user/hidden-entities?entityType=${entityType}`
-        : "/user/hidden-entities";
-      const response = await apiGet<{ hiddenEntities: Array<{ entityType: string; entityId: string }> }>(endpoint);
-      return response.hiddenEntities;
-    } catch (error) {
-      console.error("Failed to get hidden entities:", error);
-      showError("Failed to load hidden items");
-      return [];
-    }
-  }, []);
 
   /**
    * Unhide all entities (optionally filtered by type)
    */
-  const unhideAll = useCallback(async (entityType?: string) => {
-    try {
-      const endpoint = entityType
-        ? `/user/hidden-entities/all?entityType=${entityType}`
-        : "/user/hidden-entities/all";
-      await apiDelete(endpoint);
-      const typeLabel = entityType ? `${entityType}s` : "items";
-      showSuccess(`All hidden ${typeLabel} have been restored`);
-      return true;
-    } catch (error: any) {
-      console.error("Failed to unhide all entities:", error);
-      showError(
-        error.data?.error || "Failed to restore all items. Please try again."
-      );
-      return false;
-    }
-  }, []);
+  const unhideAll = useCallback(
+    async (entityType?: string) => {
+      try {
+        const endpoint = entityType
+          ? `/user/hidden-entities/all?entityType=${entityType}`
+          : "/user/hidden-entities/all";
+        await apiDelete(endpoint);
+        void invalidateExclusionDependents(queryClient);
+        const typeLabel = entityType ? `${entityType}s` : "items";
+        showSuccess(`All hidden ${typeLabel} have been restored`);
+        return true;
+      } catch (error) {
+        console.error("Failed to unhide all entities:", error);
+        showError(
+          (error as ApiErrorBody).data?.error ||
+            "Failed to restore all items. Please try again."
+        );
+        return false;
+      }
+    },
+    [queryClient]
+  );
 
   /**
    * Update hide confirmation preference
@@ -158,10 +252,7 @@ export const useHiddenEntities = () => {
   const updateHideConfirmation = useCallback(
     async (disabled: boolean) => {
       try {
-        await apiPut("/user/hide-confirmation", {
-          hideConfirmationDisabled: disabled,
-        });
-        updateUser?.({ hideConfirmationDisabled: disabled });
+        await saveHideConfirmation(disabled);
         return true;
       } catch (error) {
         console.error("Failed to update hide confirmation preference:", error);
@@ -169,7 +260,7 @@ export const useHiddenEntities = () => {
         return false;
       }
     },
-    [updateUser]
+    [saveHideConfirmation]
   );
 
   return {
@@ -177,9 +268,8 @@ export const useHiddenEntities = () => {
     hideEntities,
     unhideEntity,
     unhideAll,
-    getHiddenEntities,
     updateHideConfirmation,
     isHiding,
-    hideConfirmationDisabled: user?.hideConfirmationDisabled || false,
+    hideConfirmationDisabled,
   };
 };

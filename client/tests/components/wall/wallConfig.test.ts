@@ -1,12 +1,23 @@
-import { describe, it, expect } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
-  wallConfig,
-  ZOOM_LEVELS,
-  DEFAULT_ZOOM,
   DEFAULT_VIEW_MODE,
+  DEFAULT_ZOOM,
+  ZOOM_LEVELS,
+  wallConfig,
 } from "../../../src/components/wall/wallConfig";
 
 describe("wallConfig", () => {
+  describe("clip config", () => {
+    it("the wall tile of an untitled clip reads its primary tag's name", () => {
+      const config = wallConfig.clip;
+      expect(
+        config.getTitle({ title: "", primaryTag: { name: "Action" } })
+      ).toBe("Action");
+      expect(config.getTitle({ title: "Intro" })).toBe("Intro");
+      expect(config.getTitle({})).toBe("Untitled");
+    });
+  });
+
   describe("scene config", () => {
     const config = wallConfig.scene;
 
@@ -63,7 +74,11 @@ describe("wallConfig", () => {
     });
 
     it("returns null for preview URL (galleries have no preview)", () => {
-      expect((config.getPreviewUrl as (...args: unknown[]) => unknown)({ cover: "/cover.jpg" })).toBeNull();
+      expect(
+        (config.getPreviewUrl as (...args: unknown[]) => unknown)({
+          cover: "/cover.jpg",
+        })
+      ).toBeNull();
     });
 
     it("calculates aspect ratio from cover dimensions", () => {
@@ -73,7 +88,9 @@ describe("wallConfig", () => {
 
     it("returns 1 (square) aspect ratio when no dimensions", () => {
       expect(config.getAspectRatio({})).toBe(1);
-      expect(config.getAspectRatio({ coverWidth: null, coverHeight: null })).toBe(1);
+      expect(
+        config.getAspectRatio({ coverWidth: null, coverHeight: null })
+      ).toBe(1);
       expect(config.getAspectRatio({ coverWidth: 100 })).toBe(1); // Missing height
       expect(config.getAspectRatio({ coverHeight: 100 })).toBe(1); // Missing width
     });
@@ -124,7 +141,9 @@ describe("wallConfig", () => {
     });
 
     it("returns null for preview URL (images have no preview)", () => {
-      expect((config.getPreviewUrl as (...args: unknown[]) => unknown)({})).toBeNull();
+      expect(
+        (config.getPreviewUrl as (...args: unknown[]) => unknown)({})
+      ).toBeNull();
     });
 
     it("calculates aspect ratio from dimensions", () => {
@@ -138,9 +157,9 @@ describe("wallConfig", () => {
 
     it("returns title with fallback to filename", () => {
       expect(config.getTitle({ title: "Test Image" })).toBe("Test Image");
-      expect(
-        config.getTitle({ files: [{ basename: "photo.jpg" }] })
-      ).toBe("photo.jpg");
+      expect(config.getTitle({ files: [{ basename: "photo.jpg" }] })).toBe(
+        "photo.jpg"
+      );
       expect(config.getTitle({})).toBe("Untitled");
     });
 
@@ -161,23 +180,48 @@ describe("wallConfig", () => {
   describe("clip config", () => {
     const config = wallConfig.clip;
 
-    it("returns clip preview URL when id exists", () => {
-      const clip = { id: "clip-1" };
-      expect(config.getImageUrl(clip)).toBe("/api/proxy/clip/clip-1/preview");
+    it("a clip's still image is its screenshot, else its scene's screenshot, never the preview video", () => {
+      const base = { id: "clip-1", instanceId: "inst-1", sceneId: "s1" };
+      expect(
+        config.getImageUrl({
+          ...base,
+          screenshotUrl: "/clip-shot.jpg",
+          scene: { pathScreenshot: "/scene-shot.jpg" },
+        })
+      ).toBe("/clip-shot.jpg");
+      expect(
+        config.getImageUrl({
+          ...base,
+          screenshotUrl: null,
+          scene: { pathScreenshot: "/scene-shot.jpg" },
+        })
+      ).toBe("/scene-shot.jpg");
+      expect(config.getImageUrl({ ...base, isGenerated: true })).toBeNull();
     });
 
-    it("returns null when clip has no id", () => {
-      expect(config.getImageUrl({})).toBeNull();
+    it("returns null image URL when the clip has no screenshot", () => {
+      expect(
+        config.getImageUrl({ id: "c", instanceId: "i", sceneId: "s" })
+      ).toBeNull();
     });
 
     it("returns preview URL for generated clips", () => {
-      const clip = { id: "clip-1", isGenerated: true };
-      expect(config.getPreviewUrl(clip)).toBe("/api/proxy/clip/clip-1/preview");
+      const clip = { id: "clip-1", instanceId: "inst-1", isGenerated: true };
+      expect(config.getPreviewUrl(clip)).toBe(
+        "/api/proxy/clip/clip-1/preview?instanceId=inst-1"
+      );
     });
 
     it("returns null preview URL for non-generated clips", () => {
-      const clip = { id: "clip-1", isGenerated: false };
+      const clip = { id: "clip-1", instanceId: "inst-1", isGenerated: false };
       expect(config.getPreviewUrl(clip)).toBeNull();
+    });
+
+    it("carries the clip's instance on the preview URL", () => {
+      const clip = { id: "clip-1", instanceId: "inst-1", isGenerated: true };
+      expect(config.getPreviewUrl(clip)).toBe(
+        "/api/proxy/clip/clip-1/preview?instanceId=inst-1"
+      );
     });
 
     it("calculates aspect ratio from parent scene file dimensions", () => {
@@ -188,8 +232,14 @@ describe("wallConfig", () => {
     it("returns default 16:9 aspect ratio when no scene dimensions", () => {
       expect(config.getAspectRatio({})).toBeCloseTo(16 / 9, 2);
       expect(config.getAspectRatio({ scene: {} })).toBeCloseTo(16 / 9, 2);
-      expect(config.getAspectRatio({ scene: { files: [] } })).toBeCloseTo(16 / 9, 2);
-      expect(config.getAspectRatio({ scene: { files: [{}] } })).toBeCloseTo(16 / 9, 2);
+      expect(config.getAspectRatio({ scene: { files: [] } })).toBeCloseTo(
+        16 / 9,
+        2
+      );
+      expect(config.getAspectRatio({ scene: { files: [{}] } })).toBeCloseTo(
+        16 / 9,
+        2
+      );
     });
 
     it("returns title or fallback", () => {
@@ -198,7 +248,11 @@ describe("wallConfig", () => {
     });
 
     it("builds subtitle from scene title and primary tag", () => {
-      const clip = { scene: { title: "Scene 1" }, primaryTag: { name: "Action" } };
+      const clip = {
+        title: "Clip",
+        scene: { title: "Scene 1" },
+        primaryTag: { name: "Action" },
+      };
       expect(config.getSubtitle(clip)).toBe("Scene 1 • Action");
     });
 
@@ -208,8 +262,18 @@ describe("wallConfig", () => {
     });
 
     it("builds subtitle with primary tag only", () => {
-      const clip = { primaryTag: { name: "Action" } };
+      const clip = { title: "Clip", primaryTag: { name: "Action" } };
       expect(config.getSubtitle(clip)).toBe("Action");
+    });
+
+    it("an untitled clip, named by its tag, does not repeat the tag below", () => {
+      const clip = {
+        scene: { title: "Scene 1" },
+        primaryTag: { name: "Action" },
+      };
+      expect(config.getTitle(clip)).toBe("Action");
+      expect(config.getSubtitle(clip)).toBe("Scene 1");
+      expect(config.getSubtitle({ primaryTag: { name: "Action" } })).toBe("");
     });
 
     it("returns empty subtitle when no scene or tag", () => {

@@ -1,15 +1,20 @@
-import { describe, it, expect } from "vitest";
+import { untrusted } from "@tests/helpers/untrusted";
+import { describe, expect, it } from "vitest";
 import {
   UNITS,
   cmToFeetInches,
+  cmToInches,
+  cmToLengthInches,
   feetInchesToCm,
   formatHeight,
+  formatLength,
+  formatWeight,
+  heightBoundToCm,
+  inchesToCm,
   kgToLbs,
   lbsToKg,
-  formatWeight,
-  cmToInches,
-  inchesToCm,
-  formatLength,
+  lengthInchesToCm,
+  weightBoundToKg,
 } from "../../src/utils/unitConversions";
 
 describe("unitConversions", () => {
@@ -34,8 +39,11 @@ describe("unitConversions", () => {
     });
 
     it("returns zeros for null/undefined input", () => {
-      expect(cmToFeetInches(null as any)).toEqual({ feet: 0, inches: 0 });
-      expect(cmToFeetInches(undefined as any)).toEqual({ feet: 0, inches: 0 });
+      expect(cmToFeetInches(untrusted(null))).toEqual({ feet: 0, inches: 0 });
+      expect(cmToFeetInches(untrusted(undefined))).toEqual({
+        feet: 0,
+        inches: 0,
+      });
     });
 
     it("returns zeros for zero input", () => {
@@ -72,8 +80,8 @@ describe("unitConversions", () => {
     });
 
     it("returns null for null/undefined input", () => {
-      expect(formatHeight(null as any, UNITS.METRIC)).toBeNull();
-      expect(formatHeight(undefined as any, UNITS.IMPERIAL)).toBeNull();
+      expect(formatHeight(untrusted(null), UNITS.METRIC)).toBeNull();
+      expect(formatHeight(untrusted(undefined), UNITS.IMPERIAL)).toBeNull();
     });
   });
 
@@ -103,8 +111,8 @@ describe("unitConversions", () => {
     });
 
     it("returns null for null/undefined input", () => {
-      expect(formatWeight(null as any, UNITS.METRIC)).toBeNull();
-      expect(formatWeight(undefined as any, UNITS.IMPERIAL)).toBeNull();
+      expect(formatWeight(untrusted(null), UNITS.METRIC)).toBeNull();
+      expect(formatWeight(untrusted(undefined), UNITS.IMPERIAL)).toBeNull();
     });
   });
 
@@ -135,8 +143,58 @@ describe("unitConversions", () => {
     });
 
     it("returns null for null/undefined input", () => {
-      expect(formatLength(null as any, UNITS.METRIC)).toBeNull();
-      expect(formatLength(undefined as any, UNITS.IMPERIAL)).toBeNull();
+      expect(formatLength(untrusted(null), UNITS.METRIC)).toBeNull();
+      expect(formatLength(untrusted(undefined), UNITS.IMPERIAL)).toBeNull();
     });
+  });
+});
+
+describe("body measures in the filter editors", () => {
+  it("a minimum height is the lowest whole cm that displays as typed, a maximum the highest", () => {
+    expect(heightBoundToCm(5, 10, "min")).toBe(177);
+    expect(cmToFeetInches(177)).toEqual({ feet: 5, inches: 10 });
+    expect(cmToFeetInches(176)).toEqual({ feet: 5, inches: 9 });
+    expect(heightBoundToCm(6, 2, "max")).toBe(189);
+    expect(cmToFeetInches(189)).toEqual({ feet: 6, inches: 2 });
+    expect(cmToFeetInches(190)).toEqual({ feet: 6, inches: 3 });
+  });
+
+  it("inches past 11 carry into feet, and nothing typed is no bound", () => {
+    expect(heightBoundToCm(5, 12, "min")).toBe(heightBoundToCm(6, 0, "min"));
+    expect(heightBoundToCm(0, 0, "min")).toBeUndefined();
+    expect(heightBoundToCm(Number.NaN, 3, "max")).toBeUndefined();
+  });
+
+  it("every cm range end shows as the height it was typed as", () => {
+    for (let feet = 4; feet <= 7; feet++) {
+      for (let inches = 0; inches < 12; inches++) {
+        for (const side of ["min", "max"] as const) {
+          const cm = heightBoundToCm(feet, inches, side);
+          expect(cmToFeetInches(cm ?? 0), `${feet}'${inches} ${side}`).toEqual({
+            feet,
+            inches,
+          });
+        }
+      }
+    }
+  });
+
+  it("a weight bound is the whole kg that displays at least (minimum) or at most (maximum) the lbs typed", () => {
+    expect(weightBoundToKg(150, "min")).toBe(68);
+    expect(kgToLbs(68)).toBe(150);
+    expect(weightBoundToKg(150, "max")).toBe(68);
+    // No whole kg shows 151: a minimum takes the next one up, a maximum the one below
+    expect(weightBoundToKg(151, "min")).toBe(69);
+    expect(weightBoundToKg(151, "max")).toBe(68);
+    expect(weightBoundToKg(0, "min")).toBeUndefined();
+    expect(weightBoundToKg(Number.NaN, "max")).toBeUndefined();
+  });
+
+  it("a length keeps two decimals in centimetres", () => {
+    expect(lengthInchesToCm(6)).toBe(15.24);
+    expect(lengthInchesToCm(5.5)).toBe(13.97);
+    expect(lengthInchesToCm(0)).toBeUndefined();
+    expect(cmToLengthInches(15.24)).toBe(6);
+    expect(cmToLengthInches(13.97)).toBe(5.5);
   });
 });

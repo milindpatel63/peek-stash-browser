@@ -1,21 +1,30 @@
 import { useLocation, useNavigate } from "react-router-dom";
-import { useAuth } from "../../hooks/useAuth";
+import { useUserSettings } from "../../api/hooks/useUserSettings";
 import { getLandingPage } from "../../constants/navigation";
 
+interface PeekLogoProps {
+  size?: "small" | "default" | "large";
+  variant?: "auto" | "active" | "inactive" | "text-only" | "icon-only";
+}
+
 export const PeekLogo = ({
-  size = "default", // 'small', 'default', 'large'
-  variant = "auto", // 'auto', 'active', 'inactive', 'text-only', 'icon-only'
-}) => {
+  size = "default",
+  variant = "auto",
+}: PeekLogoProps) => {
   const navigate = useNavigate();
   const location = useLocation();
-  const { user } = useAuth();
+  const { data } = useUserSettings();
 
-  // Navigate to user's preferred landing page
-  // Passes current path so random mode excludes the current page
+  // Navigate to the user's landing page, from the settings query so a change
+  // in Settings applies at once. Passes the current path so random mode
+  // excludes the current page
   const handleClick = (e: React.MouseEvent) => {
     e.preventDefault();
-    const destination = getLandingPage(user?.landingPagePreference, location.pathname);
-    navigate(destination);
+    const destination = getLandingPage(
+      data?.settings.landingPagePreference,
+      location.pathname
+    );
+    void navigate(destination);
   };
 
   // Size configurations
@@ -37,7 +46,7 @@ export const PeekLogo = ({
     },
   };
 
-  const config = (sizeConfig as Record<string, any>)[size];
+  const config = sizeConfig[size];
 
   // Get logo image paths
   const getLogoPath = () => {

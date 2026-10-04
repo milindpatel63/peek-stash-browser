@@ -1,6 +1,6 @@
-import { defineConfig } from "vitest/config";
 import path from "path";
 import { fileURLToPath } from "url";
+import { defineConfig } from "vitest/config";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -17,6 +17,10 @@ export default defineConfig({
     include: ["**/*.integration.test.ts"],
     exclude: ["node_modules", "dist"],
     globalSetup: "./helpers/globalSetup.ts",
+    // Fail a file that sent Stash a mutation or a request the replay cannot
+    // answer (replay runs only), or that left the shared admin's state or
+    // the configured instances changed
+    setupFiles: ["./helpers/replayAudit.ts", "./helpers/sharedStateAudit.ts"],
     testTimeout: 30000, // 30s for integration tests
     hookTimeout: 60000, // 60s for setup/teardown hooks
     fileParallelism: false, // Run sequentially

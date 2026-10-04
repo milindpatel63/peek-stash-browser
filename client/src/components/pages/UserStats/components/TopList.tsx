@@ -1,35 +1,31 @@
 // client/src/components/pages/UserStats/components/TopList.tsx
-
 import { Link } from "react-router-dom";
-import { Paper } from "../../../ui/index";
+import type {
+  TopPerformer,
+  TopScene,
+  TopStudio,
+  TopTag,
+} from "@peek/shared-types";
+import { useConfig } from "../../../../contexts/ConfigContext";
+import type { TopListSortBy } from "../../../../hooks/useUserStats";
+import { makeCompositeKey } from "../../../../utils/compositeKey";
+import { getEntityPath } from "../../../../utils/entityLinks";
 import {
   formatDurationHumanReadable,
   getFilenameFromPath,
 } from "../../../../utils/format";
+import { Paper } from "../../../ui/index";
 
 type EntityType = "performer" | "studio" | "tag" | "scene";
-type SortBy = "engagement" | "oCount" | "playCount";
-
-interface TopListItem {
-  id: string;
-  name?: string;
-  title?: string;
-  filePath?: string;
-  imageUrl?: string;
-  playDuration: number;
-  playCount: number;
-  oCount: number;
-  score: number;
-}
+type TopListItem = TopScene | TopPerformer | TopStudio | TopTag;
 
 interface Props {
   title: string;
   items: TopListItem[];
-  linkPrefix: string;
   entityType?: EntityType;
   showImage?: boolean;
-  sortBy?: SortBy;
-  onSortChange?: (sortBy: string) => void;
+  sortBy?: TopListSortBy;
+  onSortChange?: (sortBy: TopListSortBy) => void;
 }
 
 /**
@@ -49,16 +45,18 @@ const getFallbackIcon = (entityType: EntityType): string => {
  * Get display name for item
  */
 const getDisplayName = (item: TopListItem): string => {
-  if (item.name) return item.name;
-  if (item.title) return item.title;
-  if (item.filePath) return getFilenameFromPath(item.filePath) || "Unknown";
+  if ("name" in item && item.name) return item.name;
+  if ("title" in item && item.title) return item.title;
+  if ("filePath" in item && item.filePath) {
+    return getFilenameFromPath(item.filePath) || "Unknown";
+  }
   return "Unknown";
 };
 
 /**
  * Sort options with labels
  */
-const SORT_OPTIONS = [
+const SORT_OPTIONS: { value: TopListSortBy; label: string }[] = [
   { value: "engagement", label: "Engagement" },
   { value: "oCount", label: "O-Count" },
   { value: "playCount", label: "Play Count" },
@@ -77,12 +75,13 @@ const LIST_HEIGHT = "360px";
 const TopList = ({
   title,
   items,
-  linkPrefix,
   entityType = "performer",
   showImage = true,
   sortBy = "engagement",
   onSortChange,
 }: Props) => {
+  const { hasMultipleInstances } = useConfig();
+
   if (!items || items.length === 0) {
     return null;
   }
@@ -142,7 +141,7 @@ const TopList = ({
         {onSortChange && (
           <select
             value={sortBy}
-            onChange={(e) => onSortChange(e.target.value)}
+            onChange={(e) => onSortChange(e.target.value as TopListSortBy)}
             className="text-sm px-2 py-1 rounded border cursor-pointer"
             style={{
               backgroundColor: "var(--bg-secondary)",
@@ -170,8 +169,8 @@ const TopList = ({
 
           return (
             <Link
-              key={item.id}
-              to={`${linkPrefix}/${item.id}`}
+              key={makeCompositeKey(item.id, item.instanceId)}
+              to={getEntityPath(entityType, item, hasMultipleInstances)}
               className="flex items-center gap-4 px-4 py-4 transition-colors hover:bg-[var(--bg-secondary)]"
               style={{ color: "var(--text-primary)" }}
             >
@@ -198,7 +197,10 @@ const TopList = ({
                       className="max-w-full max-h-full object-contain"
                     />
                   ) : (
-                    <span className="text-xl" style={{ color: "var(--text-muted)" }}>
+                    <span
+                      className="text-xl"
+                      style={{ color: "var(--text-muted)" }}
+                    >
                       {fallbackIcon}
                     </span>
                   )}
@@ -211,7 +213,10 @@ const TopList = ({
                 >
                   {displayName}
                 </div>
-                <div className="text-sm mt-0.5" style={{ color: "var(--text-muted)" }}>
+                <div
+                  className="text-sm mt-0.5"
+                  style={{ color: "var(--text-muted)" }}
+                >
                   {getStats(item)}
                 </div>
               </div>

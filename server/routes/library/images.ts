@@ -1,7 +1,7 @@
 import express from "express";
-import { findImageById, findImages } from "../../controllers/library/images.js";
+import { findImages } from "../../controllers/library/images.js";
 import { authenticate, requireCacheReady } from "../../middleware/auth.js";
-import { authenticated } from "../../utils/routeHelpers.js";
+import { libraryHandler } from "../../utils/routeHelpers.js";
 
 const router = express.Router();
 
@@ -10,15 +10,7 @@ router.post(
   "/images",
   authenticate,
   requireCacheReady,
-  authenticated(findImages)
-);
-
-// Get single image by ID
-router.get(
-  "/images/:id",
-  authenticate,
-  requireCacheReady,
-  authenticated(findImageById)
+  libraryHandler(findImages)
 );
 
 export default router;

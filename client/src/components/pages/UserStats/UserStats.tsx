@@ -1,31 +1,23 @@
 // client/src/components/pages/UserStats/UserStats.tsx
-
 import { type ReactNode, useState } from "react";
 import { BarChart3, Info, RefreshCw } from "lucide-react";
+import { getErrorMessage } from "../../../api";
 import { usePageTitle } from "../../../hooks/usePageTitle";
-import { useUserStats } from "../../../hooks/useUserStats";
-import { PageHeader, PageLayout, LoadingSpinner, Tooltip } from "../../ui/index";
+import { type TopListSortBy, useUserStats } from "../../../hooks/useUserStats";
+import { showError } from "../../../utils/toast";
 import {
-  LibraryOverview,
+  LoadingSpinner,
+  PageHeader,
+  PageLayout,
+  Tooltip,
+} from "../../ui/index";
+import {
   EngagementTotals,
-  TopList,
   HighlightCard,
+  LibraryOverview,
+  MostViewedImageCard,
+  TopList,
 } from "./components/index";
-
-type TopListSortBy = "engagement" | "oCount" | "playCount";
-
-/** Matches TopList's internal TopListItem interface for type-safe prop passing */
-interface TopListItem {
-  id: string;
-  name?: string;
-  title?: string;
-  filePath?: string;
-  imageUrl?: string;
-  playDuration: number;
-  playCount: number;
-  oCount: number;
-  score: number;
-}
 
 interface SectionInfoProps {
   children: ReactNode;
@@ -74,8 +66,9 @@ const TopContentInfoContent = () => (
     </p>
     <p className="mb-2">
       Percentile rank shows where each entity falls among all your engaged
-      entities (100 = top, 0 = bottom). Rankings refresh on login and
-      periodically while browsing.
+      entities (100 = top, 0 = bottom). Performer, studio and tag rankings are
+      recalculated at most once an hour; scenes are ranked each time this page
+      loads.
     </p>
     <p className="font-semibold mb-1">Sort Options</p>
     <ul className="space-y-1">
@@ -117,7 +110,9 @@ const UserStats = () => {
   const handleRefresh = async () => {
     setRefreshing(true);
     try {
-      refresh();
+      await refresh();
+    } catch (err) {
+      showError(getErrorMessage(err, "Couldn't refresh your stats"));
     } finally {
       setRefreshing(false);
     }
@@ -126,7 +121,10 @@ const UserStats = () => {
   if (loading) {
     return (
       <PageLayout fullHeight>
-        <div className="flex items-center justify-center h-64" style={{ backgroundColor: "var(--bg-primary)" }}>
+        <div
+          className="flex items-center justify-center h-64"
+          style={{ backgroundColor: "var(--bg-primary)" }}
+        >
           <LoadingSpinner />
         </div>
       </PageLayout>
@@ -136,9 +134,7 @@ const UserStats = () => {
   if (error) {
     return (
       <PageLayout fullHeight>
-        <PageHeader
-          title="My Stats"
-        />
+        <PageHeader title="My Stats" />
         <div
           className="text-center py-12"
           style={{ color: "var(--status-error)" }}
@@ -149,21 +145,18 @@ const UserStats = () => {
     );
   }
 
+  if (!data) return null;
+
   // Check if user has any engagement data
-  const engagement = data?.engagement as Record<string, unknown> | undefined;
   const hasEngagement =
-    (engagement?.totalPlayCount as number) > 0 ||
-    (engagement?.totalImagesViewed as number) > 0;
+    data.engagement.totalPlayCount > 0 || data.engagement.totalImagesViewed > 0;
 
   return (
     <PageLayout fullHeight>
       <div className="flex items-start justify-between">
-        <PageHeader
-          title="My Stats"
-          subtitle="Your viewing statistics"
-        />
+        <PageHeader title="My Stats" subtitle="Your viewing statistics" />
         <button
-          onClick={handleRefresh}
+          onClick={() => void handleRefresh()}
           disabled={refreshing || loading}
           className="p-2 rounded-lg hover:bg-[var(--bg-secondary)] transition-colors disabled:opacity-50"
           aria-label="Refresh stats"
@@ -191,7 +184,7 @@ const UserStats = () => {
               <LibraryInfoContent />
             </SectionInfo>
           </div>
-          <LibraryOverview library={data.library as { sceneCount: number; performerCount: number; studioCount: number; tagCount: number; galleryCount: number; imageCount: number; clipCount: number }} />
+          <LibraryOverview library={data.library} />
         </section>
 
         {/* Engagement Stats */}
@@ -210,8 +203,8 @@ const UserStats = () => {
                 </SectionInfo>
               </div>
               <EngagementTotals
-                engagement={data.engagement as { totalWatchTime: number; totalPlayCount: number; totalOCount: number; uniqueScenesWatched: number; totalImagesViewed: number }}
-                librarySceneCount={(data.library as { sceneCount: number }).sceneCount}
+                engagement={data.engagement}
+                librarySceneCount={data.library.sceneCount}
               />
             </section>
 
@@ -232,38 +225,34 @@ const UserStats = () => {
                 <TopList
                   key={`scenes-${sortBy}`}
                   title="Top Scenes"
-                  items={data.topScenes as TopListItem[]}
-                  linkPrefix="/scene"
+                  items={data.topScenes}
                   entityType="scene"
                   sortBy={sortBy}
-                  onSortChange={setSortBy as (sortBy: string) => void}
+                  onSortChange={setSortBy}
                 />
                 <TopList
                   key={`performers-${sortBy}`}
                   title="Top Performers"
-                  items={data.topPerformers as TopListItem[]}
-                  linkPrefix="/performer"
+                  items={data.topPerformers}
                   entityType="performer"
                   sortBy={sortBy}
-                  onSortChange={setSortBy as (sortBy: string) => void}
+                  onSortChange={setSortBy}
                 />
                 <TopList
                   key={`studios-${sortBy}`}
                   title="Top Studios"
-                  items={data.topStudios as TopListItem[]}
-                  linkPrefix="/studio"
+                  items={data.topStudios}
                   entityType="studio"
                   sortBy={sortBy}
-                  onSortChange={setSortBy as (sortBy: string) => void}
+                  onSortChange={setSortBy}
                 />
                 <TopList
                   key={`tags-${sortBy}`}
                   title="Top Tags"
-                  items={data.topTags as TopListItem[]}
-                  linkPrefix="/tag"
+                  items={data.topTags}
                   entityType="tag"
                   sortBy={sortBy}
-                  onSortChange={setSortBy as (sortBy: string) => void}
+                  onSortChange={setSortBy}
                 />
               </div>
             </section>
@@ -284,35 +273,25 @@ const UserStats = () => {
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                 <HighlightCard
                   title="Most Watched Scene"
-                  item={data.mostWatchedScene as { id: string; name?: string; title?: string; filePath?: string; imageUrl?: string } | null}
-                  linkPrefix="/scene"
+                  item={data.mostWatchedScene}
                   entityType="scene"
                   statLabel="plays"
-                  statValue={(data.mostWatchedScene as Record<string, unknown> | undefined)?.playCount as number || 0}
+                  statValue={data.mostWatchedScene?.playCount ?? 0}
                 />
-                <HighlightCard
-                  title="Most Viewed Image"
-                  item={data.mostViewedImage as { id: string; name?: string; title?: string; filePath?: string; imageUrl?: string } | null}
-                  linkPrefix="/image"
-                  entityType="image"
-                  statLabel="views"
-                  statValue={(data.mostViewedImage as Record<string, unknown> | undefined)?.viewCount as number || 0}
-                />
+                <MostViewedImageCard image={data.mostViewedImage} />
                 <HighlightCard
                   title="Most O'd Scene"
-                  item={data.mostOdScene as { id: string; name?: string; title?: string; filePath?: string; imageUrl?: string } | null}
-                  linkPrefix="/scene"
+                  item={data.mostOdScene}
                   entityType="scene"
                   statLabel="Os"
-                  statValue={(data.mostOdScene as Record<string, unknown> | undefined)?.oCount as number || 0}
+                  statValue={data.mostOdScene?.oCount ?? 0}
                 />
                 <HighlightCard
                   title="Most O'd Performer"
-                  item={data.mostOdPerformer as { id: string; name?: string; title?: string; filePath?: string; imageUrl?: string } | null}
-                  linkPrefix="/performer"
+                  item={data.mostOdPerformer}
                   entityType="performer"
                   statLabel="Os"
-                  statValue={(data.mostOdPerformer as Record<string, unknown> | undefined)?.oCount as number || 0}
+                  statValue={data.mostOdPerformer?.oCount ?? 0}
                 />
               </div>
             </section>

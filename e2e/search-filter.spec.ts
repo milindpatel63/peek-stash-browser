@@ -1,4 +1,24 @@
-import { test, expect } from "@playwright/test";
+import { expect, test } from "@playwright/test";
+import { ListPage } from "./pages/ListPage";
+import { mustOk } from "./support/api";
+import { requireData } from "./support/data";
+import { runPrefix } from "./support/names";
+
+/** A performer as the list endpoint returns it (the fields read here) */
+interface ListedPerformer {
+  name: string;
+  alias_list?: string[];
+  scene_count: number;
+}
+
+/** The search text a picker request carried, if any */
+function pickerQuery(body: unknown): string | undefined {
+  if (typeof body !== "object" || body === null) return undefined;
+  const filter = (body as { filter?: unknown }).filter;
+  if (typeof filter !== "object" || filter === null) return undefined;
+  const q = (filter as { q?: unknown }).q;
+  return typeof q === "string" ? q : undefined;
+}
 
 /**
  * E2E tests for search and filter functionality.
@@ -36,26 +56,123 @@ test.describe("Search and Filter", () => {
     await expect(page.getByPlaceholder("Search...")).toHaveValue("my search");
   });
 
-  test("filter panel opens and contains filter controls", async ({ page }) => {
-    await page.goto("/scenes");
-    await expect(page.getByPlaceholder("Search...")).toBeVisible({
-      timeout: 10_000,
-    });
+  test("a title filter narrows the results and shows a chip", async ({
+    page,
+  }) => {
+    const list = new ListPage(page);
+    await list.goto("/scenes");
+    requireData(await list.waitForResults("Scene"), "scenes");
 
-    // Open the filter panel
-    const filtersButton = page.locator(
-      '[data-tv-search-item="filters-button"]'
+    // A title no scene has, applied once typing pauses
+    const editor = await list.addFilter("Title Search");
+    await editor
+      .getByPlaceholder("Search title...")
+      .fill(`zzzz-${runPrefix()}`);
+    await list.closeEditor();
+
+    await expect(page.getByText("No scenes found")).toBeVisible({
+      timeout: 15_000,
+    });
+    await expect(list.cards("Scene")).toHaveCount(0);
+    const chip = page.getByRole("button", { name: /^Remove filter:/ });
+    await expect(chip).toHaveCount(1);
+
+    // Removing the chip removes the filter
+    await chip.click();
+    await expect(list.cards("Scene").first()).toBeVisible({ timeout: 15_000 });
+    await expect(chip).toHaveCount(0);
+  });
+
+  test("a filter dropdown lists names matching what was typed", async ({
+    page,
+  }) => {
+    // The scenes page's performer filter lists performers with scenes
+    const found = await mustOk(
+      await page.request.post("/api/library/performers", {
+        data: { filter: { per_page: 250, sort: "name", direction: "DESC" } },
+      }),
+      "the performers list"
     );
-    await filtersButton.click();
+    const performers = (
+      (await found.json()) as {
+        findPerformers: { performers: ListedPerformer[] };
+      }
+    ).findPerformers.performers.filter((p) => p.scene_count > 0);
+    // The last name, past the dropdown's first page in a larger library
+    const target = requireData(performers[0], "a performer with scenes");
+    const typed = target.name;
+    const matches = (p: ListedPerformer) =>
+      [p.name, ...(p.alias_list ?? [])].some((n) =>
+        n.toLowerCase().includes(typed.toLowerCase())
+      );
 
-    // Filter panel content should be visible — check for common filter sections
-    // Look for filter labels/headings that appear in the panel
-    await expect(page.getByText("Clear All")).toBeVisible({
-      timeout: 5_000,
-    }).catch(() => {
-      // "Clear All" only shows if there are active filters
-      // The panel itself being open is sufficient
-    });
+    const list = new ListPage(page);
+    await list.goto("/scenes");
+    // The picker's list opens with the editor
+    await list.addFilter("Performers");
+    const input = page.getByPlaceholder("Type to search...");
+    await expect(input).toBeVisible();
+    const dropdown = input.locator(
+      "xpath=ancestor::div[contains(@class, 'absolute')][1]"
+    );
+    const options = dropdown.getByRole("button");
+    await expect(options.first()).toBeVisible({ timeout: 15_000 });
+
+    // An option listed on opening whose name and aliases lack the text
+    const listed = (await options.allTextContents()).map((t) => t.trim());
+    const other = requireData(
+      listed.find((name) => {
+        const performer = performers.find((p) => p.name === name);
+        return performer !== undefined && !matches(performer);
+      }),
+      "a second performer with scenes"
+    );
+    await expect(
+      dropdown.getByRole("button", { name: other, exact: true })
+    ).toBeVisible();
+
+    const searched = page.waitForResponse(
+      (r) =>
+        r.url().includes("/api/library/performers/minimal") &&
+        pickerQuery(r.request().postDataJSON()) === typed
+    );
+    await input.fill(typed);
+    expect((await searched).ok()).toBe(true);
+    await expect(dropdown.getByText("Loading...")).toHaveCount(0);
+
+    await expect(
+      dropdown.getByRole("button", { name: typed }).first()
+    ).toBeVisible();
+    await expect(
+      dropdown.getByRole("button", { name: other, exact: true })
+    ).toHaveCount(0);
+  });
+
+  test("a performer chip names the performer", async ({ page }) => {
+    const list = new ListPage(page);
+    await list.goto("/scenes");
+    requireData(await list.waitForResults("Scene"), "scenes");
+
+    await list.addFilter("Performers");
+    const input = page.getByPlaceholder("Type to search...");
+    const dropdown = input.locator(
+      "xpath=ancestor::div[contains(@class, 'absolute')][1]"
+    );
+    const option = dropdown.getByRole("button").first();
+    await expect(option).toBeVisible({ timeout: 15_000 });
+    const name = ((await option.textContent()) ?? "").trim();
+    expect(name).not.toBe("");
+    // A pick applies at once
+    await option.click();
+    await list.closeEditor();
+
+    // The chip names the pick and its condition, never its id
+    await expect(
+      page.getByRole("button", {
+        name: `Edit filter: Performers: any of ${name}`,
+        exact: true,
+      })
+    ).toBeVisible({ timeout: 15_000 });
   });
 
   test("sort direction toggles between ascending and descending", async ({
@@ -93,9 +210,7 @@ test.describe("Search and Filter", () => {
     ).toBeVisible();
 
     // View mode toggle should be present
-    await expect(
-      page.locator('button[aria-label*="View mode"]')
-    ).toBeVisible();
+    await expect(page.locator('button[aria-label*="View mode"]')).toBeVisible();
   });
 
   test("gallery page has search controls", async ({ page }) => {

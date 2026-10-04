@@ -1,6 +1,12 @@
-import { describe, it, expect, beforeAll } from "vitest";
-import { adminClient, guestClient, selectTestInstanceOnly } from "../helpers/testClient.js";
-import { TEST_ENTITIES, TEST_ADMIN } from "../fixtures/testEntities.js";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { must } from "../../tests/helpers/must.js";
+import { TEST_ADMIN, TEST_ENTITIES } from "../fixtures/testEntities.js";
+import {
+  adminClient,
+  guestClient,
+  restoreInstanceSelection,
+  selectTestInstanceOnly,
+} from "../helpers/testClient.js";
 
 // Response type for /api/library/studios
 interface FindStudiosResponse {
@@ -9,9 +15,22 @@ interface FindStudiosResponse {
       id: string;
       name: string;
       tags?: Array<{ id: string; name: string; image_path: string | null }>;
-      performers?: Array<{ id: string; name: string; image_path: string | null }>;
-      groups?: Array<{ id: string; name: string; front_image_path: string | null }>;
+      performers?: Array<{
+        id: string;
+        name: string;
+        image_path: string | null;
+      }>;
+      groups?: Array<{
+        id: string;
+        name: string;
+        front_image_path: string | null;
+      }>;
       galleries?: Array<{ id: string; title: string; cover: string | null }>;
+      relation_totals?: {
+        performers?: number;
+        groups?: number;
+        galleries?: number;
+      };
     }>;
     count: number;
   };
@@ -24,6 +43,8 @@ describe("Studio API", () => {
     await selectTestInstanceOnly();
   });
 
+  afterAll(restoreInstanceSelection);
+
   describe("POST /api/library/studios", () => {
     it("rejects unauthenticated requests", async () => {
       const response = await guestClient.post("/api/library/studios", {});
@@ -31,10 +52,12 @@ describe("Studio API", () => {
     });
 
     it("returns studios with pagination", async () => {
-      const response = await adminClient.post<FindStudiosResponse>("/api/library/studios", {
-        page: 1,
-        per_page: 10,
-      });
+      const response = await adminClient.post<FindStudiosResponse>(
+        "/api/library/studios",
+        {
+          filter: { page: 1, per_page: 10 },
+        }
+      );
 
       expect(response.ok).toBe(true);
       expect(response.data.findStudios).toBeDefined();
@@ -44,13 +67,18 @@ describe("Studio API", () => {
     });
 
     it("returns studio by ID", async () => {
-      const response = await adminClient.post<FindStudiosResponse>("/api/library/studios", {
-        ids: [TEST_ENTITIES.studioWithScenes],
-      });
+      const response = await adminClient.post<FindStudiosResponse>(
+        "/api/library/studios",
+        {
+          ids: [TEST_ENTITIES.studioWithScenes],
+        }
+      );
 
       expect(response.ok).toBe(true);
       // With multi-instance, same ID can exist in multiple instances
-      expect(response.data.findStudios.studios.length).toBeGreaterThanOrEqual(1);
+      expect(response.data.findStudios.studios.length).toBeGreaterThanOrEqual(
+        1
+      );
       // Verify at least one result has the expected ID
       const matchingStudio = response.data.findStudios.studios.find(
         (s) => s.id === TEST_ENTITIES.studioWithScenes
@@ -58,45 +86,62 @@ describe("Studio API", () => {
       expect(matchingStudio).toBeDefined();
     });
 
-    it("returns studio with tooltip entity data (tags, performers, groups, galleries)", async () => {
-      const response = await adminClient.post<FindStudiosResponse>("/api/library/studios", {
-        ids: [TEST_ENTITIES.studioWithScenes],
+    // Each relation is checked on its first entry. A test skips when
+    // studioWithScenes has none of that relation, rather than passing
+    // without checking anything.
+    describe("tooltip entity data", () => {
+      let studio: FindStudiosResponse["findStudios"]["studios"][number];
+
+      beforeAll(async () => {
+        const response = await adminClient.post<FindStudiosResponse>(
+          "/api/library/studios",
+          { ids: [TEST_ENTITIES.studioWithScenes] }
+        );
+        expect(response.ok).toBe(true);
+        studio = must(response.data.findStudios.studios[0], "studioWithScenes");
       });
 
-      expect(response.ok).toBe(true);
-      const studio = response.data.findStudios.studios[0];
+      it("returns tags with image_path", ({ skip }) => {
+        expect(studio).toHaveProperty("tags");
+        skip(!studio.tags?.length, "studioWithScenes has no tags");
+        const firstTag = must(studio.tags?.[0], "studio.tags[0]");
+        expect(firstTag).toHaveProperty("id");
+        expect(firstTag).toHaveProperty("name");
+        expect(firstTag).toHaveProperty("image_path");
+      });
 
-      // Tags should have image_path (already exists, verify structure)
-      expect(studio).toHaveProperty('tags');
-      if (studio.tags && studio.tags.length > 0) {
-        expect(studio.tags[0]).toHaveProperty('id');
-        expect(studio.tags[0]).toHaveProperty('name');
-        expect(studio.tags[0]).toHaveProperty('image_path');
-      }
+      // The studio card's performers indicator shows a number, no tooltip
+      it("counts performers in relation_totals without listing them", () => {
+        expect(studio.performers).toBeUndefined();
+        expect(studio.relation_totals?.performers).toBeGreaterThan(0);
+      });
 
-      // Performers should exist with tooltip data
-      expect(studio).toHaveProperty('performers');
-      if (studio.performers && studio.performers.length > 0) {
-        expect(studio.performers[0]).toHaveProperty('id');
-        expect(studio.performers[0]).toHaveProperty('name');
-        expect(studio.performers[0]).toHaveProperty('image_path');
-      }
+      it("counts at least the groups and galleries it lists", () => {
+        expect(studio.relation_totals?.groups).toBeGreaterThanOrEqual(
+          studio.groups?.length ?? 0
+        );
+        expect(studio.relation_totals?.galleries).toBeGreaterThanOrEqual(
+          studio.galleries?.length ?? 0
+        );
+      });
 
-      // Groups should exist with tooltip data
-      expect(studio).toHaveProperty('groups');
-      if (studio.groups && studio.groups.length > 0) {
-        expect(studio.groups[0]).toHaveProperty('id');
-        expect(studio.groups[0]).toHaveProperty('name');
-        expect(studio.groups[0]).toHaveProperty('front_image_path');
-      }
+      it("returns groups with tooltip data", ({ skip }) => {
+        expect(studio).toHaveProperty("groups");
+        skip(!studio.groups?.length, "studioWithScenes has no groups");
+        const firstGroup = must(studio.groups?.[0], "studio.groups[0]");
+        expect(firstGroup).toHaveProperty("id");
+        expect(firstGroup).toHaveProperty("name");
+        expect(firstGroup).toHaveProperty("front_image_path");
+      });
 
-      // Galleries should exist with tooltip data
-      expect(studio).toHaveProperty('galleries');
-      if (studio.galleries && studio.galleries.length > 0) {
-        expect(studio.galleries[0]).toHaveProperty('id');
-        expect(studio.galleries[0]).toHaveProperty('title');
-        expect(studio.galleries[0]).toHaveProperty('cover');
-      }
+      it("returns galleries with tooltip data", ({ skip }) => {
+        expect(studio).toHaveProperty("galleries");
+        skip(!studio.galleries?.length, "studioWithScenes has no galleries");
+        const firstGallery = must(studio.galleries?.[0], "studio.galleries[0]");
+        expect(firstGallery).toHaveProperty("id");
+        expect(firstGallery).toHaveProperty("title");
+        expect(firstGallery).toHaveProperty("cover");
+      });
     });
   });
 

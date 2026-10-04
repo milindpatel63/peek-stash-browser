@@ -1,43 +1,23 @@
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect } from "react";
+import type { SerializedDownload } from "@peek/shared-types";
+import toast from "react-hot-toast";
+import {
+  useDeleteDownload,
+  useDownloads,
+  useRetryDownload,
+} from "../../api/hooks/useDownloads";
 import { usePageTitle } from "../../hooks/usePageTitle";
+import { formatDateTime } from "../../utils/date";
+import { formatFileSize } from "../../utils/format";
 import { showError, showSuccess } from "../../utils/toast";
-import { apiGet, apiPost, apiDelete } from "../../api";
-import { Button, PageHeader, PageLayout } from "../ui/index";
-
-/**
- * Format bytes to human readable string
- * @param {number} bytes - Size in bytes
- * @returns {string} Formatted size string
- */
-const formatSize = (bytes: number | null | undefined): string => {
-  if (bytes === null || bytes === undefined) return "-";
-  if (bytes === 0) return "0 B";
-
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  const k = 1024;
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  const size = bytes / Math.pow(k, i);
-
-  return `${size.toFixed(i > 0 ? 1 : 0)} ${units[i]}`;
-};
-
-/**
- * Format ISO date string to locale string
- * @param {string} dateStr - ISO date string
- * @returns {string} Formatted date string
- */
-const formatDate = (dateStr: string | null | undefined): string => {
-  if (!dateStr) return "-";
-  const date = new Date(dateStr);
-  return date.toLocaleString();
-};
+import { Button, PageHeader, PageLayout, StatusMessage } from "../ui/index";
 
 /**
  * Get display name from fileName (strip extension for cleaner display)
  * @param {string} fileName - File name with extension
  * @returns {string} Display name without extension
  */
-const getDisplayName = (fileName: string | null | undefined): string => {
+const getDisplayName = (fileName: string): string => {
   if (!fileName) return "Untitled";
   // Remove extension for display
   return fileName.replace(/\.[^/.]+$/, "") || "Untitled";
@@ -51,28 +31,38 @@ const getDisplayName = (fileName: string | null | undefined): string => {
 const getStatusBadge = (status: string) => {
   const statusStyles = {
     PENDING: {
-      backgroundColor: "rgba(59, 130, 246, 0.2)",
-      color: "rgb(59, 130, 246)",
-      text: "Pending",
+      backgroundColor:
+        "color-mix(in srgb, var(--status-info) 20%, transparent)",
+      color: "var(--status-info)",
+      text: "Queued",
     },
     PROCESSING: {
-      backgroundColor: "rgba(234, 179, 8, 0.2)",
-      color: "rgb(234, 179, 8)",
+      backgroundColor:
+        "color-mix(in srgb, var(--status-warning) 20%, transparent)",
+      color: "var(--status-warning)",
       text: "Processing",
     },
     COMPLETED: {
-      backgroundColor: "rgba(34, 197, 94, 0.2)",
-      color: "rgb(34, 197, 94)",
+      backgroundColor:
+        "color-mix(in srgb, var(--status-success) 20%, transparent)",
+      color: "var(--status-success)",
       text: "Completed",
     },
     FAILED: {
-      backgroundColor: "rgba(239, 68, 68, 0.2)",
-      color: "rgb(239, 68, 68)",
+      backgroundColor:
+        "color-mix(in srgb, var(--status-error) 20%, transparent)",
+      color: "var(--status-error)",
       text: "Failed",
+    },
+    EXPIRED: {
+      backgroundColor: "var(--bg-tertiary)",
+      color: "var(--text-muted)",
+      text: "Expired",
     },
   };
 
-  const style = statusStyles[status as keyof typeof statusStyles] || statusStyles.PENDING;
+  const style =
+    statusStyles[status as keyof typeof statusStyles] || statusStyles.PENDING;
 
   return (
     <span
@@ -88,42 +78,69 @@ const getStatusBadge = (status: string) => {
 };
 
 /**
+ * The hint shown on an expired download, by download type
+ */
+const EXPIRED_HINTS: Record<string, string> = {
+  SCENE: "This download has expired. Download it again from the scene page.",
+  IMAGE: "This download has expired. Download it again from the image.",
+  PLAYLIST: "This download has expired. Download the playlist again.",
+};
+
+/**
  * Get thumbnail or icon for download
  * @param {Object} download - Download object
  * @returns {JSX.Element} Thumbnail or type icon
  */
-const getDownloadThumbnail = (download: Record<string, unknown>) => {
+const getDownloadThumbnail = (download: SerializedDownload) => {
+  // The thumbnail comes from the instance the download's entity lives on.
+  // A download stored without one (it answers 410) gets its type's icon: the
+  // media routes serve only the instance a request names
+  const instanceId = download.instanceId;
+  const instanceParam = `instanceId=${encodeURIComponent(instanceId)}`;
+  // A playlist download has no entity (entityId is null)
+  const entityId = instanceId ? (download.entityId ?? "") : "";
+
   // For scenes and images, show actual thumbnail
-  if (download.type === "SCENE" && download.entityId) {
+  if (download.type === "SCENE" && entityId) {
     return (
       <div className="flex-shrink-0 w-16 h-10 rounded overflow-hidden bg-black">
         <img
-          src={`/api/proxy/stash?path=${encodeURIComponent(`/scene/${download.entityId}/screenshot`)}`}
+          src={`/api/proxy/stash?path=${encodeURIComponent(`/scene/${entityId}/screenshot`)}&${instanceParam}`}
           alt=""
           className="w-full h-full object-cover"
           onError={(e) => {
             const target = e.target as HTMLImageElement;
             target.style.display = "none";
-            target.parentElement?.classList.add("flex", "items-center", "justify-center");
-            if (target.parentElement) target.parentElement.innerHTML = `<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" style="color: var(--text-muted)"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>`;
+            target.parentElement?.classList.add(
+              "flex",
+              "items-center",
+              "justify-center"
+            );
+            if (target.parentElement)
+              target.parentElement.innerHTML = `<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" style="color: var(--text-muted)"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>`;
           }}
         />
       </div>
     );
   }
 
-  if (download.type === "IMAGE" && download.entityId) {
+  if (download.type === "IMAGE" && entityId) {
     return (
       <div className="flex-shrink-0 w-10 h-10 rounded overflow-hidden bg-black">
         <img
-          src={`/api/proxy/image/${download.entityId}/thumbnail`}
+          src={`/api/proxy/image/${entityId}/thumbnail?${instanceParam}`}
           alt=""
           className="w-full h-full object-cover"
           onError={(e) => {
             const target = e.target as HTMLImageElement;
             target.style.display = "none";
-            target.parentElement?.classList.add("flex", "items-center", "justify-center");
-            if (target.parentElement) target.parentElement.innerHTML = `<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" style="color: var(--text-muted)"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>`;
+            target.parentElement?.classList.add(
+              "flex",
+              "items-center",
+              "justify-center"
+            );
+            if (target.parentElement)
+              target.parentElement.innerHTML = `<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" style="color: var(--text-muted)"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>`;
           }}
         />
       </div>
@@ -167,76 +184,59 @@ const getDownloadThumbnail = (download: Record<string, unknown>) => {
   return (
     <div
       className="flex-shrink-0 w-10 h-10 rounded-lg flex items-center justify-center"
-      style={{ backgroundColor: "var(--bg-tertiary)", color: "var(--text-secondary)" }}
+      style={{
+        backgroundColor: "var(--bg-tertiary)",
+        color: "var(--text-secondary)",
+      }}
     >
       {icons[download.type as keyof typeof icons] || icons.SCENE}
     </div>
   );
 };
 
+/** One id for the load error: a poll that keeps failing shows one toast */
+const LOAD_ERROR_TOAST_ID = "downloads-load";
+
 const Downloads = () => {
   usePageTitle("Downloads");
-  const [downloads, setDownloads] = useState<Record<string, unknown>[]>([]);
-  const [loading, setLoading] = useState(true);
-  const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const { data, isPending, errorUpdatedAt, dataUpdatedAt } = useDownloads();
+  const deleteDownload = useDeleteDownload();
+  const retryDownload = useRetryDownload();
+  const downloads = data?.downloads ?? [];
 
-  const loadDownloads = useCallback(async () => {
-    try {
-      const response = await apiGet<{ downloads: Record<string, unknown>[] }>("/downloads");
-      setDownloads(response.downloads || []);
-    } catch {
-      showError("Failed to load downloads");
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  // Check if there are active downloads
-  const hasActiveDownloads = downloads.some(
-    (d) => d.status === "PENDING" || d.status === "PROCESSING"
-  );
-
-  // Set up polling when there are active downloads
+  // A failed read shows the empty state and says why. Each failed poll asks
+  // for the same toast id, so a server outage shows one error, not a new one
+  // every 3 s
   useEffect(() => {
-    loadDownloads();
-  }, [loadDownloads]);
-
-  useEffect(() => {
-    if (hasActiveDownloads) {
-      pollIntervalRef.current = setInterval(loadDownloads, 3000);
-    } else if (pollIntervalRef.current) {
-      clearInterval(pollIntervalRef.current);
-      pollIntervalRef.current = null;
+    if (errorUpdatedAt > 0) {
+      showError("Failed to load downloads", { id: LOAD_ERROR_TOAST_ID });
     }
+  }, [errorUpdatedAt]);
 
-    return () => {
-      if (pollIntervalRef.current) {
-        clearInterval(pollIntervalRef.current);
-      }
-    };
-  }, [hasActiveDownloads, loadDownloads]);
+  // A fetch that succeeds clears it
+  useEffect(() => {
+    if (dataUpdatedAt > 0) toast.dismiss(LOAD_ERROR_TOAST_ID);
+  }, [dataUpdatedAt]);
 
-  const handleDelete = async (id: string) => {
+  const handleDelete = async (id: number) => {
     try {
-      await apiDelete(`/downloads/${id}`);
+      await deleteDownload.mutateAsync(id);
       showSuccess("Download removed");
-      loadDownloads();
     } catch {
       showError("Failed to delete download");
     }
   };
 
-  const handleRetry = async (id: string) => {
+  const handleRetry = async (id: number) => {
     try {
-      await apiPost(`/downloads/${id}/retry`);
+      await retryDownload.mutateAsync(id);
       showSuccess("Download queued for retry");
-      loadDownloads();
     } catch {
       showError("Failed to retry download");
     }
   };
 
-  if (loading) {
+  if (isPending) {
     return (
       <PageLayout>
         <div className="flex items-center justify-center">
@@ -291,45 +291,51 @@ const Downloads = () => {
       ) : (
         <div className="space-y-3">
           {downloads.map((download) => {
-            const isActive = (download.status === "PENDING" || download.status === "PROCESSING") && download.progress !== undefined;
+            const isActive =
+              download.status === "PENDING" || download.status === "PROCESSING";
             const hasFailed = download.status === "FAILED" && download.error;
+            const expiredHint =
+              download.status === "EXPIRED"
+                ? EXPIRED_HINTS[download.type]
+                : undefined;
+            const fileSize = Number(download.fileSize);
             return (
-            <div
-              key={download.id as string}
-              className="p-4 rounded-lg"
-              style={{
-                backgroundColor: "var(--bg-secondary)",
-                border: "1px solid var(--border-color)",
-              }}
-            >
-              <div className="flex items-start gap-4">
-                {/* Thumbnail or Type Icon */}
-                {getDownloadThumbnail(download)}
+              <div
+                key={download.id}
+                className="p-4 rounded-lg"
+                style={{
+                  backgroundColor: "var(--bg-secondary)",
+                  border: "1px solid var(--border-color)",
+                }}
+              >
+                <div className="flex items-start gap-4">
+                  {/* Thumbnail or Type Icon */}
+                  {getDownloadThumbnail(download)}
 
-                {/* Content */}
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2 flex-wrap mb-1">
-                    <span
-                      className="font-medium truncate"
-                      style={{ color: "var(--text-primary)" }}
+                  {/* Content */}
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap mb-1">
+                      <span
+                        className="font-medium truncate"
+                        style={{ color: "var(--text-primary)" }}
+                      >
+                        {getDisplayName(download.fileName)}
+                      </span>
+                      {getStatusBadge(download.status)}
+                    </div>
+
+                    <div
+                      className="text-sm flex items-center gap-3 flex-wrap"
+                      style={{ color: "var(--text-muted)" }}
                     >
-                      {getDisplayName(download.fileName as string | null | undefined)}
-                    </span>
-                    {getStatusBadge(download.status as string)}
-                  </div>
+                      {fileSize > 0 ? (
+                        <span>{formatFileSize(fileSize)}</span>
+                      ) : null}
+                      <span>{formatDateTime(download.createdAt)}</span>
+                    </div>
 
-                  <div
-                    className="text-sm flex items-center gap-3 flex-wrap"
-                    style={{ color: "var(--text-muted)" }}
-                  >
-                    {download.fileSize ? (
-                      <span>{formatSize(download.fileSize as number)}</span>
-                    ) : null}
-                    <span>{formatDate(download.createdAt as string | null | undefined)}</span>
-                  </div>
-
-                  {/* Progress bar for active downloads */}
-                  {isActive ? (
+                    {/* Progress bar for active downloads */}
+                    {isActive ? (
                       <div className="mt-2">
                         <div
                           className="h-2 rounded-full overflow-hidden"
@@ -338,7 +344,7 @@ const Downloads = () => {
                           <div
                             className="h-full rounded-full transition-all duration-300"
                             style={{
-                              width: `${(download.progress as number) || 0}%`,
+                              width: `${download.progress}%`,
                               backgroundColor: "var(--accent-primary)",
                             }}
                           />
@@ -347,65 +353,87 @@ const Downloads = () => {
                           className="text-xs mt-1"
                           style={{ color: "var(--text-muted)" }}
                         >
-                          {(download.progress as number) || 0}%
+                          {download.progress}%
                         </div>
                       </div>
                     ) : null}
 
-                  {/* Error message for failed downloads */}
-                  {hasFailed ? (
-                    <div
-                      className="mt-2 text-sm p-2 rounded"
-                      style={{
-                        backgroundColor: "rgba(239, 68, 68, 0.1)",
-                        color: "rgb(239, 68, 68)",
-                      }}
-                    >
-                      {download.error as string}
-                    </div>
-                  ) : null}
-                </div>
+                    {/* Error message for failed downloads */}
+                    {hasFailed ? (
+                      <StatusMessage
+                        variant="error"
+                        title={null}
+                        className="mt-2 text-sm"
+                        message={download.error}
+                      />
+                    ) : null}
 
-                {/* Actions */}
-                <div className="flex items-center gap-2 flex-shrink-0">
-                  {/* Download button for completed */}
-                  {download.status === "COMPLETED" && (
-                    <a
-                      href={`/api/downloads/${download.id as string}/file`}
-                      download={download.fileName as string}
-                      className="inline-flex items-center justify-center px-3 py-1.5 text-sm rounded-lg font-medium transition-all"
-                      style={{
-                        backgroundColor: "var(--accent-primary)",
-                        color: "white",
-                      }}
-                    >
-                      Download
-                    </a>
-                  )}
+                    {/* Hint for expired downloads */}
+                    {expiredHint ? (
+                      <div
+                        className="mt-2 text-sm"
+                        style={{ color: "var(--text-muted)" }}
+                      >
+                        {expiredHint}
+                      </div>
+                    ) : null}
 
-                  {/* Retry button for failed */}
-                  {download.status === "FAILED" && (
+                    {/* Scenes a finished zip had to leave out */}
+                    {download.type === "PLAYLIST" &&
+                    download.status === "COMPLETED" &&
+                    download.skippedItems > 0 ? (
+                      <div
+                        className="mt-2 text-sm"
+                        style={{ color: "var(--text-muted)" }}
+                      >
+                        {download.skippedItems === 1
+                          ? "1 scene could not be included"
+                          : `${download.skippedItems} scenes could not be included`}
+                      </div>
+                    ) : null}
+                  </div>
+
+                  {/* Actions */}
+                  <div className="flex items-center gap-2 flex-shrink-0">
+                    {/* Download button for completed */}
+                    {download.status === "COMPLETED" && (
+                      <a
+                        href={`/api/downloads/${download.id}/file`}
+                        download={download.fileName}
+                        className="inline-flex items-center justify-center px-3 py-1.5 text-sm rounded-lg font-medium transition-all"
+                        style={{
+                          backgroundColor: "var(--accent-primary)",
+                          color: "white",
+                        }}
+                      >
+                        Download
+                      </a>
+                    )}
+
+                    {/* Retry button for failed */}
+                    {download.status === "FAILED" && (
+                      <Button
+                        onClick={() => void handleRetry(download.id)}
+                        variant="secondary"
+                        size="sm"
+                      >
+                        Retry
+                      </Button>
+                    )}
+
+                    {/* Delete button for all */}
                     <Button
-                      onClick={() => handleRetry(download.id as string)}
-                      variant="secondary"
+                      onClick={() => void handleDelete(download.id)}
+                      variant="destructive"
                       size="sm"
                     >
-                      Retry
+                      Delete
                     </Button>
-                  )}
-
-                  {/* Delete button for all */}
-                  <Button
-                    onClick={() => handleDelete(download.id as string)}
-                    variant="destructive"
-                    size="sm"
-                  >
-                    Delete
-                  </Button>
+                  </div>
                 </div>
               </div>
-            </div>
-          ); })}
+            );
+          })}
         </div>
       )}
     </PageLayout>

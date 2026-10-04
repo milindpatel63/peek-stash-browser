@@ -1,74 +1,195 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useLocation,
+  useNavigate,
+  useNavigationType,
+  useSearchParams,
+} from "react-router-dom";
+import { getErrorMessage } from "../api/client";
+import { makeCompositeKey } from "../utils/compositeKey";
+import { showError, showInfo } from "../utils/toast";
+import { IMAGE_PARAM } from "../utils/urlParams";
 
 // Number of images to prefetch ahead and behind current position
 export const PREFETCH_COUNT = 3;
 
-/**
- * Hook for managing paginated image grids with lightbox support.
- * Handles cross-page navigation in the lightbox and syncs the grid page
- * when the lightbox closes.
- *
- * @param {Object} options
- * @param {number} options.perPage - Images per page
- * @param {number} options.totalCount - Total images across all pages
- * @param {Function} options.onPageChange - Callback when page changes (receives new page number)
- * @param {number} options.externalPage - External page number (from URL), makes hook use external state
- * @param {Function} options.onExternalPageChange - Callback to change external page (required if externalPage provided)
- * @param {Function} options.fetchPage - (page: number) => Promise<{ images: Image[] }> - fetches a page of images for prefetching
- * @returns {Object} Lightbox and pagination state/handlers
- */
-interface PaginatedLightboxOptions {
-  perPage?: number;
-  totalCount?: number;
-  onPageChange?: (page: number) => void;
-  externalPage?: number;
-  onExternalPageChange?: (page: number) => void;
-  fetchPage?: (page: number) => Promise<{ images: any[] }>;
+/** An image the lightbox can name in the URL */
+interface KeyedImage {
+  id?: unknown;
+  instanceId?: unknown;
 }
 
-export function usePaginatedLightbox({
+/** An image's "id:instanceId": two servers can hold the same id */
+const imageKey = (image: KeyedImage) =>
+  makeCompositeKey(
+    String(image.id),
+    typeof image.instanceId === "string" ? image.instanceId : undefined
+  );
+
+const NO_IMAGES: readonly KeyedImage[] = [];
+
+/** How a page change asks for its history entry */
+export interface PageChangeOptions {
+  /** Replace the entry (a page turned from the lightbox) instead of pushing */
+  replace?: boolean;
+}
+
+interface PaginatedLightboxOptions<TImage> {
+  perPage?: number;
+  totalCount?: number;
+  /** Called after every page change, for side effects */
+  onPageChange?: (page: number) => void;
+  /** The page from the URL; with it the hook keeps no page of its own */
+  externalPage?: number;
+  /** Changes the external page; a lightbox crossing asks for a replace */
+  onExternalPageChange?: (page: number, options?: PageChangeOptions) => void;
+  /** Fetches a page of images for prefetching */
+  fetchPage?: (page: number) => Promise<{ images: TImage[] }>;
+  /** The current page's images in order: the `image` param names one */
+  images?: readonly KeyedImage[];
+  /**
+   * False until the page's images are loaded (a detail page waits for its
+   * entity too): an `image` param from the address opens nothing before,
+   * and once ready one not among the images is dropped with a note
+   */
+  ready?: boolean;
+  /**
+   * Reads one image by its "id:instanceId", null when the viewer cannot see
+   * it. With it, an `image` param not on the loaded page opens the viewer on
+   * that image alone; without it, the param is dropped with a note.
+   */
+  fetchImage?: (key: string, signal: AbortSignal) => Promise<TImage | null>;
+}
+
+/** What the viewer says when an address's image cannot be read */
+export const IMAGE_GONE_MESSAGE = "That image is no longer available";
+
+/**
+ * A paginated image grid's lightbox. The open image is in the URL as
+ * `image=<id:instanceId>`: opening pushes it, so Back closes the lightbox;
+ * moving within a page and across a boundary replaces it (the page through
+ * `onExternalPageChange(page, { replace: true })`). Closing a lightbox this
+ * hook opened goes back one entry, so no dead Back step is left; one opened
+ * from an address (a reload, a link) closes by removing the param with a
+ * replace. Either way, and on Back, the list then shows the page of the last
+ * image. An address with the param opens the lightbox on that image once its
+ * page is in. When the image is not on that page (a link to an image on a
+ * later page), `fetchImage` reads it by id and the lightbox shows it alone
+ * (`soloImage`: no paging across the list, which closing leaves on its
+ * page); an image the read does not find (gone, hidden, restricted) drops
+ * the param (a replace) and says so. A crossing whose page fails to load
+ * (`failPendingPage`) returns to the image it left and says why.
+ */
+export function usePaginatedLightbox<TImage = unknown>({
   perPage = 100,
   totalCount = 0,
   onPageChange,
   externalPage,
   onExternalPageChange,
   fetchPage,
-}: PaginatedLightboxOptions) {
+  images = NO_IMAGES,
+  ready = true,
+  fetchImage,
+}: PaginatedLightboxOptions<TImage>) {
   // Internal page state - only used when externalPage is not provided
   const [internalPage, setInternalPage] = useState(1);
 
   // Use external page if provided, otherwise internal
-  const currentPage = externalPage !== undefined ? externalPage : internalPage;
+  const currentPage = externalPage ?? internalPage;
 
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const [lightboxIndex, setLightboxIndex] = useState(0);
   const [lightboxAutoPlay, setLightboxAutoPlay] = useState(false);
   const [isPageTransitioning, setIsPageTransitioning] = useState(false);
-  // Counter that increments on each page boundary crossing.
-  // Ensures Lightbox resets currentIndex even when lightboxIndex is the same value
-  // (e.g., 0 on consecutive forward crossings).
+  // Counter that increments on each page boundary crossing and on landing on
+  // the new page. Ensures Lightbox resets currentIndex even when lightboxIndex
+  // is the same value (e.g., 0 on consecutive forward crossings, or after key
+  // repeat moved it within the old page while the new one loaded).
   const [transitionKey, setTransitionKey] = useState(0);
+  // The index on a newly loaded page whose image the URL is to name
+  const [landingIndex, setLandingIndex] = useState<number | null>(null);
 
   // Prefetch state for adjacent pages
-  const [prevPageImages, setPrevPageImages] = useState<any[]>([]);
-  const [nextPageImages, setNextPageImages] = useState<any[]>([]);
-  const prefetchingRef = useRef<{ prev: number | null; next: number | null }>({ prev: null, next: null }); // Track which pages are being fetched
+  const [prevPageImages, setPrevPageImages] = useState<TImage[]>([]);
+  const [nextPageImages, setNextPageImages] = useState<TImage[]>([]);
+  const prefetchingRef = useRef<{ prev: number | null; next: number | null }>({
+    prev: null,
+    next: null,
+  }); // Track which pages are being fetched
 
   // Track pending page load for lightbox cross-page navigation
   const pendingLightboxNav = useRef<number | null>(null);
+  // The crossing under way: where it left from and the page it asked for
+  const crossingRef = useRef<{
+    direction: "next" | "prev";
+    fromPage: number;
+    fromIndex: number;
+    toPage: number;
+  } | null>(null);
+  // The page of the image the lightbox shows (null while closed): the list
+  // shows it once the lightbox closes
+  const viewerPageRef = useRef<number | null>(null);
+  // The lightbox was opened by this hook's own push: closing goes back
+  const openedByPushRef = useRef(false);
 
   // Track current lightbox index reported by Lightbox component (for prefetch triggering)
   // This is separate from lightboxIndex which is used as initialIndex prop
   const [trackedIndex, setTrackedIndex] = useState(0);
 
+  // An address's image read by id (not on the loaded page), shown alone
+  const [soloImage, setSoloImage] = useState<TImage | null>(null);
+  // The by-id read under way; a later navigation, open or close cancels it
+  const soloReadRef = useRef<AbortController | null>(null);
+  const cancelSoloRead = useCallback(() => {
+    soloReadRef.current?.abort();
+    soloReadRef.current = null;
+  }, []);
+
   const totalPages = Math.ceil(totalCount / perPage);
 
+  // --- The open image in the URL ---
+  const navigate = useNavigate();
+  const location = useLocation();
+  const navigationType = useNavigationType();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const imageParam = searchParams.get(IMAGE_PARAM);
+  // Values this hook wrote that the URL has not shown yet, oldest first, and
+  // the latest value written or seen
+  const ownWritesRef = useRef<(string | null)[]>([]);
+  const latestRef = useRef<string | null>(null);
+  // The last navigation followed: the router's location object, new on
+  // every navigation (a Back to an entry included, which keeps its key) and
+  // unchanged while a write waits to render. Null first, so an address's
+  // param is followed on mount.
+  const seenLocationRef = useRef<ReturnType<typeof useLocation> | null>(null);
+  // An address's image, opened once its page is in
+  const resolveRef = useRef<string | null>(null);
+
+  const writeImage = useCallback(
+    (key: string | null, history: "push" | "replace") => {
+      if (key === latestRef.current) return;
+      latestRef.current = key;
+      ownWritesRef.current.push(key);
+      setSearchParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          if (key === null) next.delete(IMAGE_PARAM);
+          else next.set(IMAGE_PARAM, key);
+          return next;
+        },
+        { replace: history === "replace" }
+      );
+    },
+    [setSearchParams]
+  );
+
   // Handle page change - use external callback if provided, otherwise internal
-  const handlePageChange = useCallback(
-    (newPage: number) => {
+  const changePage = useCallback(
+    (newPage: number, options?: PageChangeOptions) => {
       if (externalPage !== undefined && onExternalPageChange) {
         // External pagination mode - call the external handler
-        onExternalPageChange(newPage);
+        if (options) onExternalPageChange(newPage, options);
+        else onExternalPageChange(newPage);
       } else {
         // Internal pagination mode - update internal state
         setInternalPage(newPage);
@@ -81,10 +202,144 @@ export function usePaginatedLightbox({
     [externalPage, onExternalPageChange, onPageChange]
   );
 
+  // Follow the URL, once per navigation. Back and Forward (a POP), the first
+  // location (a reload, a link) and any navigation whose param this hook did
+  // not write set the lightbox from the param: none closes it, a key opens
+  // it on that image once the page's images are in. Judging by the
+  // navigation, not by the param's value, keeps a Back that lands before
+  // the router rendered the open's own entry a close, and a write the
+  // router has not rendered yet (its navigation is a transition) no close.
+  useEffect(() => {
+    if (location !== seenLocationRef.current) {
+      const first = seenLocationRef.current === null;
+      seenLocationRef.current = location;
+      let own = false;
+      if (!first && navigationType !== "POP") {
+        const at = ownWritesRef.current.lastIndexOf(imageParam);
+        if (at >= 0) {
+          ownWritesRef.current.splice(0, at + 1);
+          own = true;
+        } else {
+          // Another writer's entry (a page turned) that kept the image
+          own = imageParam === latestRef.current;
+        }
+      }
+      if (!own) {
+        ownWritesRef.current = [];
+        latestRef.current = imageParam;
+        resolveRef.current = imageParam;
+        cancelSoloRead();
+        if (imageParam === null) {
+          pendingLightboxNav.current = null;
+          crossingRef.current = null;
+          openedByPushRef.current = false;
+          setIsPageTransitioning(false);
+          setLandingIndex(null);
+          setLightboxOpen(false);
+          setSoloImage(null);
+        }
+      }
+      if (imageParam === null) {
+        // Closed (Back, or the close going back): the list shows the page
+        // of the last image, which a crossing may have moved past the
+        // entry's own
+        const viewerPage = viewerPageRef.current;
+        viewerPageRef.current = null;
+        if (viewerPage !== null && viewerPage !== currentPage) {
+          changePage(viewerPage, { replace: true });
+        }
+        return;
+      }
+      if (own) return;
+    }
+    const key = resolveRef.current;
+    if (key === null || !ready) return;
+    const index = images.findIndex((image) => imageKey(image) === key);
+    resolveRef.current = null;
+    if (index < 0 && fetchImage) {
+      // The page is in and the image is not on it (a link to an image on
+      // another page): read it by id and show it alone. Gone, hidden or
+      // restricted, it reads as none: the list stays, without the param.
+      const read = new AbortController();
+      soloReadRef.current = read;
+      const page = currentPage;
+      const drop = (message: string) => {
+        setSoloImage(null);
+        setLightboxOpen(false);
+        writeImage(null, "replace");
+        showError(message);
+      };
+      fetchImage(key, read.signal).then(
+        (found) => {
+          if (read.signal.aborted) return;
+          soloReadRef.current = null;
+          if (found === null) {
+            drop(IMAGE_GONE_MESSAGE);
+            return;
+          }
+          openedByPushRef.current = false;
+          viewerPageRef.current = page;
+          setSoloImage(found);
+          setLightboxIndex(0);
+          setTransitionKey((k) => k + 1);
+          setLightboxAutoPlay(false);
+          setLightboxOpen(true);
+        },
+        (error: unknown) => {
+          if (read.signal.aborted) return;
+          soloReadRef.current = null;
+          drop(getErrorMessage(error, IMAGE_GONE_MESSAGE));
+        }
+      );
+      return;
+    }
+    if (index < 0) {
+      // The page is in and the image is not on it (gone, hidden, or moved
+      // by a change to the list): the list stays, without the param
+      writeImage(null, "replace");
+      showInfo("That image isn't on this page of the list.");
+      return;
+    }
+    openedByPushRef.current = false;
+    viewerPageRef.current = currentPage;
+    setSoloImage(null);
+    setLightboxIndex(index);
+    setLightboxAutoPlay(false);
+    setLightboxOpen(true);
+  }, [
+    location,
+    navigationType,
+    imageParam,
+    images,
+    ready,
+    currentPage,
+    changePage,
+    writeImage,
+    fetchImage,
+    cancelSoloRead,
+  ]);
+
+  // After a boundary crossing, name the new page's image once it is in
+  useEffect(() => {
+    if (landingIndex === null) return;
+    setLandingIndex(null);
+    if (!lightboxOpen || images.length === 0) return;
+    const image = images[Math.min(landingIndex, images.length - 1)];
+    if (image) writeImage(imageKey(image), "replace");
+  }, [landingIndex, lightboxOpen, images, writeImage]);
+
+  // A page picked in the grid's own pagination: a new history entry
+  const handlePageChange = useCallback(
+    (newPage: number) => changePage(newPage),
+    [changePage]
+  );
+
   // Handle lightbox reaching page boundary
   // Returns true if navigation was handled (crossing page boundary), false otherwise
   const handlePageBoundary = useCallback(
     (direction: "next" | "prev") => {
+      // An image shown alone is not in the list: nowhere to page to
+      if (soloImage !== null) return false;
       if (direction === "next" && currentPage < totalPages) {
         // User navigated past last image on current page - load next page
         const targetIndex = 0; // First image of next page
@@ -92,7 +347,13 @@ export function usePaginatedLightbox({
         setTransitionKey((k) => k + 1); // Force Lightbox to reset even if index unchanged
         setIsPageTransitioning(true); // Show loading state until new data arrives
         pendingLightboxNav.current = targetIndex; // Also store for data callback
-        handlePageChange(currentPage + 1);
+        crossingRef.current = {
+          direction,
+          fromPage: currentPage,
+          fromIndex: images.length > 0 ? images.length - 1 : trackedIndex,
+          toPage: currentPage + 1,
+        };
+        changePage(currentPage + 1, { replace: true });
         return true;
       } else if (direction === "prev" && currentPage > 1) {
         // User navigated before first image on current page - load previous page
@@ -101,43 +362,152 @@ export function usePaginatedLightbox({
         setTransitionKey((k) => k + 1); // Force Lightbox to reset even if index unchanged
         setIsPageTransitioning(true); // Show loading state until new data arrives
         pendingLightboxNav.current = targetIndex; // Also store for data callback
-        handlePageChange(currentPage - 1);
+        crossingRef.current = {
+          direction,
+          fromPage: currentPage,
+          fromIndex: 0,
+          toPage: currentPage - 1,
+        };
+        changePage(currentPage - 1, { replace: true });
         return true;
       }
 
       return false; // Let lightbox handle normal wrapping
     },
-    [currentPage, totalPages, perPage, handlePageChange]
+    [
+      soloImage,
+      currentPage,
+      totalPages,
+      perPage,
+      changePage,
+      images,
+      trackedIndex,
+    ]
   );
 
-  // Handle lightbox index change (for tracking current position for prefetching)
-  const handleLightboxIndexChange = useCallback((index: number) => {
-    setTrackedIndex(index);
-  }, []);
+  // The lightbox moved: track it for prefetching and name its image in the
+  // URL. While a crossing's page loads (or before its image is named) the
+  // index is the old page's, so it names nothing; nor while an address's
+  // image waits for its page (a Back to another page and image), whose
+  // param the old index would overwrite. That includes a navigation not
+  // followed yet: the lightbox reports before the observer runs (a child's
+  // effects run first), and a Back to a cached page brings that page's
+  // images with it. An image shown alone, or one being read by id, is
+  // already the param; the index is not the page's.
+  const handleLightboxIndexChange = useCallback(
+    (index: number) => {
+      setTrackedIndex(index);
+      const unfollowed =
+        location !== seenLocationRef.current &&
+        imageParam !== latestRef.current &&
+        !ownWritesRef.current.includes(imageParam);
+      if (
+        !lightboxOpen ||
+        soloImage !== null ||
+        soloReadRef.current !== null ||
+        pendingLightboxNav.current !== null ||
+        landingIndex !== null ||
+        resolveRef.current !== null ||
+        unfollowed
+      ) {
+        return;
+      }
+      const image = images[index];
+      if (image) writeImage(imageKey(image), "replace");
+    },
+    [
+      lightboxOpen,
+      soloImage,
+      landingIndex,
+      images,
+      writeImage,
+      location,
+      imageParam,
+    ]
+  );
 
-  // Handle lightbox close
+  // Handle lightbox close. The list then shows the page of the last image
+  // (the URL observer replaces `page` once the param is gone).
   const handleLightboxClose = useCallback(() => {
+    cancelSoloRead();
+    setSoloImage(null);
     setLightboxOpen(false);
-    // The page was already changed via handlePageBoundary during navigation
-  }, []);
+    pendingLightboxNav.current = null;
+    crossingRef.current = null;
+    setIsPageTransitioning(false);
+    setLandingIndex(null);
+    if (openedByPushRef.current && latestRef.current !== null) {
+      // Opened by this hook's push: step back over that entry rather than
+      // leave it behind as a Back that does nothing (the POP is followed
+      // like any Back)
+      openedByPushRef.current = false;
+      latestRef.current = null;
+      void navigate(-1);
+      return;
+    }
+    openedByPushRef.current = false;
+    writeImage(null, "replace");
+  }, [navigate, writeImage, cancelSoloRead]);
 
   // Open lightbox at a specific image
-  const openLightbox = useCallback((index: number, autoPlay = false) => {
-    setLightboxIndex(index);
-    setLightboxAutoPlay(autoPlay);
-    setLightboxOpen(true);
-  }, []);
+  const openLightbox = useCallback(
+    (index: number, autoPlay = false) => {
+      cancelSoloRead();
+      setSoloImage(null);
+      setLightboxIndex(index);
+      setLightboxAutoPlay(autoPlay);
+      setLightboxOpen(true);
+      viewerPageRef.current = currentPage;
+      const image = images[index];
+      if (image) {
+        openedByPushRef.current = true;
+        writeImage(imageKey(image), "push");
+      }
+    },
+    [images, currentPage, writeImage, cancelSoloRead]
+  );
 
   // Get the pending lightbox index after a page load (for cross-page navigation)
   const consumePendingLightboxIndex = useCallback(() => {
     if (pendingLightboxNav.current !== null) {
       const targetIndex = pendingLightboxNav.current;
       pendingLightboxNav.current = null;
+      if (crossingRef.current)
+        viewerPageRef.current = crossingRef.current.toPage;
+      crossingRef.current = null;
       setLightboxIndex(targetIndex);
+      // Reset the lightbox to the target even when its index already is it
+      setTransitionKey((k) => k + 1);
       setIsPageTransitioning(false); // New data has arrived, stop showing loading state
+      setLandingIndex(targetIndex);
       return targetIndex;
     }
     return null;
+  }, []);
+
+  // The page a crossing asked for failed to load: back to the image and
+  // page it left, and a toast saying why (the lightbox shows no errors of its
+  // own). False when no crossing was waiting for a page.
+  // Stable, so a caller's effect does not rerun when the page changes
+  const changePageRef = useRef(changePage);
+  useEffect(() => {
+    changePageRef.current = changePage;
+  }, [changePage]);
+  const failPendingPage = useCallback((error: unknown) => {
+    const crossing = crossingRef.current;
+    if (pendingLightboxNav.current === null || crossing === null) {
+      return false;
+    }
+    pendingLightboxNav.current = null;
+    crossingRef.current = null;
+    setIsPageTransitioning(false);
+    setLightboxIndex(crossing.fromIndex);
+    setTransitionKey((k) => k + 1);
+    changePageRef.current(crossing.fromPage, { replace: true });
+    showError(
+      `Couldn't load the ${crossing.direction === "next" ? "next" : "previous"} page of images: ${getErrorMessage(error, "the request failed.")}`
+    );
+    return true;
   }, []);
 
   // Clear prefetched pages when current page changes (they're no longer adjacent)
@@ -149,7 +519,7 @@ export function usePaginatedLightbox({
 
   // Prefetch adjacent pages when near page boundaries
   useEffect(() => {
-    if (!lightboxOpen || !fetchPage) return;
+    if (!lightboxOpen || !fetchPage || soloImage !== null) return;
 
     // Near end of page - prefetch next page
     if (
@@ -160,10 +530,10 @@ export function usePaginatedLightbox({
     ) {
       prefetchingRef.current.next = currentPage + 1;
       fetchPage(currentPage + 1)
-        .then(({ images }: { images: any[] }) => {
+        .then(({ images: fetched }) => {
           // Only update if we're still on the same page
           if (prefetchingRef.current.next === currentPage + 1) {
-            setNextPageImages(images.slice(0, PREFETCH_COUNT));
+            setNextPageImages(fetched.slice(0, PREFETCH_COUNT));
           }
         })
         .catch(() => {
@@ -181,10 +551,10 @@ export function usePaginatedLightbox({
     ) {
       prefetchingRef.current.prev = currentPage - 1;
       fetchPage(currentPage - 1)
-        .then(({ images }: { images: any[] }) => {
+        .then(({ images: fetched }) => {
           // Only update if we're still on the same page
           if (prefetchingRef.current.prev === currentPage - 1) {
-            setPrevPageImages(images.slice(-PREFETCH_COUNT));
+            setPrevPageImages(fetched.slice(-PREFETCH_COUNT));
           }
         })
         .catch(() => {
@@ -192,7 +562,17 @@ export function usePaginatedLightbox({
           prefetchingRef.current.prev = null;
         });
     }
-  }, [lightboxOpen, trackedIndex, currentPage, totalPages, perPage, fetchPage, nextPageImages.length, prevPageImages.length]);
+  }, [
+    lightboxOpen,
+    soloImage,
+    trackedIndex,
+    currentPage,
+    totalPages,
+    perPage,
+    fetchPage,
+    nextPageImages.length,
+    prevPageImages.length,
+  ]);
 
   // Compute prefetch images from adjacent pages
   const prefetchImages = [...prevPageImages, ...nextPageImages];
@@ -210,15 +590,19 @@ export function usePaginatedLightbox({
     lightboxAutoPlay,
     isPageTransitioning,
     transitionKey,
+    /** The address's image read by id, shown alone; null otherwise */
+    soloImage,
 
     // Lightbox handlers
     openLightbox,
     closeLightbox: handleLightboxClose,
-    onPageBoundary: totalPages > 1 ? handlePageBoundary : () => false,
+    onPageBoundary:
+      totalPages > 1 && soloImage === null ? handlePageBoundary : () => false,
     onIndexChange: handleLightboxIndexChange,
 
-    // For consuming pending navigation after page load
+    // For consuming pending navigation after page load, or its failure
     consumePendingLightboxIndex,
+    failPendingPage,
 
     // Images to prefetch (from adjacent pages)
     prefetchImages,

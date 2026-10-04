@@ -1,29 +1,37 @@
 import { useState } from "react";
+import { showError, showSuccess } from "../utils/toast";
 import { useHiddenEntities } from "./useHiddenEntities";
-import { showSuccess, showError } from "../utils/toast";
 
 /**
  * Hook for bulk hide action with confirmation dialog support
  * @param {Object} options
- * @param {Array} options.selectedScenes - Array of selected scene objects
+ * @param {Array} options.selectedScenes - The selected scenes, each with its instance
  * @param {Function} options.onComplete - Called after hide completes (e.g., clear selection)
- * @param {Function} [options.onHideSuccess] - Called per scene after successful hide
+ * @param {Function} [options.onHideSuccess] - Called per scene after successful hide, with its instance
  * @returns {Object} - { hideDialogOpen, isHiding, handleHideClick, handleHideConfirm, closeHideDialog }
  */
 interface UseHideBulkActionOptions {
-  selectedScenes: Array<{ id: string | number }>;
+  selectedScenes: ReadonlyArray<{ id: string | number; instanceId: string }>;
   onComplete: () => void;
-  onHideSuccess?: (id: string | number, entityType: string) => void;
+  onHideSuccess?: (
+    id: string | number,
+    entityType: string,
+    instanceId: string
+  ) => void;
 }
 
-export const useHideBulkAction = ({ selectedScenes, onComplete, onHideSuccess }: UseHideBulkActionOptions) => {
+export const useHideBulkAction = ({
+  selectedScenes,
+  onComplete,
+  onHideSuccess,
+}: UseHideBulkActionOptions) => {
   const [hideDialogOpen, setHideDialogOpen] = useState(false);
   const [isHiding, setIsHiding] = useState(false);
   const { hideEntities, hideConfirmationDisabled } = useHiddenEntities();
 
   const handleHideClick = () => {
     if (hideConfirmationDisabled) {
-      handleHideConfirm(true);
+      void handleHideConfirm(true);
     } else {
       setHideDialogOpen(true);
     }
@@ -33,26 +41,33 @@ export const useHideBulkAction = ({ selectedScenes, onComplete, onHideSuccess }:
     setIsHiding(true);
     setHideDialogOpen(false);
 
-    const entities = selectedScenes.map((scene) => ({
-      entityType: "scene",
-      entityId: String(scene.id),
-    }));
-
-    const result = await hideEntities({
-      entities,
-      skipConfirmation: dontAskAgain,
-    });
+    const result =
+      selectedScenes.length > 0
+        ? await hideEntities({
+            entities: selectedScenes.map((scene) => ({
+              entityType: "scene",
+              entityId: String(scene.id),
+              instanceId: scene.instanceId,
+            })),
+            skipConfirmation: dontAskAgain,
+          })
+        : { success: true, successCount: 0, failCount: 0 };
 
     setIsHiding(false);
 
     if (result.success) {
       for (const scene of selectedScenes) {
-        onHideSuccess?.(scene.id, "scene");
+        onHideSuccess?.(scene.id, "scene", scene.instanceId);
       }
-      if (result.failCount === 0) {
-        showSuccess(`${result.successCount} scene${result.successCount !== 1 ? "s" : ""} hidden`);
+      const { failCount } = result;
+      if (failCount === 0) {
+        showSuccess(
+          `${result.successCount} scene${result.successCount !== 1 ? "s" : ""} hidden`
+        );
       } else {
-        showError(`Hidden ${result.successCount} scene${result.successCount !== 1 ? "s" : ""}, ${result.failCount} failed`);
+        showError(
+          `Hidden ${result.successCount} scene${result.successCount !== 1 ? "s" : ""}, ${failCount} failed`
+        );
       }
     } else {
       showError("Failed to hide scenes. Please try again.");

@@ -1,13 +1,12 @@
-import { describe, it, expect, beforeAll } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { must } from "../../tests/helpers/must.js";
+import { TEST_ADMIN, TEST_ENTITIES } from "../fixtures/testEntities.js";
 import {
   adminClient,
+  restoreInstanceSelection,
   selectTestInstanceOnly,
 } from "../helpers/testClient.js";
-import { TEST_ENTITIES, TEST_ADMIN } from "../fixtures/testEntities.js";
-import {
-  measureEndpoint,
-  assertBenchmark,
-} from "./measureEndpoint.js";
+import { assertBenchmark, measureEndpoint } from "./measureEndpoint.js";
 
 /**
  * API Performance Benchmarks
@@ -20,6 +19,7 @@ import {
  */
 
 // Discovered IDs for detail-page benchmarks
+let testInstanceId: string;
 let discoveredSceneId: string;
 let discoveredPerformerId: string;
 let discoveredStudioId: string;
@@ -27,36 +27,38 @@ let discoveredGalleryId: string;
 
 beforeAll(async () => {
   await adminClient.login(TEST_ADMIN.username, TEST_ADMIN.password);
-  await selectTestInstanceOnly();
+  testInstanceId = await selectTestInstanceOnly();
 
   // Auto-discover entity IDs from first page of each list
   const [scenes, performers, studios, galleries] = await Promise.all([
-    adminClient.post<{ findScenes: { scenes: Array<{ id: string }> } }>(
+    adminClient.post<{ findScenes?: { scenes?: Array<{ id: string }> } }>(
       "/api/library/scenes",
       { filter: { page: 1, per_page: 1 } }
     ),
-    adminClient.post<{ findPerformers: { performers: Array<{ id: string }> } }>(
-      "/api/library/performers",
-      { filter: { page: 1, per_page: 1 } }
-    ),
-    adminClient.post<{ findStudios: { studios: Array<{ id: string }> } }>(
+    adminClient.post<{
+      findPerformers?: { performers?: Array<{ id: string }> };
+    }>("/api/library/performers", { filter: { page: 1, per_page: 1 } }),
+    adminClient.post<{ findStudios?: { studios?: Array<{ id: string }> } }>(
       "/api/library/studios",
       { filter: { page: 1, per_page: 1 } }
     ),
-    adminClient.post<{ findGalleries: { galleries: Array<{ id: string }> } }>(
+    adminClient.post<{ findGalleries?: { galleries?: Array<{ id: string }> } }>(
       "/api/library/galleries",
       { filter: { page: 1, per_page: 1 } }
     ),
   ]);
 
   discoveredSceneId =
-    scenes.data?.findScenes?.scenes?.[0]?.id ?? TEST_ENTITIES.sceneWithRelations;
+    scenes.data.findScenes?.scenes?.[0]?.id ?? TEST_ENTITIES.sceneWithRelations;
   discoveredPerformerId =
-    performers.data?.findPerformers?.performers?.[0]?.id ?? TEST_ENTITIES.performerWithScenes;
+    performers.data.findPerformers?.performers?.[0]?.id ??
+    TEST_ENTITIES.performerWithScenes;
   discoveredStudioId =
-    studios.data?.findStudios?.studios?.[0]?.id ?? TEST_ENTITIES.studioWithScenes;
+    studios.data.findStudios?.studios?.[0]?.id ??
+    TEST_ENTITIES.studioWithScenes;
   discoveredGalleryId =
-    galleries.data?.findGalleries?.galleries?.[0]?.id ?? TEST_ENTITIES.galleryWithImages;
+    galleries.data.findGalleries?.galleries?.[0]?.id ??
+    TEST_ENTITIES.galleryWithImages;
 
   console.log("\n=== API Performance Benchmarks ===");
   console.log(`  Scene ID:     ${discoveredSceneId}`);
@@ -65,6 +67,8 @@ beforeAll(async () => {
   console.log(`  Gallery ID:   ${discoveredGalleryId}`);
   console.log("");
 });
+
+afterAll(restoreInstanceSelection);
 
 describe("Scene List Benchmarks", () => {
   it("paginated scene list (page 1, 25 per page)", async () => {
@@ -78,35 +82,44 @@ describe("Scene List Benchmarks", () => {
   });
 
   it("filtered scene list (by performer)", async () => {
-    const result = await measureEndpoint("scene-list-filtered-performer", async () => {
-      const res = await adminClient.post("/api/library/scenes", {
-        filter: { page: 1, per_page: 25 },
-        find_filter: { performers: [TEST_ENTITIES.performerWithScenes] },
-      });
-      expect(res.ok).toBe(true);
-    });
+    const result = await measureEndpoint(
+      "scene-list-filtered-performer",
+      async () => {
+        const res = await adminClient.post("/api/library/scenes", {
+          filter: { page: 1, per_page: 25 },
+          find_filter: { performers: [TEST_ENTITIES.performerWithScenes] },
+        });
+        expect(res.ok).toBe(true);
+      }
+    );
     assertBenchmark(result);
   });
 
   it("filtered scene list (by studio)", async () => {
-    const result = await measureEndpoint("scene-list-filtered-studio", async () => {
-      const res = await adminClient.post("/api/library/scenes", {
-        filter: { page: 1, per_page: 25 },
-        find_filter: { studios: [TEST_ENTITIES.studioWithScenes] },
-      });
-      expect(res.ok).toBe(true);
-    });
+    const result = await measureEndpoint(
+      "scene-list-filtered-studio",
+      async () => {
+        const res = await adminClient.post("/api/library/scenes", {
+          filter: { page: 1, per_page: 25 },
+          find_filter: { studios: [TEST_ENTITIES.studioWithScenes] },
+        });
+        expect(res.ok).toBe(true);
+      }
+    );
     assertBenchmark(result);
   });
 
   it("filtered scene list (by tag)", async () => {
-    const result = await measureEndpoint("scene-list-filtered-tag", async () => {
-      const res = await adminClient.post("/api/library/scenes", {
-        filter: { page: 1, per_page: 25 },
-        find_filter: { tags: [TEST_ENTITIES.tagWithEntities] },
-      });
-      expect(res.ok).toBe(true);
-    });
+    const result = await measureEndpoint(
+      "scene-list-filtered-tag",
+      async () => {
+        const res = await adminClient.post("/api/library/scenes", {
+          filter: { page: 1, per_page: 25 },
+          find_filter: { tags: [TEST_ENTITIES.tagWithEntities] },
+        });
+        expect(res.ok).toBe(true);
+      }
+    );
     assertBenchmark(result);
   });
 
@@ -185,7 +198,7 @@ describe("Entity List Benchmarks", () => {
   it("minimal performer list", async () => {
     const result = await measureEndpoint("performer-list-minimal", async () => {
       const res = await adminClient.post("/api/library/performers/minimal", {
-        filter: { page: 1, per_page: 100 },
+        filter: { per_page: 100 },
       });
       expect(res.ok).toBe(true);
     });
@@ -195,7 +208,7 @@ describe("Entity List Benchmarks", () => {
   it("minimal tag list", async () => {
     const result = await measureEndpoint("tag-list-minimal", async () => {
       const res = await adminClient.post("/api/library/tags/minimal", {
-        filter: { page: 1, per_page: 100 },
+        filter: { per_page: 100 },
       });
       expect(res.ok).toBe(true);
     });
@@ -218,7 +231,7 @@ describe("Detail Page Benchmarks", () => {
   it("scene similar", async () => {
     const result = await measureEndpoint("scene-similar", async () => {
       const res = await adminClient.get(
-        `/api/library/scenes/${discoveredSceneId}/similar`
+        `/api/library/scenes/${discoveredSceneId}/similar?instanceId=${testInstanceId}`
       );
       expect(res.ok).toBe(true);
     });
@@ -226,13 +239,16 @@ describe("Detail Page Benchmarks", () => {
   });
 
   it("performer detail (filtered scene list)", async () => {
-    const result = await measureEndpoint("performer-detail-scenes", async () => {
-      const res = await adminClient.post("/api/library/scenes", {
-        filter: { page: 1, per_page: 25 },
-        find_filter: { performers: [discoveredPerformerId] },
-      });
-      expect(res.ok).toBe(true);
-    });
+    const result = await measureEndpoint(
+      "performer-detail-scenes",
+      async () => {
+        const res = await adminClient.post("/api/library/scenes", {
+          filter: { page: 1, per_page: 25 },
+          find_filter: { performers: [discoveredPerformerId] },
+        });
+        expect(res.ok).toBe(true);
+      }
+    );
     assertBenchmark(result);
   });
 
@@ -249,9 +265,9 @@ describe("Detail Page Benchmarks", () => {
 
   it("gallery detail", async () => {
     const result = await measureEndpoint("gallery-detail", async () => {
-      const res = await adminClient.get(
-        `/api/library/galleries/${discoveredGalleryId}`
-      );
+      const res = await adminClient.post("/api/library/galleries", {
+        ids: [discoveredGalleryId],
+      });
       expect(res.ok).toBe(true);
     });
     assertBenchmark(result);
@@ -259,9 +275,12 @@ describe("Detail Page Benchmarks", () => {
 
   it("gallery images", async () => {
     const result = await measureEndpoint("gallery-images", async () => {
-      const res = await adminClient.get(
-        `/api/library/galleries/${discoveredGalleryId}/images?page=1&per_page=25`
-      );
+      const res = await adminClient.post("/api/library/images", {
+        filter: { page: 1, per_page: 25, sort: "path", direction: "ASC" },
+        image_filter: {
+          galleries: { value: [discoveredGalleryId], modifier: "INCLUDES" },
+        },
+      });
       expect(res.ok).toBe(true);
     });
     assertBenchmark(result);
@@ -279,16 +298,19 @@ describe("Carousel Benchmarks", () => {
 
   it("carousel execute (first carousel)", async () => {
     // Discover the first carousel ID
-    const listRes = await adminClient.get<Array<{ id: number }>>(
-      "/api/carousels"
-    );
+    const listRes =
+      await adminClient.get<Array<{ id: number }>>("/api/carousels");
 
-    if (!listRes.ok || !Array.isArray(listRes.data) || listRes.data.length === 0) {
+    if (
+      !listRes.ok ||
+      !Array.isArray(listRes.data) ||
+      listRes.data.length === 0
+    ) {
       console.log("  ⊘ carousel-execute: skipped (no carousels configured)");
       return;
     }
 
-    const carouselId = listRes.data[0].id;
+    const carouselId = must(listRes.data[0]).id;
     const result = await measureEndpoint("carousel-execute", async () => {
       const res = await adminClient.get(`/api/carousels/${carouselId}/execute`);
       expect(res.ok).toBe(true);

@@ -1,16 +1,17 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
+import type { NormalizedScene } from "@peek/shared-types";
+import { makeCompositeKey } from "../../utils/compositeKey";
 import Button from "./Button";
 import SceneCard from "./SceneCard";
 import SkeletonSceneCard from "./SkeletonSceneCard";
-import type { NormalizedScene } from "@peek/shared-types";
 
 interface Props {
   title: string;
   titleIcon?: ReactNode;
   scenes: NormalizedScene[];
   loading?: boolean;
-  onSceneClick?: (scene: NormalizedScene) => boolean | void;
+  onSceneClick?: (scene: NormalizedScene) => void;
   showProgress?: boolean;
   selectedScenes?: NormalizedScene[];
   onToggleSelect?: (scene: NormalizedScene) => void;
@@ -49,6 +50,7 @@ const SceneCarousel = ({
       container.addEventListener("scroll", checkScrollButtons);
       return () => container.removeEventListener("scroll", checkScrollButtons);
     }
+    return undefined;
   }, [scenes]);
 
   const scrollLeft = () => {
@@ -79,7 +81,7 @@ const SceneCarousel = ({
           {title}
         </h2>
         <div className="grid grid-flow-col auto-cols-[280px] gap-4 overflow-hidden py-4">
-          {[...Array(6)].map((_, i) => (
+          {Array.from({ length: 6 }).map((_, i) => (
             <div key={i}>
               <SkeletonSceneCard />
             </div>
@@ -189,12 +191,17 @@ const SceneCarousel = ({
           onScroll={checkScrollButtons}
         >
           {scenes.map((scene) => (
-            <div key={scene.id} className="h-full">
+            <div
+              key={makeCompositeKey(scene.id, scene.instanceId)}
+              className="h-full"
+            >
               <SceneCard
                 scene={scene}
                 onClick={onSceneClick}
                 enableKeyboard={false}
-                isSelected={selectedScenes.some((s) => s.id === scene.id)}
+                isSelected={selectedScenes.some(
+                  (s) => s.id === scene.id && s.instanceId === scene.instanceId
+                )}
                 onToggleSelect={onToggleSelect}
                 selectionMode={selectedScenes.length > 0}
                 className="h-full"

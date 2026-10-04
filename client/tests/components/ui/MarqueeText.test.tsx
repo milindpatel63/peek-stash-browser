@@ -1,6 +1,16 @@
 // client/tests/components/ui/MarqueeText.test.jsx
-import { render, screen, fireEvent } from "@testing-library/react";
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { fireEvent, render, screen } from "@testing-library/react";
+import { untrusted } from "@tests/helpers/untrusted";
+import { must } from "@tests/testUtils";
+import {
+  type Mock,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 import MarqueeText from "../../../src/components/ui/MarqueeText";
 
 // Mock ResizeObserver
@@ -16,22 +26,33 @@ const mockIntersectionObserver = vi.fn(() => ({
   observe: vi.fn(),
   unobserve: vi.fn(),
   disconnect: vi.fn(),
+  root: null,
+  rootMargin: "",
+  thresholds: [],
+  takeRecords: () => [],
 }));
-globalThis.IntersectionObserver = mockIntersectionObserver as any;
+globalThis.IntersectionObserver = mockIntersectionObserver;
+
+/** The part of MediaQueryList MarqueeText uses */
+type MediaQueryStub = Pick<
+  MediaQueryList,
+  "matches" | "addEventListener" | "removeEventListener"
+>;
 
 describe("MarqueeText", () => {
-  let matchMediaMock: any;
+  let matchMediaMock: Mock<(query: string) => MediaQueryStub>;
 
   beforeEach(() => {
     vi.clearAllMocks();
 
     // Mock matchMedia for hover capability and reduced motion detection
-    matchMediaMock = vi.fn().mockImplementation((query) => ({
+    matchMediaMock = vi.fn((query: string) => ({
       matches: query === "(hover: hover)", // Default: has hover capability
       addEventListener: vi.fn(),
       removeEventListener: vi.fn(),
     }));
-    globalThis.matchMedia = matchMediaMock;
+    // A stand-in with only the MediaQueryList members MarqueeText uses
+    globalThis.matchMedia = untrusted<typeof matchMedia>(matchMediaMock);
   });
 
   afterEach(() => {
@@ -78,7 +99,7 @@ describe("MarqueeText", () => {
       }));
 
       const { container } = render(<MarqueeText>Test</MarqueeText>);
-      const containerDiv = container.firstChild!;
+      const containerDiv = must(container.firstChild);
 
       // On desktop, hover events should be handled
       fireEvent.mouseEnter(containerDiv);
@@ -115,7 +136,7 @@ describe("MarqueeText", () => {
 
       // When reduced motion is preferred, animation should not be applied
       // even on hover
-      fireEvent.mouseEnter(textElement.parentElement!);
+      fireEvent.mouseEnter(must(textElement.parentElement));
       expect(textElement.style.animation).toBe("");
     });
   });
@@ -126,7 +147,7 @@ describe("MarqueeText", () => {
       const container = screen.getByText("Test").parentElement;
 
       // Should not throw
-      fireEvent.mouseEnter(container!);
+      fireEvent.mouseEnter(must(container));
       expect(container).toBeInTheDocument();
     });
 
@@ -134,8 +155,8 @@ describe("MarqueeText", () => {
       render(<MarqueeText>Test</MarqueeText>);
       const container = screen.getByText("Test").parentElement;
 
-      fireEvent.mouseEnter(container!);
-      fireEvent.mouseLeave(container!);
+      fireEvent.mouseEnter(must(container));
+      fireEvent.mouseLeave(must(container));
       expect(container).toBeInTheDocument();
     });
   });
@@ -153,7 +174,7 @@ describe("MarqueeText", () => {
   });
 
   describe("cleanup", () => {
-    it("cleans up ResizeObserver on unmount", () => {
+    it("measures nothing until hovered, and cleans up its ResizeObserver on unmount", () => {
       const disconnectMock = vi.fn();
       mockResizeObserver.mockImplementation(() => ({
         observe: vi.fn(),
@@ -162,8 +183,12 @@ describe("MarqueeText", () => {
       }));
 
       const { unmount } = render(<MarqueeText>Test</MarqueeText>);
-      unmount();
+      expect(mockResizeObserver).not.toHaveBeenCalled();
 
+      fireEvent.mouseEnter(must(screen.getByText("Test").parentElement));
+      expect(mockResizeObserver).toHaveBeenCalledTimes(1);
+
+      unmount();
       expect(disconnectMock).toHaveBeenCalled();
     });
 

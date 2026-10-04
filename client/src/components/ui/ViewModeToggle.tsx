@@ -1,6 +1,16 @@
+import { useEffect, useRef, useState } from "react";
 import { type LucideIcon } from "lucide-react";
-import { useState, useEffect, useRef } from "react";
-import { LucideGrid2X2, LucideSquare, LucideNetwork, LucideList, LucideCalendar, LucideFolderOpen, LucideChevronDown } from "lucide-react";
+import {
+  LucideCalendar,
+  LucideChevronDown,
+  LucideFolderOpen,
+  LucideGrid2X2,
+  LucideList,
+  LucideNetwork,
+  LucideSquare,
+} from "lucide-react";
+import { useRovingFocus } from "../../hooks/useRovingFocus";
+import Popover from "./Popover";
 
 interface ViewMode {
   id: string;
@@ -34,53 +44,38 @@ const MODE_ICONS = {
 /**
  * Toggle between view modes via icon dropdown.
  *
+ * Keyboard and D-pad: Enter on the button opens the menu with focus on the
+ * current mode, the arrows move between modes, Enter picks one and Escape
+ * closes it (focus returns to the button).
+ *
  * @param {Array} modes - Optional custom modes array [{id, label, icon?}]
  *                        If not provided, defaults to grid/wall
  * @param {string} value - Currently selected mode id
  * @param {function} onChange - Called with mode id when selection changes
  */
-const ViewModeToggle = ({ modes, value = "grid", onChange, className = "" }: Props) => {
+const ViewModeToggle = ({
+  modes,
+  value = "grid",
+  onChange,
+  className = "",
+}: Props) => {
   // Local state for immediate visual feedback (optimistic update)
   const [localValue, setLocalValue] = useState(value);
   const [isOpen, setIsOpen] = useState(false);
-  const dropdownRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+  const onListKeyDown = useRovingFocus(listRef, {
+    itemSelector: '[role="option"]',
+  });
 
   // Sync local state when parent value changes (authoritative)
   useEffect(() => {
     setLocalValue(value);
   }, [value]);
 
-  // Close dropdown when clicking outside
-  useEffect(() => {
-    const handleClickOutside = (event: MouseEvent) => {
-      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
-        setIsOpen(false);
-      }
-    };
-
-    if (isOpen) {
-      document.addEventListener("mousedown", handleClickOutside);
-      return () => document.removeEventListener("mousedown", handleClickOutside);
-    }
-  }, [isOpen]);
-
-  // Close on Escape
-  useEffect(() => {
-    const handleEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setIsOpen(false);
-      }
-    };
-
-    if (isOpen) {
-      document.addEventListener("keydown", handleEscape);
-      return () => document.removeEventListener("keydown", handleEscape);
-    }
-  }, [isOpen]);
-
   const handleSelect = (modeId: string) => {
     setLocalValue(modeId); // Immediate visual feedback
-    onChange(modeId);       // Trigger parent update
+    onChange(modeId); // Trigger parent update
     setIsOpen(false);
   };
 
@@ -88,17 +83,22 @@ const ViewModeToggle = ({ modes, value = "grid", onChange, className = "" }: Pro
   const effectiveModes = modes
     ? modes.map((mode) => ({
         ...mode,
-        icon: mode.icon || MODE_ICONS[mode.id as keyof typeof MODE_ICONS] || LucideGrid2X2,
+        icon:
+          (mode.icon ?? MODE_ICONS[mode.id as keyof typeof MODE_ICONS]) ||
+          LucideGrid2X2,
       }))
     : DEFAULT_MODES;
 
-  const currentMode = effectiveModes.find((m) => m.id === localValue) || effectiveModes[0];
+  const currentMode =
+    effectiveModes.find((m) => m.id === localValue) ?? effectiveModes[0];
+  if (!currentMode) return null;
   const CurrentIcon = currentMode.icon;
 
   return (
-    <div ref={dropdownRef} className={`relative ${className}`}>
+    <div className={`relative ${className}`}>
       {/* Trigger button */}
       <button
+        ref={triggerRef}
         type="button"
         onClick={() => setIsOpen(!isOpen)}
         className="inline-flex items-center gap-1 px-2.5 h-[34px] rounded-lg transition-colors"
@@ -110,7 +110,7 @@ const ViewModeToggle = ({ modes, value = "grid", onChange, className = "" }: Pro
         title={`View: ${currentMode.label}`}
         aria-label={`View mode: ${currentMode.label}`}
         aria-expanded={isOpen}
-        aria-haspopup="listbox"
+        aria-haspopup="dialog"
       >
         <CurrentIcon size={18} />
         <LucideChevronDown
@@ -124,19 +124,22 @@ const ViewModeToggle = ({ modes, value = "grid", onChange, className = "" }: Pro
       </button>
 
       {/* Dropdown menu - icons only */}
-      {isOpen && (
+      <Popover
+        anchorRef={triggerRef}
+        open={isOpen}
+        onClose={() => setIsOpen(false)}
+        label="View modes"
+      >
         <div
-          className="absolute top-full left-0 mt-1 p-1 rounded-lg shadow-lg z-50 flex flex-col gap-0.5 min-w-[100px]"
-          style={{
-            backgroundColor: "var(--bg-secondary)",
-            border: "1px solid var(--border-color)",
-          }}
+          ref={listRef}
+          className="p-1 flex flex-col gap-0.5 min-w-[100px]"
           role="listbox"
           aria-label="View modes"
+          onKeyDown={onListKeyDown}
         >
           {effectiveModes.map((mode) => {
             const ModeIcon = mode.icon;
-            const isSelected = localValue === mode.id;
+            const isSelected = currentMode.id === mode.id;
             // Extract single word (remove "view" suffix)
             const shortLabel = mode.label.replace(/ view$/i, "");
 
@@ -147,12 +150,17 @@ const ViewModeToggle = ({ modes, value = "grid", onChange, className = "" }: Pro
                 onClick={() => handleSelect(mode.id)}
                 className="flex items-center gap-2 px-2 py-1.5 rounded transition-colors hover:bg-[var(--bg-tertiary)] text-left"
                 style={{
-                  color: isSelected ? "var(--accent-primary)" : "var(--text-secondary)",
-                  backgroundColor: isSelected ? "var(--bg-tertiary)" : "transparent",
+                  color: isSelected
+                    ? "var(--accent-primary)"
+                    : "var(--text-secondary)",
+                  backgroundColor: isSelected
+                    ? "var(--bg-tertiary)"
+                    : "transparent",
                 }}
                 role="option"
                 aria-selected={isSelected}
                 aria-label={mode.label}
+                data-popover-focus={isSelected ? "" : undefined}
               >
                 <ModeIcon size={16} />
                 <span className="text-sm">{shortLabel}</span>
@@ -160,7 +168,7 @@ const ViewModeToggle = ({ modes, value = "grid", onChange, className = "" }: Pro
             );
           })}
         </div>
-      )}
+      </Popover>
     </div>
   );
 };

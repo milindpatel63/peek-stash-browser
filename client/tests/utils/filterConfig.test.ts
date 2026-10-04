@@ -4,12 +4,34 @@
  * Tests that filter builder functions correctly transform UI filter values
  * into the GraphQL filter format expected by the backend
  */
-import { describe, it, expect } from "vitest";
 import {
-  buildSceneFilter,
+  type EntityKind,
+  type FieldSpec,
+  LIST_FIELDS,
+  LIST_KINDS,
+  type ListKind,
+  UI_KEYS,
+} from "@peek/shared-types";
+import { must } from "@tests/testUtils";
+import { describe, expect, it } from "vitest";
+import {
+  CLIP_FILTER_OPTIONS,
+  type FilterOption,
+  GALLERY_FILTER_OPTIONS,
+  GROUP_FILTER_OPTIONS,
+  IMAGE_FILTER_OPTIONS,
+  PERFORMER_FILTER_OPTIONS,
+  SCENE_FILTER_OPTIONS,
+  STUDIO_FILTER_OPTIONS,
+  TAG_FILTER_OPTIONS,
+  buildClipFilter,
   buildGalleryFilter,
+  buildGroupFilter,
   buildImageFilter,
   buildPerformerFilter,
+  buildSceneFilter,
+  buildStudioFilter,
+  buildTagFilter,
 } from "../../src/utils/filterConfig";
 
 describe("buildSceneFilter", () => {
@@ -174,16 +196,13 @@ describe("buildSceneFilter", () => {
       });
     });
 
-    it("should build galleries filter with INCLUDES modifier", () => {
+    it("sends galleries for the scene panel's Galleries picker", () => {
       const uiFilters = {
         galleryIds: ["1"],
         galleryIdsModifier: "INCLUDES",
       };
       const result = buildSceneFilter(uiFilters);
-      expect(result.galleries).toEqual({
-        value: ["1"],
-        modifier: "INCLUDES",
-      });
+      expect(result.galleries).toEqual({ value: ["1"], modifier: "INCLUDES" });
     });
 
     it("should build galleries filter from permanent filters", () => {
@@ -214,25 +233,25 @@ describe("buildSceneFilter", () => {
       });
     });
 
-    it("should build rating100 filter with GREATER_THAN modifier (min only)", () => {
+    it("should build rating100 filter with a lone minimum as BETWEEN (min only)", () => {
       const uiFilters = {
         rating: { min: 50 },
       };
       const result = buildSceneFilter(uiFilters);
       expect(result.rating100).toEqual({
-        value: 49, // min - 1
-        modifier: "GREATER_THAN",
+        value: 50,
+        modifier: "BETWEEN",
       });
     });
 
-    it("should build rating100 filter with LESS_THAN modifier (max only)", () => {
+    it("should build rating100 filter with a lone maximum as BETWEEN (max only)", () => {
       const uiFilters = {
         rating: { max: 50 },
       };
       const result = buildSceneFilter(uiFilters);
       expect(result.rating100).toEqual({
-        value: 51, // max + 1
-        modifier: "LESS_THAN",
+        value2: 50,
+        modifier: "BETWEEN",
       });
     });
 
@@ -260,14 +279,14 @@ describe("buildSceneFilter", () => {
       });
     });
 
-    it("should build play_count filter with GREATER_THAN modifier", () => {
+    it("should build play_count filter with a lone minimum as BETWEEN", () => {
       const uiFilters = {
         playCount: { min: 10 },
       };
       const result = buildSceneFilter(uiFilters);
       expect(result.play_count).toEqual({
-        value: 9, // min - 1
-        modifier: "GREATER_THAN",
+        value: 10,
+        modifier: "BETWEEN",
       });
     });
 
@@ -283,14 +302,14 @@ describe("buildSceneFilter", () => {
       });
     });
 
-    it("should build framerate filter with LESS_THAN modifier", () => {
+    it("should build framerate filter with a lone maximum as BETWEEN", () => {
       const uiFilters = {
         framerate: { max: 60 },
       };
       const result = buildSceneFilter(uiFilters);
       expect(result.framerate).toEqual({
-        value: 61, // max + 1
-        modifier: "LESS_THAN",
+        value2: 60,
+        modifier: "BETWEEN",
       });
     });
 
@@ -306,14 +325,14 @@ describe("buildSceneFilter", () => {
       });
     });
 
-    it("should build tag_count filter with GREATER_THAN modifier", () => {
+    it("should build tag_count filter with a lone minimum as BETWEEN", () => {
       const uiFilters = {
         tagCount: { min: 3 },
       };
       const result = buildSceneFilter(uiFilters);
       expect(result.tag_count).toEqual({
-        value: 2, // min - 1
-        modifier: "GREATER_THAN",
+        value: 3,
+        modifier: "BETWEEN",
       });
     });
   });
@@ -331,14 +350,14 @@ describe("buildSceneFilter", () => {
       });
     });
 
-    it("should build created_at filter with GREATER_THAN modifier (start only)", () => {
+    it("should build created_at filter with a lone minimum as BETWEEN (start only)", () => {
       const uiFilters = {
         createdAt: { start: "2024-01-01" },
       };
       const result = buildSceneFilter(uiFilters);
       expect(result.created_at).toEqual({
         value: "2024-01-01",
-        modifier: "GREATER_THAN",
+        modifier: "BETWEEN",
       });
     });
 
@@ -366,14 +385,14 @@ describe("buildSceneFilter", () => {
       });
     });
 
-    it("should build date filter with GREATER_THAN modifier (start only)", () => {
+    it("should build date filter with a lone minimum as BETWEEN (start only)", () => {
       const uiFilters = {
         date: { start: "2024-01-01" },
       };
       const result = buildSceneFilter(uiFilters);
       expect(result.date).toEqual({
         value: "2024-01-01",
-        modifier: "GREATER_THAN",
+        modifier: "BETWEEN",
       });
     });
   });
@@ -418,21 +437,29 @@ describe("buildSceneFilter", () => {
 
   describe("Resolution Filter", () => {
     it("should build resolution filter with EQUALS modifier", () => {
-      const uiFilters = { resolution: "1080" };
+      const uiFilters = { resolution: "FULL_HD" };
       const result = buildSceneFilter(uiFilters);
       expect(result.resolution).toEqual({
-        value: "1080",
+        value: "FULL_HD",
         modifier: "EQUALS",
       });
     });
 
-    it("should build resolution filter for 720p", () => {
-      const uiFilters = { resolution: "720" };
+    it("should build resolution filter for 720p with its modifier", () => {
+      const uiFilters = {
+        resolution: "STANDARD_HD",
+        resolutionModifier: "GREATER_THAN",
+      };
       const result = buildSceneFilter(uiFilters);
       expect(result.resolution).toEqual({
-        value: "720",
-        modifier: "EQUALS",
+        value: "STANDARD_HD",
+        modifier: "GREATER_THAN",
       });
+    });
+
+    it("sends no resolution the contract does not name (a stale URL's 1080)", () => {
+      const result = buildSceneFilter({ resolution: "1080" });
+      expect(result.resolution).toBeUndefined();
     });
   });
 
@@ -520,14 +547,14 @@ describe("buildGalleryFilter", () => {
       });
     });
 
-    it("should build date filter with GREATER_THAN modifier when only start provided", () => {
+    it("should build date filter with a lone minimum as BETWEEN when only start provided", () => {
       const uiFilters = {
         date: { start: "2024-03-15" },
       };
       const result = buildGalleryFilter(uiFilters);
       expect(result.date).toEqual({
         value: "2024-03-15",
-        modifier: "GREATER_THAN",
+        modifier: "BETWEEN",
       });
     });
 
@@ -595,9 +622,10 @@ describe("buildGalleryFilter", () => {
         value2: "2024-12-31",
         modifier: "BETWEEN",
       });
+      // Untouched, the option's default (Has ALL), as the panel shows it
       expect(result.tags).toEqual({
         value: ["1"],
-        modifier: "INCLUDES",
+        modifier: "INCLUDES_ALL",
       });
     });
   });
@@ -617,14 +645,14 @@ describe("buildImageFilter", () => {
       });
     });
 
-    it("should build date filter with GREATER_THAN modifier when only start provided", () => {
+    it("should build date filter with a lone minimum as BETWEEN when only start provided", () => {
       const uiFilters = {
         date: { start: "2024-06-01" },
       };
       const result = buildImageFilter(uiFilters);
       expect(result.date).toEqual({
         value: "2024-06-01",
-        modifier: "GREATER_THAN",
+        modifier: "BETWEEN",
       });
     });
 
@@ -673,6 +701,27 @@ describe("buildImageFilter", () => {
         modifier: "INCLUDES",
       });
     });
+
+    it("a detail page's fixed performers, studios and galleries criteria reach the filter", () => {
+      const result = buildImageFilter({
+        performers: { value: ["1:a"], modifier: "INCLUDES" },
+        studios: { value: ["2:a"], modifier: "INCLUDES", depth: -1 },
+        galleries: { value: ["3:a"], modifier: "INCLUDES" },
+      });
+      expect(result.performers).toEqual({
+        value: ["1:a"],
+        modifier: "INCLUDES",
+      });
+      expect(result.studios).toEqual({
+        value: ["2:a"],
+        modifier: "INCLUDES",
+        depth: -1,
+      });
+      expect(result.galleries).toEqual({
+        value: ["3:a"],
+        modifier: "INCLUDES",
+      });
+    });
   });
 
   describe("Combined Filters with Date", () => {
@@ -709,19 +758,19 @@ describe("buildPerformerFilter", () => {
       });
     });
 
-    it("should build age filter with GREATER_THAN when only min provided", () => {
+    it("should build age filter with a lone minimum as BETWEEN when only min provided", () => {
       const result = buildPerformerFilter({ age: { min: 25 } });
       expect(result.age).toEqual({
-        modifier: "GREATER_THAN",
-        value: 24, // min - 1
+        modifier: "BETWEEN",
+        value: 25,
       });
     });
 
-    it("should build age filter with LESS_THAN when only max provided", () => {
+    it("should build age filter with a lone maximum as BETWEEN when only max provided", () => {
       const result = buildPerformerFilter({ age: { max: 30 } });
       expect(result.age).toEqual({
-        modifier: "LESS_THAN",
-        value: 31, // max + 1
+        modifier: "BETWEEN",
+        value2: 30,
       });
     });
   });
@@ -738,47 +787,47 @@ describe("buildPerformerFilter", () => {
       });
     });
 
-    it("should build birth_year filter with GREATER_THAN when only min provided", () => {
+    it("should build birth_year filter with a lone minimum as BETWEEN when only min provided", () => {
       const result = buildPerformerFilter({ birthYear: { min: 1990 } });
       expect(result.birth_year).toEqual({
-        modifier: "GREATER_THAN",
-        value: 1989,
+        modifier: "BETWEEN",
+        value: 1990,
       });
     });
 
-    it("should build birth_year filter with LESS_THAN when only max provided", () => {
+    it("should build birth_year filter with a lone maximum as BETWEEN when only max provided", () => {
       const result = buildPerformerFilter({ birthYear: { max: 2000 } });
       expect(result.birth_year).toEqual({
-        modifier: "LESS_THAN",
-        value: 2001,
+        modifier: "BETWEEN",
+        value2: 2000,
       });
     });
   });
 
   describe("Range Filters - deathYear", () => {
-    it("should build death_year filter with LESS_THAN when only max provided", () => {
+    it("should build death_year filter with a lone maximum as BETWEEN when only max provided", () => {
       const result = buildPerformerFilter({ deathYear: { max: 2020 } });
       expect(result.death_year).toEqual({
-        modifier: "LESS_THAN",
-        value: 2021,
+        modifier: "BETWEEN",
+        value2: 2020,
       });
     });
 
-    it("should build death_year filter with GREATER_THAN when only min provided", () => {
+    it("should build death_year filter with a lone minimum as BETWEEN when only min provided", () => {
       const result = buildPerformerFilter({ deathYear: { min: 2010 } });
       expect(result.death_year).toEqual({
-        modifier: "GREATER_THAN",
-        value: 2009,
+        modifier: "BETWEEN",
+        value: 2010,
       });
     });
   });
 
   describe("Range Filters - careerLength", () => {
-    it("should build career_length filter with LESS_THAN when only max provided", () => {
+    it("should build career_length filter with a lone maximum as BETWEEN when only max provided", () => {
       const result = buildPerformerFilter({ careerLength: { max: 15 } });
       expect(result.career_length).toEqual({
-        modifier: "LESS_THAN",
-        value: 16,
+        modifier: "BETWEEN",
+        value2: 15,
       });
     });
 
@@ -804,47 +853,47 @@ describe("buildPerformerFilter", () => {
       });
     });
 
-    it("should build height filter with GREATER_THAN when only min provided", () => {
+    it("should build height filter with a lone minimum as BETWEEN when only min provided", () => {
       const result = buildPerformerFilter({ height: { min: 170 } });
       expect(result.height).toEqual({
-        modifier: "GREATER_THAN",
-        value: 169,
+        modifier: "BETWEEN",
+        value: 170,
       });
     });
 
-    it("should build height filter with LESS_THAN when only max provided", () => {
+    it("should build height filter with a lone maximum as BETWEEN when only max provided", () => {
       const result = buildPerformerFilter({ height: { max: 180 } });
       expect(result.height).toEqual({
-        modifier: "LESS_THAN",
-        value: 181,
+        modifier: "BETWEEN",
+        value2: 180,
       });
     });
   });
 
   describe("Range Filters - weight (uses convertedFilters)", () => {
-    it("should build weight filter with LESS_THAN when only max provided", () => {
+    it("should build weight filter with a lone maximum as BETWEEN when only max provided", () => {
       const result = buildPerformerFilter({ weight: { max: 80 } });
       expect(result.weight).toEqual({
-        modifier: "LESS_THAN",
-        value: 81,
+        modifier: "BETWEEN",
+        value2: 80,
       });
     });
 
-    it("should build weight filter with GREATER_THAN when only min provided", () => {
+    it("should build weight filter with a lone minimum as BETWEEN when only min provided", () => {
       const result = buildPerformerFilter({ weight: { min: 60 } });
       expect(result.weight).toEqual({
-        modifier: "GREATER_THAN",
-        value: 59,
+        modifier: "BETWEEN",
+        value: 60,
       });
     });
   });
 
   describe("Range Filters - penisLength (uses convertedFilters)", () => {
-    it("should build penis_length filter with LESS_THAN when only max provided", () => {
+    it("should build penis_length filter with a lone maximum as BETWEEN when only max provided", () => {
       const result = buildPerformerFilter({ penisLength: { max: 20 } });
       expect(result.penis_length).toEqual({
-        modifier: "LESS_THAN",
-        value: 21,
+        modifier: "BETWEEN",
+        value2: 20,
       });
     });
 
@@ -870,19 +919,19 @@ describe("buildPerformerFilter", () => {
       });
     });
 
-    it("should build rating100 with GREATER_THAN when only min provided", () => {
+    it("should build rating100 with a lone minimum as BETWEEN when only min provided", () => {
       const result = buildPerformerFilter({ rating: { min: 60 } });
       expect(result.rating100).toEqual({
-        modifier: "GREATER_THAN",
-        value: 59,
+        modifier: "BETWEEN",
+        value: 60,
       });
     });
 
-    it("should build rating100 with LESS_THAN when only max provided", () => {
+    it("should build rating100 with a lone maximum as BETWEEN when only max provided", () => {
       const result = buildPerformerFilter({ rating: { max: 80 } });
       expect(result.rating100).toEqual({
-        modifier: "LESS_THAN",
-        value: 81,
+        modifier: "BETWEEN",
+        value2: 80,
       });
     });
   });
@@ -897,29 +946,29 @@ describe("buildPerformerFilter", () => {
       });
     });
 
-    it("should build o_counter with LESS_THAN when only max provided", () => {
+    it("should build o_counter with a lone maximum as BETWEEN when only max provided", () => {
       const result = buildPerformerFilter({ oCounter: { max: 5 } });
       expect(result.o_counter).toEqual({
-        modifier: "LESS_THAN",
-        value: 6,
+        modifier: "BETWEEN",
+        value2: 5,
       });
     });
   });
 
   describe("Range Filters - play_count (conditional assignment pattern)", () => {
-    it("should build play_count with GREATER_THAN when only min provided", () => {
+    it("should build play_count with a lone minimum as BETWEEN when only min provided", () => {
       const result = buildPerformerFilter({ playCount: { min: 10 } });
       expect(result.play_count).toEqual({
-        modifier: "GREATER_THAN",
-        value: 9,
+        modifier: "BETWEEN",
+        value: 10,
       });
     });
 
-    it("should build play_count with LESS_THAN when only max provided", () => {
+    it("should build play_count with a lone maximum as BETWEEN when only max provided", () => {
       const result = buildPerformerFilter({ playCount: { max: 20 } });
       expect(result.play_count).toEqual({
-        modifier: "LESS_THAN",
-        value: 21,
+        modifier: "BETWEEN",
+        value2: 20,
       });
     });
   });
@@ -936,11 +985,11 @@ describe("buildPerformerFilter", () => {
       });
     });
 
-    it("should build scene_count with LESS_THAN when only max provided", () => {
+    it("should build scene_count with a lone maximum as BETWEEN when only max provided", () => {
       const result = buildPerformerFilter({ sceneCount: { max: 25 } });
       expect(result.scene_count).toEqual({
-        modifier: "LESS_THAN",
-        value: 26,
+        modifier: "BETWEEN",
+        value2: 25,
       });
     });
   });
@@ -961,4 +1010,226 @@ describe("buildPerformerFilter", () => {
       expect(result.height).toBeUndefined();
     });
   });
+});
+
+/**
+ * The panel's requests follow the shared contract (item 38): what each
+ * builder sends is what the server's parser accepts, with the modifier the
+ * panel shows. The server walks the same options into SQL
+ * (`server/integration/api/filter-contract.integration.test.ts`).
+ */
+describe("filter requests follow the contract", () => {
+  type Build = (state: Record<string, unknown>) => unknown;
+
+  const LISTS: Record<
+    ListKind,
+    { options: readonly FilterOption[]; build: Build }
+  > = {
+    scene: { options: SCENE_FILTER_OPTIONS, build: buildSceneFilter },
+    performer: {
+      options: PERFORMER_FILTER_OPTIONS,
+      build: (state) => buildPerformerFilter(state),
+    },
+    studio: { options: STUDIO_FILTER_OPTIONS, build: buildStudioFilter },
+    tag: { options: TAG_FILTER_OPTIONS, build: buildTagFilter },
+    group: { options: GROUP_FILTER_OPTIONS, build: buildGroupFilter },
+    gallery: { options: GALLERY_FILTER_OPTIONS, build: buildGalleryFilter },
+    image: { options: IMAGE_FILTER_OPTIONS, build: buildImageFilter },
+    clip: { options: CLIP_FILTER_OPTIONS, build: buildClipFilter },
+  };
+
+  const ENTITY_LISTS = LIST_KINDS.filter(
+    (kind): kind is EntityKind => kind !== "clip"
+  );
+
+  /** Where a list's request carries the field a panel key fills */
+  const pathOf = (kind: ListKind, key: string): readonly string[] => {
+    const uiKey = must(
+      UI_KEYS[kind].find((candidate) => candidate.key === key),
+      `${kind} UI key ${key}`
+    );
+    const fields: Readonly<Record<string, FieldSpec>> = LIST_FIELDS[kind];
+    const spec = must(fields[uiKey.field], `${kind} field ${uiKey.field}`);
+    return spec.kind === "ref" && spec.path ? spec.path : [uiKey.field];
+  };
+
+  const readPath = (value: unknown, path: readonly string[]): unknown =>
+    path.reduce<unknown>(
+      (at, part) =>
+        typeof at === "object" && at !== null
+          ? (at as Record<string, unknown>)[part]
+          : undefined,
+      value
+    );
+
+  const optionsOfType = <K extends ListKind>(
+    type: string,
+    kinds: readonly K[]
+  ) =>
+    kinds.flatMap((kind) =>
+      LISTS[kind].options
+        .filter((option) => option.type === type)
+        .map((option) => ({ kind, option }))
+    );
+
+  const DATE_OPTIONS = optionsOfType("date-range", ENTITY_LISTS).map(
+    ({ kind, option }) => ({ kind, key: option.key })
+  );
+
+  it.each(DATE_OPTIONS)(
+    "an end-only $kind $key range sends a one-sided BETWEEN with value2 and a start-only one with value",
+    ({ kind, key }) => {
+      const { build } = LISTS[kind];
+      const path = pathOf(kind, key);
+
+      expect(readPath(build({ [key]: { end: "2024-12-31" } }), path)).toEqual({
+        modifier: "BETWEEN",
+        value2: "2024-12-31",
+      });
+      expect(readPath(build({ [key]: { start: "2020-01-01" } }), path)).toEqual(
+        { modifier: "BETWEEN", value: "2020-01-01" }
+      );
+      expect(
+        readPath(
+          build({ [key]: { start: "2020-01-01", end: "2024-12-31" } }),
+          path
+        )
+      ).toEqual({
+        modifier: "BETWEEN",
+        value: "2020-01-01",
+        value2: "2024-12-31",
+      });
+    }
+  );
+
+  const MULTI_SELECTS = optionsOfType("searchable-select", LIST_KINDS).filter(
+    ({ option }) => option.multi === true
+  );
+
+  /** The modifier a multi-select's request carries, and its ids */
+  const sentRef = (
+    kind: ListKind,
+    option: FilterOption,
+    state: Record<string, unknown>
+  ) => {
+    const sent = LISTS[kind].build(state);
+    const criterion = readPath(sent, pathOf(kind, option.key));
+    return {
+      value: readPath(criterion, ["value"]),
+      modifier: readPath(criterion, ["modifier"]),
+    };
+  };
+
+  it.each(MULTI_SELECTS.map(({ kind, option }) => ({ kind, option })))(
+    "every multi-select sends its modifier, which is the defaultModifier when untouched: $kind $option.key",
+    ({ kind, option }) => {
+      // Playlist ids are Peek's own: sent as numbers
+      const playlists = option.entityType === "playlists";
+      const ids = playlists ? ["10", "11"] : ["10:server-a", "11:server-a"];
+      const sentIds = playlists ? [10, 11] : ids;
+
+      expect(sentRef(kind, option, { [option.key]: ids })).toEqual({
+        value: sentIds,
+        modifier: option.defaultModifier ?? "INCLUDES",
+      });
+      for (const { value: modifier } of option.modifierOptions ?? []) {
+        // Has none and Has any are sent with no ids
+        const presence = modifier === "IS_NULL" || modifier === "NOT_NULL";
+        expect(
+          sentRef(kind, option, {
+            [option.key]: ids,
+            [must(option.modifierKey, `${option.key} modifierKey`)]: modifier,
+          })
+        ).toEqual({ value: presence ? undefined : sentIds, modifier });
+      }
+    }
+  );
+
+  it("clip tag, scene tag and performer filters send their modifiers", () => {
+    expect(
+      buildClipFilter({
+        tagIds: ["1:server-a"],
+        tagIdsModifier: "EXCLUDES",
+        sceneTagIds: ["2:server-a", "3:server-a"],
+        sceneTagIdsModifier: "INCLUDES_ALL",
+        performerIds: ["4:server-a"],
+        performerIdsModifier: "EXCLUDES",
+      })
+    ).toEqual({
+      tags: { value: ["1:server-a"], modifier: "EXCLUDES" },
+      scene_tags: {
+        value: ["2:server-a", "3:server-a"],
+        modifier: "INCLUDES_ALL",
+      },
+      performers: { value: ["4:server-a"], modifier: "EXCLUDES" },
+      is_generated: true,
+    });
+  });
+
+  it("clips list with a preview until the panel picks otherwise, and All clips sends no is_generated", () => {
+    const isGenerated = must(
+      CLIP_FILTER_OPTIONS.find((option) => option.key === "isGenerated"),
+      "the clip isGenerated option"
+    );
+    const allClips = must(
+      isGenerated.options?.find((choice) => choice.label === "All clips"),
+      "the All clips choice"
+    );
+
+    expect(buildClipFilter({})).toEqual({ is_generated: true });
+    expect(buildClipFilter({ isGenerated: "true" })).toEqual({
+      is_generated: true,
+    });
+    expect(buildClipFilter({ isGenerated: "false" })).toEqual({
+      is_generated: false,
+    });
+    // The panel stores "" as no choice, so All clips needs a value of its own
+    expect(allClips.value).not.toBe("");
+    expect(buildClipFilter({ isGenerated: allClips.value })).toEqual({});
+  });
+
+  it.each([
+    ["gallery", GALLERY_FILTER_OPTIONS],
+    ["image", IMAGE_FILTER_OPTIONS],
+  ] as const)(
+    "%s studio options offer Has ANY and Has NONE, then Has none and Has any",
+    (_kind, options) => {
+      const studios = must(
+        options.find((option) => option.key === "studioIds"),
+        "the studioIds option"
+      );
+
+      expect(studios.modifierOptions).toEqual([
+        { value: "INCLUDES", label: "Has ANY of these" },
+        { value: "EXCLUDES", label: "Has NONE of these" },
+        { value: "IS_NULL", label: "Has none" },
+        { value: "NOT_NULL", label: "Has any" },
+      ]);
+    }
+  );
+
+  it("the Scene picker is gone from Tags and Collections, and performers send no scene_filter", () => {
+    const keys = (options: readonly FilterOption[]) =>
+      options.map((option) => option.key);
+
+    expect(keys(TAG_FILTER_OPTIONS)).not.toContain("sceneId");
+    expect(keys(GROUP_FILTER_OPTIONS)).not.toContain("sceneId");
+    expect(buildPerformerFilter({ sceneId: "1:server-a" })).toEqual({});
+    // The performers' Collections is the performer filter's own `groups`
+    expect(buildPerformerFilter({ groupIds: ["2:server-a"] })).toEqual({
+      groups: { value: ["2:server-a"], modifier: "INCLUDES" },
+    });
+  });
+
+  it.each([
+    ["gallery", buildGalleryFilter],
+    ["image", buildImageFilter],
+  ] as const)(
+    "the %s folder view's tag reaches the request, with its sub-tags",
+    (_kind, build) => {
+      const folder = { value: ["5:server-a"], modifier: "INCLUDES", depth: -1 };
+
+      expect(build({ tags: folder }).tags).toEqual(folder);
+    }
+  );
 });

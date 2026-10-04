@@ -4,15 +4,14 @@
  * Tests the compile-time branded type system and runtime utilities for
  * composite entity keys ("entityId:instanceId" format).
  */
-import { describe, it, expect } from "vitest";
 import {
+  type InstanceAwareId,
+  assertEntityRef,
+  isEntityRef,
   makeEntityRef,
   parseEntityRef,
-  isEntityRef,
-  assertEntityRef,
-  coerceEntityRefs,
-  type InstanceAwareId,
 } from "@peek/shared-types/instanceAwareId.js";
+import { describe, expect, it } from "vitest";
 
 describe("makeEntityRef", () => {
   it("creates a composite key from string id and instanceId", () => {
@@ -103,11 +102,9 @@ describe("isEntityRef", () => {
 
   it("narrows the type to InstanceAwareId", () => {
     const value = "82:server-1";
-    if (isEntityRef(value)) {
-      // This assignment should compile — isEntityRef is a type guard
-      const _ref: InstanceAwareId = value;
-      expect(_ref).toBe("82:server-1");
-    }
+    // This assignment compiles only because isEntityRef is a type guard
+    const ref: InstanceAwareId | null = isEntityRef(value) ? value : null;
+    expect(ref).toBe("82:server-1");
   });
 });
 
@@ -131,24 +128,5 @@ describe("assertEntityRef", () => {
 
   it("accepts keys with empty instanceId (colon present)", () => {
     expect(() => assertEntityRef("82:")).not.toThrow();
-  });
-});
-
-describe("coerceEntityRefs", () => {
-  it("returns the same array as InstanceAwareId[]", () => {
-    const input = ["82:server-1", "83:server-2"];
-    const result = coerceEntityRefs(input);
-    expect(result).toBe(input); // same reference
-  });
-
-  it("works with empty arrays", () => {
-    const result = coerceEntityRefs([]);
-    expect(result).toEqual([]);
-  });
-
-  it("preserves mixed bare and composite keys", () => {
-    const input = ["82:server-1", "83"];
-    const result = coerceEntityRefs(input);
-    expect(result).toEqual(["82:server-1", "83"]);
   });
 });

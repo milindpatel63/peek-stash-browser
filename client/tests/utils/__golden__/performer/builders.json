@@ -1,0 +1,4669 @@
+{
+  "samples": [
+    {
+      "label": "name: text",
+      "state": {
+        "name": "contract"
+      },
+      "request": {
+        "name": {
+          "value": "contract",
+          "modifier": "INCLUDES"
+        }
+      }
+    },
+    {
+      "label": "tagIds: INCLUDES_ALL one id",
+      "state": {
+        "tagIds": [
+          "1:inst-a"
+        ],
+        "tagIdsModifier": "INCLUDES_ALL"
+      },
+      "request": {
+        "tags": {
+          "value": [
+            "1:inst-a"
+          ],
+          "modifier": "INCLUDES_ALL"
+        }
+      }
+    },
+    {
+      "label": "tagIds: INCLUDES_ALL two ids",
+      "state": {
+        "tagIds": [
+          "1:inst-a",
+          "2:inst-b"
+        ],
+        "tagIdsModifier": "INCLUDES_ALL"
+      },
+      "request": {
+        "tags": {
+          "value": [
+            "1:inst-a",
+            "2:inst-b"
+          ],
+          "modifier": "INCLUDES_ALL"
+        }
+      }
+    },
+    {
+      "label": "tagIds: INCLUDES_ALL one id, with sub-items",
+      "state": {
+        "tagIds": [
+          "1:inst-a"
+        ],
+        "tagIdsDepth": -1,
+        "tagIdsModifier": "INCLUDES_ALL"
+      },
+      "request": {
+        "tags": {
+          "value": [
+            "1:inst-a"
+          ],
+          "modifier": "INCLUDES_ALL",
+          "depth": -1
+        }
+      }
+    },
+    {
+      "label": "tagIds: INCLUDES_ALL two ids, with sub-items",
+      "state": {
+        "tagIds": [
+          "1:inst-a",
+          "2:inst-b"
+        ],
+        "tagIdsDepth": -1,
+        "tagIdsModifier": "INCLUDES_ALL"
+      },
+      "request": {
+        "tags": {
+          "value": [
+            "1:inst-a",
+            "2:inst-b"
+          ],
+          "modifier": "INCLUDES_ALL",
+          "depth": -1
+        }
+      }
+    },
+    {
+      "label": "tagIds: INCLUDES one id",
+      "state": {
+        "tagIds": [
+          "1:inst-a"
+        ],
+        "tagIdsModifier": "INCLUDES"
+      },
+      "request": {
+        "tags": {
+          "value": [
+            "1:inst-a"
+          ],
+          "modifier": "INCLUDES"
+        }
+      }
+    },
+    {
+      "label": "tagIds: INCLUDES two ids",
+      "state": {
+        "tagIds": [
+          "1:inst-a",
+          "2:inst-b"
+        ],
+        "tagIdsModifier": "INCLUDES"
+      },
+      "request": {
+        "tags": {
+          "value": [
+            "1:inst-a",
+            "2:inst-b"
+          ],
+          "modifier": "INCLUDES"
+        }
+      }
+    },
+    {
+      "label": "tagIds: INCLUDES one id, with sub-items",
+      "state": {
+        "tagIds": [
+          "1:inst-a"
+        ],
+        "tagIdsDepth": -1,
+        "tagIdsModifier": "INCLUDES"
+      },
+      "request": {
+        "tags": {
+          "value": [
+            "1:inst-a"
+          ],
+          "modifier": "INCLUDES",
+          "depth": -1
+        }
+      }
+    },
+    {
+      "label": "tagIds: INCLUDES two ids, with sub-items",
+      "state": {
+        "tagIds": [
+          "1:inst-a",
+          "2:inst-b"
+        ],
+        "tagIdsDepth": -1,
+        "tagIdsModifier": "INCLUDES"
+      },
+      "request": {
+        "tags": {
+          "value": [
+            "1:inst-a",
+            "2:inst-b"
+          ],
+          "modifier": "INCLUDES",
+          "depth": -1
+        }
+      }
+    },
+    {
+      "label": "tagIds: EXCLUDES one id",
+      "state": {
+        "tagIds": [
+          "1:inst-a"
+        ],
+        "tagIdsModifier": "EXCLUDES"
+      },
+      "request": {
+        "tags": {
+          "value": [
+            "1:inst-a"
+          ],
+          "modifier": "EXCLUDES"
+        }
+      }
+    },
+    {
+      "label": "tagIds: EXCLUDES two ids",
+      "state": {
+        "tagIds": [
+          "1:inst-a",
+          "2:inst-b"
+        ],
+        "tagIdsModifier": "EXCLUDES"
+      },
+      "request": {
+        "tags": {
+          "value": [
+            "1:inst-a",
+            "2:inst-b"
+          ],
+          "modifier": "EXCLUDES"
+        }
+      }
+    },
+    {
+      "label": "tagIds: EXCLUDES one id, with sub-items",
+      "state": {
+        "tagIds": [
+          "1:inst-a"
+        ],
+        "tagIdsDepth": -1,
+        "tagIdsModifier": "EXCLUDES"
+      },
+      "request": {
+        "tags": {
+          "value": [
+            "1:inst-a"
+          ],
+          "modifier": "EXCLUDES",
+          "depth": -1
+        }
+      }
+    },
+    {
+      "label": "tagIds: EXCLUDES two ids, with sub-items",
+      "state": {
+        "tagIds": [
+          "1:inst-a",
+          "2:inst-b"
+        ],
+        "tagIdsDepth": -1,
+        "tagIdsModifier": "EXCLUDES"
+      },
+      "request": {
+        "tags": {
+          "value": [
+            "1:inst-a",
+            "2:inst-b"
+          ],
+          "modifier": "EXCLUDES",
+          "depth": -1
+        }
+      }
+    },
+    {
+      "label": "tagIds: IS_NULL one id",
+      "state": {
+        "tagIds": [
+          "1:inst-a"
+        ],
+        "tagIdsModifier": "IS_NULL"
+      },
+      "request": {
+        "tags": {
+          "modifier": "IS_NULL"
+        }
+      }
+    },
+    {
+      "label": "tagIds: IS_NULL two ids",
+      "state": {
+        "tagIds": [
+          "1:inst-a",
+          "2:inst-b"
+        ],
+        "tagIdsModifier": "IS_NULL"
+      },
+      "request": {
+        "tags": {
+          "modifier": "IS_NULL"
+        }
+      }
+    },
+    {
+      "label": "tagIds: IS_NULL one id, with sub-items",
+      "state": {
+        "tagIds": [
+          "1:inst-a"
+        ],
+        "tagIdsDepth": -1,
+        "tagIdsModifier": "IS_NULL"
+      },
+      "request": {
+        "tags": {
+          "modifier": "IS_NULL"
+        }
+      }
+    },
+    {
+      "label": "tagIds: IS_NULL two ids, with sub-items",
+      "state": {
+        "tagIds": [
+          "1:inst-a",
+          "2:inst-b"
+        ],
+        "tagIdsDepth": -1,
+        "tagIdsModifier": "IS_NULL"
+      },
+      "request": {
+        "tags": {
+          "modifier": "IS_NULL"
+        }
+      }
+    },
+    {
+      "label": "tagIds: NOT_NULL one id",
+      "state": {
+        "tagIds": [
+          "1:inst-a"
+        ],
+        "tagIdsModifier": "NOT_NULL"
+      },
+      "request": {
+        "tags": {
+          "modifier": "NOT_NULL"
+        }
+      }
+    },
+    {
+      "label": "tagIds: NOT_NULL two ids",
+      "state": {
+        "tagIds": [
+          "1:inst-a",
+          "2:inst-b"
+        ],
+        "tagIdsModifier": "NOT_NULL"
+      },
+      "request": {
+        "tags": {
+          "modifier": "NOT_NULL"
+        }
+      }
+    },
+    {
+      "label": "tagIds: NOT_NULL one id, with sub-items",
+      "state": {
+        "tagIds": [
+          "1:inst-a"
+        ],
+        "tagIdsDepth": -1,
+        "tagIdsModifier": "NOT_NULL"
+      },
+      "request": {
+        "tags": {
+          "modifier": "NOT_NULL"
+        }
+      }
+    },
+    {
+      "label": "tagIds: NOT_NULL two ids, with sub-items",
+      "state": {
+        "tagIds": [
+          "1:inst-a",
+          "2:inst-b"
+        ],
+        "tagIdsDepth": -1,
+        "tagIdsModifier": "NOT_NULL"
+      },
+      "request": {
+        "tags": {
+          "modifier": "NOT_NULL"
+        }
+      }
+    },
+    {
+      "label": "tagIds: one id",
+      "state": {
+        "tagIds": [
+          "1:inst-a"
+        ]
+      },
+      "request": {
+        "tags": {
+          "value": [
+            "1:inst-a"
+          ],
+          "modifier": "INCLUDES_ALL"
+        }
+      }
+    },
+    {
+      "label": "tagIds: two ids",
+      "state": {
+        "tagIds": [
+          "1:inst-a",
+          "2:inst-b"
+        ]
+      },
+      "request": {
+        "tags": {
+          "value": [
+            "1:inst-a",
+            "2:inst-b"
+          ],
+          "modifier": "INCLUDES_ALL"
+        }
+      }
+    },
+    {
+      "label": "tagIds: one id, with sub-items",
+      "state": {
+        "tagIds": [
+          "1:inst-a"
+        ],
+        "tagIdsDepth": -1
+      },
+      "request": {
+        "tags": {
+          "value": [
+            "1:inst-a"
+          ],
+          "modifier": "INCLUDES_ALL",
+          "depth": -1
+        }
+      }
+    },
+    {
+      "label": "tagIds: two ids, with sub-items",
+      "state": {
+        "tagIds": [
+          "1:inst-a",
+          "2:inst-b"
+        ],
+        "tagIdsDepth": -1
+      },
+      "request": {
+        "tags": {
+          "value": [
+            "1:inst-a",
+            "2:inst-b"
+          ],
+          "modifier": "INCLUDES_ALL",
+          "depth": -1
+        }
+      }
+    },
+    {
+      "label": "tagFavorite: true",
+      "state": {
+        "tagFavorite": "true"
+      },
+      "request": {
+        "tag_favorite": true
+      }
+    },
+    {
+      "label": "tagFavorite: false",
+      "state": {
+        "tagFavorite": "false"
+      },
+      "request": {
+        "tag_favorite": false
+      }
+    },
+    {
+      "label": "gender: INCLUDES MALE",
+      "state": {
+        "gender": [
+          "MALE"
+        ],
+        "genderModifier": "INCLUDES"
+      },
+      "request": {
+        "gender": {
+          "value": [
+            "MALE"
+          ],
+          "modifier": "INCLUDES"
+        }
+      }
+    },
+    {
+      "label": "gender: INCLUDES FEMALE",
+      "state": {
+        "gender": [
+          "FEMALE"
+        ],
+        "genderModifier": "INCLUDES"
+      },
+      "request": {
+        "gender": {
+          "value": [
+            "FEMALE"
+          ],
+          "modifier": "INCLUDES"
+        }
+      }
+    },
+    {
+      "label": "gender: INCLUDES TRANSGENDER_MALE",
+      "state": {
+        "gender": [
+          "TRANSGENDER_MALE"
+        ],
+        "genderModifier": "INCLUDES"
+      },
+      "request": {
+        "gender": {
+          "value": [
+            "TRANSGENDER_MALE"
+          ],
+          "modifier": "INCLUDES"
+        }
+      }
+    },
+    {
+      "label": "gender: INCLUDES TRANSGENDER_FEMALE",
+      "state": {
+        "gender": [
+          "TRANSGENDER_FEMALE"
+        ],
+        "genderModifier": "INCLUDES"
+      },
+      "request": {
+        "gender": {
+          "value": [
+            "TRANSGENDER_FEMALE"
+          ],
+          "modifier": "INCLUDES"
+        }
+      }
+    },
+    {
+      "label": "gender: INCLUDES INTERSEX",
+      "state": {
+        "gender": [
+          "INTERSEX"
+        ],
+        "genderModifier": "INCLUDES"
+      },
+      "request": {
+        "gender": {
+          "value": [
+            "INTERSEX"
+          ],
+          "modifier": "INCLUDES"
+        }
+      }
+    },
+    {
+      "label": "gender: INCLUDES NON_BINARY",
+      "state": {
+        "gender": [
+          "NON_BINARY"
+        ],
+        "genderModifier": "INCLUDES"
+      },
+      "request": {
+        "gender": {
+          "value": [
+            "NON_BINARY"
+          ],
+          "modifier": "INCLUDES"
+        }
+      }
+    },
+    {
+      "label": "gender: INCLUDES two values",
+      "state": {
+        "gender": [
+          "MALE",
+          "FEMALE"
+        ],
+        "genderModifier": "INCLUDES"
+      },
+      "request": {
+        "gender": {
+          "value": [
+            "MALE",
+            "FEMALE"
+          ],
+          "modifier": "INCLUDES"
+        }
+      }
+    },
+    {
+      "label": "gender: EXCLUDES MALE",
+      "state": {
+        "gender": [
+          "MALE"
+        ],
+        "genderModifier": "EXCLUDES"
+      },
+      "request": {
+        "gender": {
+          "value": [
+            "MALE"
+          ],
+          "modifier": "EXCLUDES"
+        }
+      }
+    },
+    {
+      "label": "gender: EXCLUDES FEMALE",
+      "state": {
+        "gender": [
+          "FEMALE"
+        ],
+        "genderModifier": "EXCLUDES"
+      },
+      "request": {
+        "gender": {
+          "value": [
+            "FEMALE"
+          ],
+          "modifier": "EXCLUDES"
+        }
+      }
+    },
+    {
+      "label": "gender: EXCLUDES TRANSGENDER_MALE",
+      "state": {
+        "gender": [
+          "TRANSGENDER_MALE"
+        ],
+        "genderModifier": "EXCLUDES"
+      },
+      "request": {
+        "gender": {
+          "value": [
+            "TRANSGENDER_MALE"
+          ],
+          "modifier": "EXCLUDES"
+        }
+      }
+    },
+    {
+      "label": "gender: EXCLUDES TRANSGENDER_FEMALE",
+      "state": {
+        "gender": [
+          "TRANSGENDER_FEMALE"
+        ],
+        "genderModifier": "EXCLUDES"
+      },
+      "request": {
+        "gender": {
+          "value": [
+            "TRANSGENDER_FEMALE"
+          ],
+          "modifier": "EXCLUDES"
+        }
+      }
+    },
+    {
+      "label": "gender: EXCLUDES INTERSEX",
+      "state": {
+        "gender": [
+          "INTERSEX"
+        ],
+        "genderModifier": "EXCLUDES"
+      },
+      "request": {
+        "gender": {
+          "value": [
+            "INTERSEX"
+          ],
+          "modifier": "EXCLUDES"
+        }
+      }
+    },
+    {
+      "label": "gender: EXCLUDES NON_BINARY",
+      "state": {
+        "gender": [
+          "NON_BINARY"
+        ],
+        "genderModifier": "EXCLUDES"
+      },
+      "request": {
+        "gender": {
+          "value": [
+            "NON_BINARY"
+          ],
+          "modifier": "EXCLUDES"
+        }
+      }
+    },
+    {
+      "label": "gender: EXCLUDES two values",
+      "state": {
+        "gender": [
+          "MALE",
+          "FEMALE"
+        ],
+        "genderModifier": "EXCLUDES"
+      },
+      "request": {
+        "gender": {
+          "value": [
+            "MALE",
+            "FEMALE"
+          ],
+          "modifier": "EXCLUDES"
+        }
+      }
+    },
+    {
+      "label": "gender: IS_NULL no value",
+      "state": {
+        "genderModifier": "IS_NULL"
+      },
+      "request": {
+        "gender": {
+          "modifier": "IS_NULL"
+        }
+      }
+    },
+    {
+      "label": "gender: NOT_NULL no value",
+      "state": {
+        "genderModifier": "NOT_NULL"
+      },
+      "request": {
+        "gender": {
+          "modifier": "NOT_NULL"
+        }
+      }
+    },
+    {
+      "label": "gender: MALE",
+      "state": {
+        "gender": [
+          "MALE"
+        ]
+      },
+      "request": {
+        "gender": {
+          "value": [
+            "MALE"
+          ],
+          "modifier": "INCLUDES"
+        }
+      }
+    },
+    {
+      "label": "gender: FEMALE",
+      "state": {
+        "gender": [
+          "FEMALE"
+        ]
+      },
+      "request": {
+        "gender": {
+          "value": [
+            "FEMALE"
+          ],
+          "modifier": "INCLUDES"
+        }
+      }
+    },
+    {
+      "label": "gender: TRANSGENDER_MALE",
+      "state": {
+        "gender": [
+          "TRANSGENDER_MALE"
+        ]
+      },
+      "request": {
+        "gender": {
+          "value": [
+            "TRANSGENDER_MALE"
+          ],
+          "modifier": "INCLUDES"
+        }
+      }
+    },
+    {
+      "label": "gender: TRANSGENDER_FEMALE",
+      "state": {
+        "gender": [
+          "TRANSGENDER_FEMALE"
+        ]
+      },
+      "request": {
+        "gender": {
+          "value": [
+            "TRANSGENDER_FEMALE"
+          ],
+          "modifier": "INCLUDES"
+        }
+      }
+    },
+    {
+      "label": "gender: INTERSEX",
+      "state": {
+        "gender": [
+          "INTERSEX"
+        ]
+      },
+      "request": {
+        "gender": {
+          "value": [
+            "INTERSEX"
+          ],
+          "modifier": "INCLUDES"
+        }
+      }
+    },
+    {
+      "label": "gender: NON_BINARY",
+      "state": {
+        "gender": [
+          "NON_BINARY"
+        ]
+      },
+      "request": {
+        "gender": {
+          "value": [
+            "NON_BINARY"
+          ],
+          "modifier": "INCLUDES"
+        }
+      }
+    },
+    {
+      "label": "gender: two values",
+      "state": {
+        "gender": [
+          "MALE",
+          "FEMALE"
+        ]
+      },
+      "request": {
+        "gender": {
+          "value": [
+            "MALE",
+            "FEMALE"
+          ],
+          "modifier": "INCLUDES"
+        }
+      }
+    },
+    {
+      "label": "rating: BETWEEN min only",
+      "state": {
+        "rating": {
+          "min": "25"
+        },
+        "ratingModifier": "BETWEEN"
+      },
+      "request": {
+        "rating100": {
+          "modifier": "BETWEEN",
+          "value": 25
+        }
+      }
+    },
+    {
+      "label": "rating: BETWEEN max only",
+      "state": {
+        "rating": {
+          "max": "75"
+        },
+        "ratingModifier": "BETWEEN"
+      },
+      "request": {
+        "rating100": {
+          "modifier": "BETWEEN",
+          "value2": 75
+        }
+      }
+    },
+    {
+      "label": "rating: BETWEEN min and max",
+      "state": {
+        "rating": {
+          "min": "25",
+          "max": "75"
+        },
+        "ratingModifier": "BETWEEN"
+      },
+      "request": {
+        "rating100": {
+          "modifier": "BETWEEN",
+          "value": 25,
+          "value2": 75
+        }
+      }
+    },
+    {
+      "label": "rating: IS_NULL min only",
+      "state": {
+        "rating": {
+          "min": "25"
+        },
+        "ratingModifier": "IS_NULL"
+      },
+      "request": {
+        "rating100": {
+          "modifier": "IS_NULL"
+        }
+      }
+    },
+    {
+      "label": "rating: IS_NULL max only",
+      "state": {
+        "rating": {
+          "max": "75"
+        },
+        "ratingModifier": "IS_NULL"
+      },
+      "request": {
+        "rating100": {
+          "modifier": "IS_NULL"
+        }
+      }
+    },
+    {
+      "label": "rating: IS_NULL min and max",
+      "state": {
+        "rating": {
+          "min": "25",
+          "max": "75"
+        },
+        "ratingModifier": "IS_NULL"
+      },
+      "request": {
+        "rating100": {
+          "modifier": "IS_NULL"
+        }
+      }
+    },
+    {
+      "label": "rating: NOT_NULL min only",
+      "state": {
+        "rating": {
+          "min": "25"
+        },
+        "ratingModifier": "NOT_NULL"
+      },
+      "request": {
+        "rating100": {
+          "modifier": "NOT_NULL"
+        }
+      }
+    },
+    {
+      "label": "rating: NOT_NULL max only",
+      "state": {
+        "rating": {
+          "max": "75"
+        },
+        "ratingModifier": "NOT_NULL"
+      },
+      "request": {
+        "rating100": {
+          "modifier": "NOT_NULL"
+        }
+      }
+    },
+    {
+      "label": "rating: NOT_NULL min and max",
+      "state": {
+        "rating": {
+          "min": "25",
+          "max": "75"
+        },
+        "ratingModifier": "NOT_NULL"
+      },
+      "request": {
+        "rating100": {
+          "modifier": "NOT_NULL"
+        }
+      }
+    },
+    {
+      "label": "rating: min only",
+      "state": {
+        "rating": {
+          "min": "25"
+        }
+      },
+      "request": {
+        "rating100": {
+          "modifier": "BETWEEN",
+          "value": 25
+        }
+      }
+    },
+    {
+      "label": "rating: max only",
+      "state": {
+        "rating": {
+          "max": "75"
+        }
+      },
+      "request": {
+        "rating100": {
+          "modifier": "BETWEEN",
+          "value2": 75
+        }
+      }
+    },
+    {
+      "label": "rating: min and max",
+      "state": {
+        "rating": {
+          "min": "25",
+          "max": "75"
+        }
+      },
+      "request": {
+        "rating100": {
+          "modifier": "BETWEEN",
+          "value": 25,
+          "value2": 75
+        }
+      }
+    },
+    {
+      "label": "oCounter: min only",
+      "state": {
+        "oCounter": {
+          "min": "250"
+        }
+      },
+      "request": {
+        "o_counter": {
+          "modifier": "BETWEEN",
+          "value": 250
+        }
+      }
+    },
+    {
+      "label": "oCounter: max only",
+      "state": {
+        "oCounter": {
+          "max": "750"
+        }
+      },
+      "request": {
+        "o_counter": {
+          "modifier": "BETWEEN",
+          "value2": 750
+        }
+      }
+    },
+    {
+      "label": "oCounter: min and max",
+      "state": {
+        "oCounter": {
+          "min": "250",
+          "max": "750"
+        }
+      },
+      "request": {
+        "o_counter": {
+          "modifier": "BETWEEN",
+          "value": 250,
+          "value2": 750
+        }
+      }
+    },
+    {
+      "label": "sceneCount: min only",
+      "state": {
+        "sceneCount": {
+          "min": "250"
+        }
+      },
+      "request": {
+        "scene_count": {
+          "modifier": "BETWEEN",
+          "value": 250
+        }
+      }
+    },
+    {
+      "label": "sceneCount: max only",
+      "state": {
+        "sceneCount": {
+          "max": "750"
+        }
+      },
+      "request": {
+        "scene_count": {
+          "modifier": "BETWEEN",
+          "value2": 750
+        }
+      }
+    },
+    {
+      "label": "sceneCount: min and max",
+      "state": {
+        "sceneCount": {
+          "min": "250",
+          "max": "750"
+        }
+      },
+      "request": {
+        "scene_count": {
+          "modifier": "BETWEEN",
+          "value": 250,
+          "value2": 750
+        }
+      }
+    },
+    {
+      "label": "favorite: checked",
+      "state": {
+        "favorite": true
+      },
+      "request": {
+        "favorite": true
+      }
+    },
+    {
+      "label": "studioIds: INCLUDES_ALL one id",
+      "state": {
+        "studioIds": [
+          "1:inst-a"
+        ],
+        "studioIdsModifier": "INCLUDES_ALL"
+      },
+      "request": {
+        "studios": {
+          "value": [
+            "1:inst-a"
+          ],
+          "modifier": "INCLUDES_ALL"
+        }
+      }
+    },
+    {
+      "label": "studioIds: INCLUDES_ALL two ids",
+      "state": {
+        "studioIds": [
+          "1:inst-a",
+          "2:inst-b"
+        ],
+        "studioIdsModifier": "INCLUDES_ALL"
+      },
+      "request": {
+        "studios": {
+          "value": [
+            "1:inst-a",
+            "2:inst-b"
+          ],
+          "modifier": "INCLUDES_ALL"
+        }
+      }
+    },
+    {
+      "label": "studioIds: INCLUDES_ALL one id, with sub-items",
+      "state": {
+        "studioIds": [
+          "1:inst-a"
+        ],
+        "studioIdsDepth": -1,
+        "studioIdsModifier": "INCLUDES_ALL"
+      },
+      "request": {
+        "studios": {
+          "value": [
+            "1:inst-a"
+          ],
+          "modifier": "INCLUDES_ALL",
+          "depth": -1
+        }
+      }
+    },
+    {
+      "label": "studioIds: INCLUDES_ALL two ids, with sub-items",
+      "state": {
+        "studioIds": [
+          "1:inst-a",
+          "2:inst-b"
+        ],
+        "studioIdsDepth": -1,
+        "studioIdsModifier": "INCLUDES_ALL"
+      },
+      "request": {
+        "studios": {
+          "value": [
+            "1:inst-a",
+            "2:inst-b"
+          ],
+          "modifier": "INCLUDES_ALL",
+          "depth": -1
+        }
+      }
+    },
+    {
+      "label": "studioIds: INCLUDES one id",
+      "state": {
+        "studioIds": [
+          "1:inst-a"
+        ],
+        "studioIdsModifier": "INCLUDES"
+      },
+      "request": {
+        "studios": {
+          "value": [
+            "1:inst-a"
+          ],
+          "modifier": "INCLUDES"
+        }
+      }
+    },
+    {
+      "label": "studioIds: INCLUDES two ids",
+      "state": {
+        "studioIds": [
+          "1:inst-a",
+          "2:inst-b"
+        ],
+        "studioIdsModifier": "INCLUDES"
+      },
+      "request": {
+        "studios": {
+          "value": [
+            "1:inst-a",
+            "2:inst-b"
+          ],
+          "modifier": "INCLUDES"
+        }
+      }
+    },
+    {
+      "label": "studioIds: INCLUDES one id, with sub-items",
+      "state": {
+        "studioIds": [
+          "1:inst-a"
+        ],
+        "studioIdsDepth": -1,
+        "studioIdsModifier": "INCLUDES"
+      },
+      "request": {
+        "studios": {
+          "value": [
+            "1:inst-a"
+          ],
+          "modifier": "INCLUDES",
+          "depth": -1
+        }
+      }
+    },
+    {
+      "label": "studioIds: INCLUDES two ids, with sub-items",
+      "state": {
+        "studioIds": [
+          "1:inst-a",
+          "2:inst-b"
+        ],
+        "studioIdsDepth": -1,
+        "studioIdsModifier": "INCLUDES"
+      },
+      "request": {
+        "studios": {
+          "value": [
+            "1:inst-a",
+            "2:inst-b"
+          ],
+          "modifier": "INCLUDES",
+          "depth": -1
+        }
+      }
+    },
+    {
+      "label": "studioIds: EXCLUDES one id",
+      "state": {
+        "studioIds": [
+          "1:inst-a"
+        ],
+        "studioIdsModifier": "EXCLUDES"
+      },
+      "request": {
+        "studios": {
+          "value": [
+            "1:inst-a"
+          ],
+          "modifier": "EXCLUDES"
+        }
+      }
+    },
+    {
+      "label": "studioIds: EXCLUDES two ids",
+      "state": {
+        "studioIds": [
+          "1:inst-a",
+          "2:inst-b"
+        ],
+        "studioIdsModifier": "EXCLUDES"
+      },
+      "request": {
+        "studios": {
+          "value": [
+            "1:inst-a",
+            "2:inst-b"
+          ],
+          "modifier": "EXCLUDES"
+        }
+      }
+    },
+    {
+      "label": "studioIds: EXCLUDES one id, with sub-items",
+      "state": {
+        "studioIds": [
+          "1:inst-a"
+        ],
+        "studioIdsDepth": -1,
+        "studioIdsModifier": "EXCLUDES"
+      },
+      "request": {
+        "studios": {
+          "value": [
+            "1:inst-a"
+          ],
+          "modifier": "EXCLUDES",
+          "depth": -1
+        }
+      }
+    },
+    {
+      "label": "studioIds: EXCLUDES two ids, with sub-items",
+      "state": {
+        "studioIds": [
+          "1:inst-a",
+          "2:inst-b"
+        ],
+        "studioIdsDepth": -1,
+        "studioIdsModifier": "EXCLUDES"
+      },
+      "request": {
+        "studios": {
+          "value": [
+            "1:inst-a",
+            "2:inst-b"
+          ],
+          "modifier": "EXCLUDES",
+          "depth": -1
+        }
+      }
+    },
+    {
+      "label": "studioIds: one id",
+      "state": {
+        "studioIds": [
+          "1:inst-a"
+        ]
+      },
+      "request": {
+        "studios": {
+          "value": [
+            "1:inst-a"
+          ],
+          "modifier": "INCLUDES"
+        }
+      }
+    },
+    {
+      "label": "studioIds: two ids",
+      "state": {
+        "studioIds": [
+          "1:inst-a",
+          "2:inst-b"
+        ]
+      },
+      "request": {
+        "studios": {
+          "value": [
+            "1:inst-a",
+            "2:inst-b"
+          ],
+          "modifier": "INCLUDES"
+        }
+      }
+    },
+    {
+      "label": "studioIds: one id, with sub-items",
+      "state": {
+        "studioIds": [
+          "1:inst-a"
+        ],
+        "studioIdsDepth": -1
+      },
+      "request": {
+        "studios": {
+          "value": [
+            "1:inst-a"
+          ],
+          "modifier": "INCLUDES",
+          "depth": -1
+        }
+      }
+    },
+    {
+      "label": "studioIds: two ids, with sub-items",
+      "state": {
+        "studioIds": [
+          "1:inst-a",
+          "2:inst-b"
+        ],
+        "studioIdsDepth": -1
+      },
+      "request": {
+        "studios": {
+          "value": [
+            "1:inst-a",
+            "2:inst-b"
+          ],
+          "modifier": "INCLUDES",
+          "depth": -1
+        }
+      }
+    },
+    {
+      "label": "groupIds: INCLUDES_ALL one id",
+      "state": {
+        "groupIds": [
+          "1:inst-a"
+        ],
+        "groupIdsModifier": "INCLUDES_ALL"
+      },
+      "request": {
+        "groups": {
+          "value": [
+            "1:inst-a"
+          ],
+          "modifier": "INCLUDES_ALL"
+        }
+      }
+    },
+    {
+      "label": "groupIds: INCLUDES_ALL two ids",
+      "state": {
+        "groupIds": [
+          "1:inst-a",
+          "2:inst-b"
+        ],
+        "groupIdsModifier": "INCLUDES_ALL"
+      },
+      "request": {
+        "groups": {
+          "value": [
+            "1:inst-a",
+            "2:inst-b"
+          ],
+          "modifier": "INCLUDES_ALL"
+        }
+      }
+    },
+    {
+      "label": "groupIds: INCLUDES one id",
+      "state": {
+        "groupIds": [
+          "1:inst-a"
+        ],
+        "groupIdsModifier": "INCLUDES"
+      },
+      "request": {
+        "groups": {
+          "value": [
+            "1:inst-a"
+          ],
+          "modifier": "INCLUDES"
+        }
+      }
+    },
+    {
+      "label": "groupIds: INCLUDES two ids",
+      "state": {
+        "groupIds": [
+          "1:inst-a",
+          "2:inst-b"
+        ],
+        "groupIdsModifier": "INCLUDES"
+      },
+      "request": {
+        "groups": {
+          "value": [
+            "1:inst-a",
+            "2:inst-b"
+          ],
+          "modifier": "INCLUDES"
+        }
+      }
+    },
+    {
+      "label": "groupIds: EXCLUDES one id",
+      "state": {
+        "groupIds": [
+          "1:inst-a"
+        ],
+        "groupIdsModifier": "EXCLUDES"
+      },
+      "request": {
+        "groups": {
+          "value": [
+            "1:inst-a"
+          ],
+          "modifier": "EXCLUDES"
+        }
+      }
+    },
+    {
+      "label": "groupIds: EXCLUDES two ids",
+      "state": {
+        "groupIds": [
+          "1:inst-a",
+          "2:inst-b"
+        ],
+        "groupIdsModifier": "EXCLUDES"
+      },
+      "request": {
+        "groups": {
+          "value": [
+            "1:inst-a",
+            "2:inst-b"
+          ],
+          "modifier": "EXCLUDES"
+        }
+      }
+    },
+    {
+      "label": "groupIds: one id",
+      "state": {
+        "groupIds": [
+          "1:inst-a"
+        ]
+      },
+      "request": {
+        "groups": {
+          "value": [
+            "1:inst-a"
+          ],
+          "modifier": "INCLUDES"
+        }
+      }
+    },
+    {
+      "label": "groupIds: two ids",
+      "state": {
+        "groupIds": [
+          "1:inst-a",
+          "2:inst-b"
+        ]
+      },
+      "request": {
+        "groups": {
+          "value": [
+            "1:inst-a",
+            "2:inst-b"
+          ],
+          "modifier": "INCLUDES"
+        }
+      }
+    },
+    {
+      "label": "performerIds: INCLUDES_ALL one id",
+      "state": {
+        "performerIds": [
+          "1:inst-a"
+        ],
+        "performerIdsModifier": "INCLUDES_ALL"
+      },
+      "request": {
+        "performers": {
+          "value": [
+            "1:inst-a"
+          ],
+          "modifier": "INCLUDES_ALL"
+        }
+      }
+    },
+    {
+      "label": "performerIds: INCLUDES_ALL two ids",
+      "state": {
+        "performerIds": [
+          "1:inst-a",
+          "2:inst-b"
+        ],
+        "performerIdsModifier": "INCLUDES_ALL"
+      },
+      "request": {
+        "performers": {
+          "value": [
+            "1:inst-a",
+            "2:inst-b"
+          ],
+          "modifier": "INCLUDES_ALL"
+        }
+      }
+    },
+    {
+      "label": "performerIds: INCLUDES one id",
+      "state": {
+        "performerIds": [
+          "1:inst-a"
+        ],
+        "performerIdsModifier": "INCLUDES"
+      },
+      "request": {
+        "performers": {
+          "value": [
+            "1:inst-a"
+          ],
+          "modifier": "INCLUDES"
+        }
+      }
+    },
+    {
+      "label": "performerIds: INCLUDES two ids",
+      "state": {
+        "performerIds": [
+          "1:inst-a",
+          "2:inst-b"
+        ],
+        "performerIdsModifier": "INCLUDES"
+      },
+      "request": {
+        "performers": {
+          "value": [
+            "1:inst-a",
+            "2:inst-b"
+          ],
+          "modifier": "INCLUDES"
+        }
+      }
+    },
+    {
+      "label": "performerIds: EXCLUDES one id",
+      "state": {
+        "performerIds": [
+          "1:inst-a"
+        ],
+        "performerIdsModifier": "EXCLUDES"
+      },
+      "request": {
+        "performers": {
+          "value": [
+            "1:inst-a"
+          ],
+          "modifier": "EXCLUDES"
+        }
+      }
+    },
+    {
+      "label": "performerIds: EXCLUDES two ids",
+      "state": {
+        "performerIds": [
+          "1:inst-a",
+          "2:inst-b"
+        ],
+        "performerIdsModifier": "EXCLUDES"
+      },
+      "request": {
+        "performers": {
+          "value": [
+            "1:inst-a",
+            "2:inst-b"
+          ],
+          "modifier": "EXCLUDES"
+        }
+      }
+    },
+    {
+      "label": "performerIds: one id",
+      "state": {
+        "performerIds": [
+          "1:inst-a"
+        ]
+      },
+      "request": {
+        "performers": {
+          "value": [
+            "1:inst-a"
+          ],
+          "modifier": "INCLUDES"
+        }
+      }
+    },
+    {
+      "label": "performerIds: two ids",
+      "state": {
+        "performerIds": [
+          "1:inst-a",
+          "2:inst-b"
+        ]
+      },
+      "request": {
+        "performers": {
+          "value": [
+            "1:inst-a",
+            "2:inst-b"
+          ],
+          "modifier": "INCLUDES"
+        }
+      }
+    },
+    {
+      "label": "age: min only",
+      "state": {
+        "age": {
+          "min": "39"
+        }
+      },
+      "request": {
+        "age": {
+          "modifier": "BETWEEN",
+          "value": 39
+        }
+      }
+    },
+    {
+      "label": "age: max only",
+      "state": {
+        "age": {
+          "max": "80"
+        }
+      },
+      "request": {
+        "age": {
+          "modifier": "BETWEEN",
+          "value2": 80
+        }
+      }
+    },
+    {
+      "label": "age: min and max",
+      "state": {
+        "age": {
+          "min": "39",
+          "max": "80"
+        }
+      },
+      "request": {
+        "age": {
+          "modifier": "BETWEEN",
+          "value": 39,
+          "value2": 80
+        }
+      }
+    },
+    {
+      "label": "birthYear: min only",
+      "state": {
+        "birthYear": {
+          "min": "1928"
+        }
+      },
+      "request": {
+        "birth_year": {
+          "modifier": "BETWEEN",
+          "value": 1928
+        }
+      }
+    },
+    {
+      "label": "birthYear: max only",
+      "state": {
+        "birthYear": {
+          "max": "1983"
+        }
+      },
+      "request": {
+        "birth_year": {
+          "modifier": "BETWEEN",
+          "value2": 1983
+        }
+      }
+    },
+    {
+      "label": "birthYear: min and max",
+      "state": {
+        "birthYear": {
+          "min": "1928",
+          "max": "1983"
+        }
+      },
+      "request": {
+        "birth_year": {
+          "modifier": "BETWEEN",
+          "value": 1928,
+          "value2": 1983
+        }
+      }
+    },
+    {
+      "label": "deathYear: min only",
+      "state": {
+        "deathYear": {
+          "min": "1950"
+        }
+      },
+      "request": {
+        "death_year": {
+          "modifier": "BETWEEN",
+          "value": 1950
+        }
+      }
+    },
+    {
+      "label": "deathYear: max only",
+      "state": {
+        "deathYear": {
+          "max": "2050"
+        }
+      },
+      "request": {
+        "death_year": {
+          "modifier": "BETWEEN",
+          "value2": 2050
+        }
+      }
+    },
+    {
+      "label": "deathYear: min and max",
+      "state": {
+        "deathYear": {
+          "min": "1950",
+          "max": "2050"
+        }
+      },
+      "request": {
+        "death_year": {
+          "modifier": "BETWEEN",
+          "value": 1950,
+          "value2": 2050
+        }
+      }
+    },
+    {
+      "label": "careerLength: BETWEEN min only",
+      "state": {
+        "careerLength": {
+          "min": "13"
+        },
+        "careerLengthModifier": "BETWEEN"
+      },
+      "request": {
+        "career_length": {
+          "modifier": "BETWEEN",
+          "value": 13
+        }
+      }
+    },
+    {
+      "label": "careerLength: BETWEEN max only",
+      "state": {
+        "careerLength": {
+          "max": "38"
+        },
+        "careerLengthModifier": "BETWEEN"
+      },
+      "request": {
+        "career_length": {
+          "modifier": "BETWEEN",
+          "value2": 38
+        }
+      }
+    },
+    {
+      "label": "careerLength: BETWEEN min and max",
+      "state": {
+        "careerLength": {
+          "min": "13",
+          "max": "38"
+        },
+        "careerLengthModifier": "BETWEEN"
+      },
+      "request": {
+        "career_length": {
+          "modifier": "BETWEEN",
+          "value": 13,
+          "value2": 38
+        }
+      }
+    },
+    {
+      "label": "careerLength: IS_NULL min only",
+      "state": {
+        "careerLength": {
+          "min": "13"
+        },
+        "careerLengthModifier": "IS_NULL"
+      },
+      "request": {
+        "career_length": {
+          "modifier": "IS_NULL"
+        }
+      }
+    },
+    {
+      "label": "careerLength: IS_NULL max only",
+      "state": {
+        "careerLength": {
+          "max": "38"
+        },
+        "careerLengthModifier": "IS_NULL"
+      },
+      "request": {
+        "career_length": {
+          "modifier": "IS_NULL"
+        }
+      }
+    },
+    {
+      "label": "careerLength: IS_NULL min and max",
+      "state": {
+        "careerLength": {
+          "min": "13",
+          "max": "38"
+        },
+        "careerLengthModifier": "IS_NULL"
+      },
+      "request": {
+        "career_length": {
+          "modifier": "IS_NULL"
+        }
+      }
+    },
+    {
+      "label": "careerLength: NOT_NULL min only",
+      "state": {
+        "careerLength": {
+          "min": "13"
+        },
+        "careerLengthModifier": "NOT_NULL"
+      },
+      "request": {
+        "career_length": {
+          "modifier": "NOT_NULL"
+        }
+      }
+    },
+    {
+      "label": "careerLength: NOT_NULL max only",
+      "state": {
+        "careerLength": {
+          "max": "38"
+        },
+        "careerLengthModifier": "NOT_NULL"
+      },
+      "request": {
+        "career_length": {
+          "modifier": "NOT_NULL"
+        }
+      }
+    },
+    {
+      "label": "careerLength: NOT_NULL min and max",
+      "state": {
+        "careerLength": {
+          "min": "13",
+          "max": "38"
+        },
+        "careerLengthModifier": "NOT_NULL"
+      },
+      "request": {
+        "career_length": {
+          "modifier": "NOT_NULL"
+        }
+      }
+    },
+    {
+      "label": "careerLength: min only",
+      "state": {
+        "careerLength": {
+          "min": "13"
+        }
+      },
+      "request": {
+        "career_length": {
+          "modifier": "BETWEEN",
+          "value": 13
+        }
+      }
+    },
+    {
+      "label": "careerLength: max only",
+      "state": {
+        "careerLength": {
+          "max": "38"
+        }
+      },
+      "request": {
+        "career_length": {
+          "modifier": "BETWEEN",
+          "value2": 38
+        }
+      }
+    },
+    {
+      "label": "careerLength: min and max",
+      "state": {
+        "careerLength": {
+          "min": "13",
+          "max": "38"
+        }
+      },
+      "request": {
+        "career_length": {
+          "modifier": "BETWEEN",
+          "value": 13,
+          "value2": 38
+        }
+      }
+    },
+    {
+      "label": "birthdate: start only",
+      "state": {
+        "birthdate": {
+          "start": "2020-01-01"
+        }
+      },
+      "request": {
+        "birthdate": {
+          "modifier": "BETWEEN",
+          "value": "2020-01-01"
+        }
+      }
+    },
+    {
+      "label": "birthdate: end only",
+      "state": {
+        "birthdate": {
+          "end": "2024-12-31"
+        }
+      },
+      "request": {
+        "birthdate": {
+          "modifier": "BETWEEN",
+          "value2": "2024-12-31"
+        }
+      }
+    },
+    {
+      "label": "birthdate: start and end",
+      "state": {
+        "birthdate": {
+          "start": "2020-01-01",
+          "end": "2024-12-31"
+        }
+      },
+      "request": {
+        "birthdate": {
+          "modifier": "BETWEEN",
+          "value": "2020-01-01",
+          "value2": "2024-12-31"
+        }
+      }
+    },
+    {
+      "label": "deathDate: start only",
+      "state": {
+        "deathDate": {
+          "start": "2020-01-01"
+        }
+      },
+      "request": {
+        "death_date": {
+          "modifier": "BETWEEN",
+          "value": "2020-01-01"
+        }
+      }
+    },
+    {
+      "label": "deathDate: end only",
+      "state": {
+        "deathDate": {
+          "end": "2024-12-31"
+        }
+      },
+      "request": {
+        "death_date": {
+          "modifier": "BETWEEN",
+          "value2": "2024-12-31"
+        }
+      }
+    },
+    {
+      "label": "deathDate: start and end",
+      "state": {
+        "deathDate": {
+          "start": "2020-01-01",
+          "end": "2024-12-31"
+        }
+      },
+      "request": {
+        "death_date": {
+          "modifier": "BETWEEN",
+          "value": "2020-01-01",
+          "value2": "2024-12-31"
+        }
+      }
+    },
+    {
+      "label": "createdAt: start only",
+      "state": {
+        "createdAt": {
+          "start": "2020-01-01"
+        }
+      },
+      "request": {
+        "created_at": {
+          "modifier": "BETWEEN",
+          "value": "2020-01-01"
+        }
+      }
+    },
+    {
+      "label": "createdAt: end only",
+      "state": {
+        "createdAt": {
+          "end": "2024-12-31"
+        }
+      },
+      "request": {
+        "created_at": {
+          "modifier": "BETWEEN",
+          "value2": "2024-12-31"
+        }
+      }
+    },
+    {
+      "label": "createdAt: start and end",
+      "state": {
+        "createdAt": {
+          "start": "2020-01-01",
+          "end": "2024-12-31"
+        }
+      },
+      "request": {
+        "created_at": {
+          "modifier": "BETWEEN",
+          "value": "2020-01-01",
+          "value2": "2024-12-31"
+        }
+      }
+    },
+    {
+      "label": "updatedAt: start only",
+      "state": {
+        "updatedAt": {
+          "start": "2020-01-01"
+        }
+      },
+      "request": {
+        "updated_at": {
+          "modifier": "BETWEEN",
+          "value": "2020-01-01"
+        }
+      }
+    },
+    {
+      "label": "updatedAt: end only",
+      "state": {
+        "updatedAt": {
+          "end": "2024-12-31"
+        }
+      },
+      "request": {
+        "updated_at": {
+          "modifier": "BETWEEN",
+          "value2": "2024-12-31"
+        }
+      }
+    },
+    {
+      "label": "updatedAt: start and end",
+      "state": {
+        "updatedAt": {
+          "start": "2020-01-01",
+          "end": "2024-12-31"
+        }
+      },
+      "request": {
+        "updated_at": {
+          "modifier": "BETWEEN",
+          "value": "2020-01-01",
+          "value2": "2024-12-31"
+        }
+      }
+    },
+    {
+      "label": "hairColor: BLONDE",
+      "state": {
+        "hairColor": "BLONDE"
+      },
+      "request": {
+        "hair_color": {
+          "value": "BLONDE",
+          "modifier": "EQUALS"
+        }
+      }
+    },
+    {
+      "label": "hairColor: BRUNETTE",
+      "state": {
+        "hairColor": "BRUNETTE"
+      },
+      "request": {
+        "hair_color": {
+          "value": "BRUNETTE",
+          "modifier": "EQUALS"
+        }
+      }
+    },
+    {
+      "label": "hairColor: BLACK",
+      "state": {
+        "hairColor": "BLACK"
+      },
+      "request": {
+        "hair_color": {
+          "value": "BLACK",
+          "modifier": "EQUALS"
+        }
+      }
+    },
+    {
+      "label": "hairColor: RED",
+      "state": {
+        "hairColor": "RED"
+      },
+      "request": {
+        "hair_color": {
+          "value": "RED",
+          "modifier": "EQUALS"
+        }
+      }
+    },
+    {
+      "label": "hairColor: AUBURN",
+      "state": {
+        "hairColor": "AUBURN"
+      },
+      "request": {
+        "hair_color": {
+          "value": "AUBURN",
+          "modifier": "EQUALS"
+        }
+      }
+    },
+    {
+      "label": "hairColor: GREY",
+      "state": {
+        "hairColor": "GREY"
+      },
+      "request": {
+        "hair_color": {
+          "value": "GREY",
+          "modifier": "EQUALS"
+        }
+      }
+    },
+    {
+      "label": "hairColor: BALD",
+      "state": {
+        "hairColor": "BALD"
+      },
+      "request": {
+        "hair_color": {
+          "value": "BALD",
+          "modifier": "EQUALS"
+        }
+      }
+    },
+    {
+      "label": "hairColor: VARIOUS",
+      "state": {
+        "hairColor": "VARIOUS"
+      },
+      "request": {
+        "hair_color": {
+          "value": "VARIOUS",
+          "modifier": "EQUALS"
+        }
+      }
+    },
+    {
+      "label": "hairColor: OTHER",
+      "state": {
+        "hairColor": "OTHER"
+      },
+      "request": {
+        "hair_color": {
+          "value": "OTHER",
+          "modifier": "EQUALS"
+        }
+      }
+    },
+    {
+      "label": "eyeColor: BROWN",
+      "state": {
+        "eyeColor": "BROWN"
+      },
+      "request": {
+        "eye_color": {
+          "value": "BROWN",
+          "modifier": "EQUALS"
+        }
+      }
+    },
+    {
+      "label": "eyeColor: BLUE",
+      "state": {
+        "eyeColor": "BLUE"
+      },
+      "request": {
+        "eye_color": {
+          "value": "BLUE",
+          "modifier": "EQUALS"
+        }
+      }
+    },
+    {
+      "label": "eyeColor: GREEN",
+      "state": {
+        "eyeColor": "GREEN"
+      },
+      "request": {
+        "eye_color": {
+          "value": "GREEN",
+          "modifier": "EQUALS"
+        }
+      }
+    },
+    {
+      "label": "eyeColor: GREY",
+      "state": {
+        "eyeColor": "GREY"
+      },
+      "request": {
+        "eye_color": {
+          "value": "GREY",
+          "modifier": "EQUALS"
+        }
+      }
+    },
+    {
+      "label": "eyeColor: HAZEL",
+      "state": {
+        "eyeColor": "HAZEL"
+      },
+      "request": {
+        "eye_color": {
+          "value": "HAZEL",
+          "modifier": "EQUALS"
+        }
+      }
+    },
+    {
+      "label": "eyeColor: OTHER",
+      "state": {
+        "eyeColor": "OTHER"
+      },
+      "request": {
+        "eye_color": {
+          "value": "OTHER",
+          "modifier": "EQUALS"
+        }
+      }
+    },
+    {
+      "label": "ethnicity: CAUCASIAN",
+      "state": {
+        "ethnicity": "CAUCASIAN"
+      },
+      "request": {
+        "ethnicity": {
+          "value": "CAUCASIAN",
+          "modifier": "EQUALS"
+        }
+      }
+    },
+    {
+      "label": "ethnicity: BLACK",
+      "state": {
+        "ethnicity": "BLACK"
+      },
+      "request": {
+        "ethnicity": {
+          "value": "BLACK",
+          "modifier": "EQUALS"
+        }
+      }
+    },
+    {
+      "label": "ethnicity: ASIAN",
+      "state": {
+        "ethnicity": "ASIAN"
+      },
+      "request": {
+        "ethnicity": {
+          "value": "ASIAN",
+          "modifier": "EQUALS"
+        }
+      }
+    },
+    {
+      "label": "ethnicity: INDIAN",
+      "state": {
+        "ethnicity": "INDIAN"
+      },
+      "request": {
+        "ethnicity": {
+          "value": "INDIAN",
+          "modifier": "EQUALS"
+        }
+      }
+    },
+    {
+      "label": "ethnicity: LATIN",
+      "state": {
+        "ethnicity": "LATIN"
+      },
+      "request": {
+        "ethnicity": {
+          "value": "LATIN",
+          "modifier": "EQUALS"
+        }
+      }
+    },
+    {
+      "label": "ethnicity: MIDDLE_EASTERN",
+      "state": {
+        "ethnicity": "MIDDLE_EASTERN"
+      },
+      "request": {
+        "ethnicity": {
+          "value": "MIDDLE_EASTERN",
+          "modifier": "EQUALS"
+        }
+      }
+    },
+    {
+      "label": "ethnicity: MIXED",
+      "state": {
+        "ethnicity": "MIXED"
+      },
+      "request": {
+        "ethnicity": {
+          "value": "MIXED",
+          "modifier": "EQUALS"
+        }
+      }
+    },
+    {
+      "label": "ethnicity: OTHER",
+      "state": {
+        "ethnicity": "OTHER"
+      },
+      "request": {
+        "ethnicity": {
+          "value": "OTHER",
+          "modifier": "EQUALS"
+        }
+      }
+    },
+    {
+      "label": "fakeTits: Fake",
+      "state": {
+        "fakeTits": "Fake"
+      },
+      "request": {
+        "fake_tits": {
+          "value": "Fake",
+          "modifier": "EQUALS"
+        }
+      }
+    },
+    {
+      "label": "fakeTits: Natural",
+      "state": {
+        "fakeTits": "Natural"
+      },
+      "request": {
+        "fake_tits": {
+          "value": "Natural",
+          "modifier": "EQUALS"
+        }
+      }
+    },
+    {
+      "label": "country: text",
+      "state": {
+        "country": "contract"
+      },
+      "request": {
+        "country": {
+          "value": "contract",
+          "modifier": "INCLUDES"
+        }
+      }
+    },
+    {
+      "label": "circumcised: CUT",
+      "state": {
+        "circumcised": "CUT"
+      },
+      "request": {
+        "circumcised": {
+          "value": [
+            "CUT"
+          ]
+        }
+      }
+    },
+    {
+      "label": "circumcised: UNCUT",
+      "state": {
+        "circumcised": "UNCUT"
+      },
+      "request": {
+        "circumcised": {
+          "value": [
+            "UNCUT"
+          ]
+        }
+      }
+    },
+    {
+      "label": "measurements: text",
+      "state": {
+        "measurements": "contract"
+      },
+      "request": {
+        "measurements": {
+          "value": "contract",
+          "modifier": "INCLUDES"
+        }
+      }
+    },
+    {
+      "label": "tattoos: text",
+      "state": {
+        "tattoos": "contract"
+      },
+      "request": {
+        "tattoos": {
+          "value": "contract",
+          "modifier": "INCLUDES"
+        }
+      }
+    },
+    {
+      "label": "piercings: text",
+      "state": {
+        "piercings": "contract"
+      },
+      "request": {
+        "piercings": {
+          "value": "contract",
+          "modifier": "INCLUDES"
+        }
+      }
+    },
+    {
+      "label": "height: BETWEEN min only",
+      "state": {
+        "height": {
+          "min": "138"
+        },
+        "heightModifier": "BETWEEN"
+      },
+      "request": {
+        "height": {
+          "modifier": "BETWEEN",
+          "value": 138
+        }
+      }
+    },
+    {
+      "label": "height: BETWEEN max only",
+      "state": {
+        "height": {
+          "max": "213"
+        },
+        "heightModifier": "BETWEEN"
+      },
+      "request": {
+        "height": {
+          "modifier": "BETWEEN",
+          "value2": 213
+        }
+      }
+    },
+    {
+      "label": "height: BETWEEN min and max",
+      "state": {
+        "height": {
+          "min": "138",
+          "max": "213"
+        },
+        "heightModifier": "BETWEEN"
+      },
+      "request": {
+        "height": {
+          "modifier": "BETWEEN",
+          "value": 138,
+          "value2": 213
+        }
+      }
+    },
+    {
+      "label": "height: IS_NULL min only",
+      "state": {
+        "height": {
+          "min": "138"
+        },
+        "heightModifier": "IS_NULL"
+      },
+      "request": {
+        "height": {
+          "modifier": "IS_NULL"
+        }
+      }
+    },
+    {
+      "label": "height: IS_NULL max only",
+      "state": {
+        "height": {
+          "max": "213"
+        },
+        "heightModifier": "IS_NULL"
+      },
+      "request": {
+        "height": {
+          "modifier": "IS_NULL"
+        }
+      }
+    },
+    {
+      "label": "height: IS_NULL min and max",
+      "state": {
+        "height": {
+          "min": "138",
+          "max": "213"
+        },
+        "heightModifier": "IS_NULL"
+      },
+      "request": {
+        "height": {
+          "modifier": "IS_NULL"
+        }
+      }
+    },
+    {
+      "label": "height: NOT_NULL min only",
+      "state": {
+        "height": {
+          "min": "138"
+        },
+        "heightModifier": "NOT_NULL"
+      },
+      "request": {
+        "height": {
+          "modifier": "NOT_NULL"
+        }
+      }
+    },
+    {
+      "label": "height: NOT_NULL max only",
+      "state": {
+        "height": {
+          "max": "213"
+        },
+        "heightModifier": "NOT_NULL"
+      },
+      "request": {
+        "height": {
+          "modifier": "NOT_NULL"
+        }
+      }
+    },
+    {
+      "label": "height: NOT_NULL min and max",
+      "state": {
+        "height": {
+          "min": "138",
+          "max": "213"
+        },
+        "heightModifier": "NOT_NULL"
+      },
+      "request": {
+        "height": {
+          "modifier": "NOT_NULL"
+        }
+      }
+    },
+    {
+      "label": "height: min only",
+      "state": {
+        "height": {
+          "min": "138"
+        }
+      },
+      "request": {
+        "height": {
+          "modifier": "BETWEEN",
+          "value": 138
+        }
+      }
+    },
+    {
+      "label": "height: max only",
+      "state": {
+        "height": {
+          "max": "213"
+        }
+      },
+      "request": {
+        "height": {
+          "modifier": "BETWEEN",
+          "value2": 213
+        }
+      }
+    },
+    {
+      "label": "height: min and max",
+      "state": {
+        "height": {
+          "min": "138",
+          "max": "213"
+        }
+      },
+      "request": {
+        "height": {
+          "modifier": "BETWEEN",
+          "value": 138,
+          "value2": 213
+        }
+      }
+    },
+    {
+      "label": "weight: BETWEEN min only",
+      "state": {
+        "weight": {
+          "min": "73"
+        },
+        "weightModifier": "BETWEEN"
+      },
+      "request": {
+        "weight": {
+          "modifier": "BETWEEN",
+          "value": 73
+        }
+      }
+    },
+    {
+      "label": "weight: BETWEEN max only",
+      "state": {
+        "weight": {
+          "max": "158"
+        },
+        "weightModifier": "BETWEEN"
+      },
+      "request": {
+        "weight": {
+          "modifier": "BETWEEN",
+          "value2": 158
+        }
+      }
+    },
+    {
+      "label": "weight: BETWEEN min and max",
+      "state": {
+        "weight": {
+          "min": "73",
+          "max": "158"
+        },
+        "weightModifier": "BETWEEN"
+      },
+      "request": {
+        "weight": {
+          "modifier": "BETWEEN",
+          "value": 73,
+          "value2": 158
+        }
+      }
+    },
+    {
+      "label": "weight: IS_NULL min only",
+      "state": {
+        "weight": {
+          "min": "73"
+        },
+        "weightModifier": "IS_NULL"
+      },
+      "request": {
+        "weight": {
+          "modifier": "IS_NULL"
+        }
+      }
+    },
+    {
+      "label": "weight: IS_NULL max only",
+      "state": {
+        "weight": {
+          "max": "158"
+        },
+        "weightModifier": "IS_NULL"
+      },
+      "request": {
+        "weight": {
+          "modifier": "IS_NULL"
+        }
+      }
+    },
+    {
+      "label": "weight: IS_NULL min and max",
+      "state": {
+        "weight": {
+          "min": "73",
+          "max": "158"
+        },
+        "weightModifier": "IS_NULL"
+      },
+      "request": {
+        "weight": {
+          "modifier": "IS_NULL"
+        }
+      }
+    },
+    {
+      "label": "weight: NOT_NULL min only",
+      "state": {
+        "weight": {
+          "min": "73"
+        },
+        "weightModifier": "NOT_NULL"
+      },
+      "request": {
+        "weight": {
+          "modifier": "NOT_NULL"
+        }
+      }
+    },
+    {
+      "label": "weight: NOT_NULL max only",
+      "state": {
+        "weight": {
+          "max": "158"
+        },
+        "weightModifier": "NOT_NULL"
+      },
+      "request": {
+        "weight": {
+          "modifier": "NOT_NULL"
+        }
+      }
+    },
+    {
+      "label": "weight: NOT_NULL min and max",
+      "state": {
+        "weight": {
+          "min": "73",
+          "max": "158"
+        },
+        "weightModifier": "NOT_NULL"
+      },
+      "request": {
+        "weight": {
+          "modifier": "NOT_NULL"
+        }
+      }
+    },
+    {
+      "label": "weight: min only",
+      "state": {
+        "weight": {
+          "min": "73"
+        }
+      },
+      "request": {
+        "weight": {
+          "modifier": "BETWEEN",
+          "value": 73
+        }
+      }
+    },
+    {
+      "label": "weight: max only",
+      "state": {
+        "weight": {
+          "max": "158"
+        }
+      },
+      "request": {
+        "weight": {
+          "modifier": "BETWEEN",
+          "value2": 158
+        }
+      }
+    },
+    {
+      "label": "weight: min and max",
+      "state": {
+        "weight": {
+          "min": "73",
+          "max": "158"
+        }
+      },
+      "request": {
+        "weight": {
+          "modifier": "BETWEEN",
+          "value": 73,
+          "value2": 158
+        }
+      }
+    },
+    {
+      "label": "penisLength: BETWEEN min only",
+      "state": {
+        "penisLength": {
+          "min": "10"
+        },
+        "penisLengthModifier": "BETWEEN"
+      },
+      "request": {
+        "penis_length": {
+          "modifier": "BETWEEN",
+          "value": 10
+        }
+      }
+    },
+    {
+      "label": "penisLength: BETWEEN max only",
+      "state": {
+        "penisLength": {
+          "max": "30"
+        },
+        "penisLengthModifier": "BETWEEN"
+      },
+      "request": {
+        "penis_length": {
+          "modifier": "BETWEEN",
+          "value2": 30
+        }
+      }
+    },
+    {
+      "label": "penisLength: BETWEEN min and max",
+      "state": {
+        "penisLength": {
+          "min": "10",
+          "max": "30"
+        },
+        "penisLengthModifier": "BETWEEN"
+      },
+      "request": {
+        "penis_length": {
+          "modifier": "BETWEEN",
+          "value": 10,
+          "value2": 30
+        }
+      }
+    },
+    {
+      "label": "penisLength: IS_NULL min only",
+      "state": {
+        "penisLength": {
+          "min": "10"
+        },
+        "penisLengthModifier": "IS_NULL"
+      },
+      "request": {
+        "penis_length": {
+          "modifier": "IS_NULL"
+        }
+      }
+    },
+    {
+      "label": "penisLength: IS_NULL max only",
+      "state": {
+        "penisLength": {
+          "max": "30"
+        },
+        "penisLengthModifier": "IS_NULL"
+      },
+      "request": {
+        "penis_length": {
+          "modifier": "IS_NULL"
+        }
+      }
+    },
+    {
+      "label": "penisLength: IS_NULL min and max",
+      "state": {
+        "penisLength": {
+          "min": "10",
+          "max": "30"
+        },
+        "penisLengthModifier": "IS_NULL"
+      },
+      "request": {
+        "penis_length": {
+          "modifier": "IS_NULL"
+        }
+      }
+    },
+    {
+      "label": "penisLength: NOT_NULL min only",
+      "state": {
+        "penisLength": {
+          "min": "10"
+        },
+        "penisLengthModifier": "NOT_NULL"
+      },
+      "request": {
+        "penis_length": {
+          "modifier": "NOT_NULL"
+        }
+      }
+    },
+    {
+      "label": "penisLength: NOT_NULL max only",
+      "state": {
+        "penisLength": {
+          "max": "30"
+        },
+        "penisLengthModifier": "NOT_NULL"
+      },
+      "request": {
+        "penis_length": {
+          "modifier": "NOT_NULL"
+        }
+      }
+    },
+    {
+      "label": "penisLength: NOT_NULL min and max",
+      "state": {
+        "penisLength": {
+          "min": "10",
+          "max": "30"
+        },
+        "penisLengthModifier": "NOT_NULL"
+      },
+      "request": {
+        "penis_length": {
+          "modifier": "NOT_NULL"
+        }
+      }
+    },
+    {
+      "label": "penisLength: min only",
+      "state": {
+        "penisLength": {
+          "min": "10"
+        }
+      },
+      "request": {
+        "penis_length": {
+          "modifier": "BETWEEN",
+          "value": 10
+        }
+      }
+    },
+    {
+      "label": "penisLength: max only",
+      "state": {
+        "penisLength": {
+          "max": "30"
+        }
+      },
+      "request": {
+        "penis_length": {
+          "modifier": "BETWEEN",
+          "value2": 30
+        }
+      }
+    },
+    {
+      "label": "penisLength: min and max",
+      "state": {
+        "penisLength": {
+          "min": "10",
+          "max": "30"
+        }
+      },
+      "request": {
+        "penis_length": {
+          "modifier": "BETWEEN",
+          "value": 10,
+          "value2": 30
+        }
+      }
+    },
+    {
+      "label": "playCount: min only",
+      "state": {
+        "playCount": {
+          "min": "250"
+        }
+      },
+      "request": {
+        "play_count": {
+          "modifier": "BETWEEN",
+          "value": 250
+        }
+      }
+    },
+    {
+      "label": "playCount: max only",
+      "state": {
+        "playCount": {
+          "max": "750"
+        }
+      },
+      "request": {
+        "play_count": {
+          "modifier": "BETWEEN",
+          "value2": 750
+        }
+      }
+    },
+    {
+      "label": "playCount: min and max",
+      "state": {
+        "playCount": {
+          "min": "250",
+          "max": "750"
+        }
+      },
+      "request": {
+        "play_count": {
+          "modifier": "BETWEEN",
+          "value": 250,
+          "value2": 750
+        }
+      }
+    },
+    {
+      "label": "tagCount: min only",
+      "state": {
+        "tagCount": {
+          "min": "250"
+        }
+      },
+      "request": {
+        "tag_count": {
+          "modifier": "BETWEEN",
+          "value": 250
+        }
+      }
+    },
+    {
+      "label": "tagCount: max only",
+      "state": {
+        "tagCount": {
+          "max": "750"
+        }
+      },
+      "request": {
+        "tag_count": {
+          "modifier": "BETWEEN",
+          "value2": 750
+        }
+      }
+    },
+    {
+      "label": "tagCount: min and max",
+      "state": {
+        "tagCount": {
+          "min": "250",
+          "max": "750"
+        }
+      },
+      "request": {
+        "tag_count": {
+          "modifier": "BETWEEN",
+          "value": 250,
+          "value2": 750
+        }
+      }
+    },
+    {
+      "label": "imageCount: min only",
+      "state": {
+        "imageCount": {
+          "min": "2500"
+        }
+      },
+      "request": {
+        "image_count": {
+          "modifier": "BETWEEN",
+          "value": 2500
+        }
+      }
+    },
+    {
+      "label": "imageCount: max only",
+      "state": {
+        "imageCount": {
+          "max": "7500"
+        }
+      },
+      "request": {
+        "image_count": {
+          "modifier": "BETWEEN",
+          "value2": 7500
+        }
+      }
+    },
+    {
+      "label": "imageCount: min and max",
+      "state": {
+        "imageCount": {
+          "min": "2500",
+          "max": "7500"
+        }
+      },
+      "request": {
+        "image_count": {
+          "modifier": "BETWEEN",
+          "value": 2500,
+          "value2": 7500
+        }
+      }
+    },
+    {
+      "label": "galleryCount: min only",
+      "state": {
+        "galleryCount": {
+          "min": "250"
+        }
+      },
+      "request": {
+        "gallery_count": {
+          "modifier": "BETWEEN",
+          "value": 250
+        }
+      }
+    },
+    {
+      "label": "galleryCount: max only",
+      "state": {
+        "galleryCount": {
+          "max": "750"
+        }
+      },
+      "request": {
+        "gallery_count": {
+          "modifier": "BETWEEN",
+          "value2": 750
+        }
+      }
+    },
+    {
+      "label": "galleryCount: min and max",
+      "state": {
+        "galleryCount": {
+          "min": "250",
+          "max": "750"
+        }
+      },
+      "request": {
+        "gallery_count": {
+          "modifier": "BETWEEN",
+          "value": 250,
+          "value2": 750
+        }
+      }
+    },
+    {
+      "label": "markerCount: min only",
+      "state": {
+        "markerCount": {
+          "min": "250"
+        }
+      },
+      "request": {
+        "marker_count": {
+          "modifier": "BETWEEN",
+          "value": 250
+        }
+      }
+    },
+    {
+      "label": "markerCount: max only",
+      "state": {
+        "markerCount": {
+          "max": "750"
+        }
+      },
+      "request": {
+        "marker_count": {
+          "modifier": "BETWEEN",
+          "value2": 750
+        }
+      }
+    },
+    {
+      "label": "markerCount: min and max",
+      "state": {
+        "markerCount": {
+          "min": "250",
+          "max": "750"
+        }
+      },
+      "request": {
+        "marker_count": {
+          "modifier": "BETWEEN",
+          "value": 250,
+          "value2": 750
+        }
+      }
+    },
+    {
+      "label": "disambiguation: text",
+      "state": {
+        "disambiguation": "contract"
+      },
+      "request": {
+        "disambiguation": {
+          "value": "contract",
+          "modifier": "INCLUDES"
+        }
+      }
+    },
+    {
+      "label": "aliases: INCLUDES text",
+      "state": {
+        "aliases": "contract",
+        "aliasesModifier": "INCLUDES"
+      },
+      "request": {
+        "aliases": {
+          "value": "contract",
+          "modifier": "INCLUDES"
+        }
+      }
+    },
+    {
+      "label": "aliases: EXCLUDES text",
+      "state": {
+        "aliases": "contract",
+        "aliasesModifier": "EXCLUDES"
+      },
+      "request": {
+        "aliases": {
+          "value": "contract",
+          "modifier": "EXCLUDES"
+        }
+      }
+    },
+    {
+      "label": "aliases: IS_NULL text",
+      "state": {
+        "aliases": "contract",
+        "aliasesModifier": "IS_NULL"
+      },
+      "request": {
+        "aliases": {
+          "modifier": "IS_NULL"
+        }
+      }
+    },
+    {
+      "label": "aliases: NOT_NULL text",
+      "state": {
+        "aliases": "contract",
+        "aliasesModifier": "NOT_NULL"
+      },
+      "request": {
+        "aliases": {
+          "modifier": "NOT_NULL"
+        }
+      }
+    },
+    {
+      "label": "aliases: text",
+      "state": {
+        "aliases": "contract"
+      },
+      "request": {
+        "aliases": {
+          "value": "contract",
+          "modifier": "INCLUDES"
+        }
+      }
+    },
+    {
+      "label": "url: INCLUDES text",
+      "state": {
+        "url": "contract",
+        "urlModifier": "INCLUDES"
+      },
+      "request": {
+        "url": {
+          "value": "contract",
+          "modifier": "INCLUDES"
+        }
+      }
+    },
+    {
+      "label": "url: EXCLUDES text",
+      "state": {
+        "url": "contract",
+        "urlModifier": "EXCLUDES"
+      },
+      "request": {
+        "url": {
+          "value": "contract",
+          "modifier": "EXCLUDES"
+        }
+      }
+    },
+    {
+      "label": "url: IS_NULL text",
+      "state": {
+        "url": "contract",
+        "urlModifier": "IS_NULL"
+      },
+      "request": {
+        "url": {
+          "modifier": "IS_NULL"
+        }
+      }
+    },
+    {
+      "label": "url: NOT_NULL text",
+      "state": {
+        "url": "contract",
+        "urlModifier": "NOT_NULL"
+      },
+      "request": {
+        "url": {
+          "modifier": "NOT_NULL"
+        }
+      }
+    },
+    {
+      "label": "url: text",
+      "state": {
+        "url": "contract"
+      },
+      "request": {
+        "url": {
+          "value": "contract",
+          "modifier": "INCLUDES"
+        }
+      }
+    },
+    {
+      "label": "stashId: EQUALS text",
+      "state": {
+        "stashId": "contract",
+        "stashIdModifier": "EQUALS"
+      },
+      "request": {
+        "stash_id": {
+          "value": "contract",
+          "modifier": "EQUALS"
+        }
+      }
+    },
+    {
+      "label": "stashId: IS_NULL text",
+      "state": {
+        "stashId": "contract",
+        "stashIdModifier": "IS_NULL"
+      },
+      "request": {
+        "stash_id": {
+          "modifier": "IS_NULL"
+        }
+      }
+    },
+    {
+      "label": "stashId: NOT_NULL text",
+      "state": {
+        "stashId": "contract",
+        "stashIdModifier": "NOT_NULL"
+      },
+      "request": {
+        "stash_id": {
+          "modifier": "NOT_NULL"
+        }
+      }
+    },
+    {
+      "label": "stashId: text",
+      "state": {
+        "stashId": "contract"
+      },
+      "request": {
+        "stash_id": {
+          "value": "contract",
+          "modifier": "EQUALS"
+        }
+      }
+    },
+    {
+      "label": "details: text",
+      "state": {
+        "details": "contract"
+      },
+      "request": {
+        "details": {
+          "value": "contract",
+          "modifier": "INCLUDES"
+        }
+      }
+    }
+  ],
+  "permanent": [],
+  "imperial": {
+    "imperialOptions": [
+      {
+        "label": "height: BETWEEN min only",
+        "state": {
+          "height": {
+            "min": "167"
+          },
+          "heightModifier": "BETWEEN"
+        },
+        "request": {
+          "height": {
+            "modifier": "BETWEEN",
+            "value": 167
+          }
+        }
+      },
+      {
+        "label": "height: BETWEEN max only",
+        "state": {
+          "height": {
+            "max": "189"
+          },
+          "heightModifier": "BETWEEN"
+        },
+        "request": {
+          "height": {
+            "modifier": "BETWEEN",
+            "value2": 189
+          }
+        }
+      },
+      {
+        "label": "height: BETWEEN min and max",
+        "state": {
+          "height": {
+            "min": "167",
+            "max": "189"
+          },
+          "heightModifier": "BETWEEN"
+        },
+        "request": {
+          "height": {
+            "modifier": "BETWEEN",
+            "value": 167,
+            "value2": 189
+          }
+        }
+      },
+      {
+        "label": "height: IS_NULL min only",
+        "state": {
+          "height": {
+            "min": "167"
+          },
+          "heightModifier": "IS_NULL"
+        },
+        "request": {
+          "height": {
+            "modifier": "IS_NULL"
+          }
+        }
+      },
+      {
+        "label": "height: IS_NULL max only",
+        "state": {
+          "height": {
+            "max": "189"
+          },
+          "heightModifier": "IS_NULL"
+        },
+        "request": {
+          "height": {
+            "modifier": "IS_NULL"
+          }
+        }
+      },
+      {
+        "label": "height: IS_NULL min and max",
+        "state": {
+          "height": {
+            "min": "167",
+            "max": "189"
+          },
+          "heightModifier": "IS_NULL"
+        },
+        "request": {
+          "height": {
+            "modifier": "IS_NULL"
+          }
+        }
+      },
+      {
+        "label": "height: NOT_NULL min only",
+        "state": {
+          "height": {
+            "min": "167"
+          },
+          "heightModifier": "NOT_NULL"
+        },
+        "request": {
+          "height": {
+            "modifier": "NOT_NULL"
+          }
+        }
+      },
+      {
+        "label": "height: NOT_NULL max only",
+        "state": {
+          "height": {
+            "max": "189"
+          },
+          "heightModifier": "NOT_NULL"
+        },
+        "request": {
+          "height": {
+            "modifier": "NOT_NULL"
+          }
+        }
+      },
+      {
+        "label": "height: NOT_NULL min and max",
+        "state": {
+          "height": {
+            "min": "167",
+            "max": "189"
+          },
+          "heightModifier": "NOT_NULL"
+        },
+        "request": {
+          "height": {
+            "modifier": "NOT_NULL"
+          }
+        }
+      },
+      {
+        "label": "height: min only",
+        "state": {
+          "height": {
+            "min": "167"
+          }
+        },
+        "request": {
+          "height": {
+            "modifier": "BETWEEN",
+            "value": 167
+          }
+        }
+      },
+      {
+        "label": "height: max only",
+        "state": {
+          "height": {
+            "max": "189"
+          }
+        },
+        "request": {
+          "height": {
+            "modifier": "BETWEEN",
+            "value2": 189
+          }
+        }
+      },
+      {
+        "label": "height: min and max",
+        "state": {
+          "height": {
+            "min": "167",
+            "max": "189"
+          }
+        },
+        "request": {
+          "height": {
+            "modifier": "BETWEEN",
+            "value": 167,
+            "value2": 189
+          }
+        }
+      },
+      {
+        "label": "weight: BETWEEN min only",
+        "state": {
+          "weight": {
+            "min": "163"
+          },
+          "weightModifier": "BETWEEN"
+        },
+        "request": {
+          "weight": {
+            "modifier": "BETWEEN",
+            "value": 163
+          }
+        }
+      },
+      {
+        "label": "weight: BETWEEN max only",
+        "state": {
+          "weight": {
+            "max": "388"
+          },
+          "weightModifier": "BETWEEN"
+        },
+        "request": {
+          "weight": {
+            "modifier": "BETWEEN",
+            "value2": 388
+          }
+        }
+      },
+      {
+        "label": "weight: BETWEEN min and max",
+        "state": {
+          "weight": {
+            "min": "163",
+            "max": "388"
+          },
+          "weightModifier": "BETWEEN"
+        },
+        "request": {
+          "weight": {
+            "modifier": "BETWEEN",
+            "value": 163,
+            "value2": 388
+          }
+        }
+      },
+      {
+        "label": "weight: IS_NULL min only",
+        "state": {
+          "weight": {
+            "min": "163"
+          },
+          "weightModifier": "IS_NULL"
+        },
+        "request": {
+          "weight": {
+            "modifier": "IS_NULL"
+          }
+        }
+      },
+      {
+        "label": "weight: IS_NULL max only",
+        "state": {
+          "weight": {
+            "max": "388"
+          },
+          "weightModifier": "IS_NULL"
+        },
+        "request": {
+          "weight": {
+            "modifier": "IS_NULL"
+          }
+        }
+      },
+      {
+        "label": "weight: IS_NULL min and max",
+        "state": {
+          "weight": {
+            "min": "163",
+            "max": "388"
+          },
+          "weightModifier": "IS_NULL"
+        },
+        "request": {
+          "weight": {
+            "modifier": "IS_NULL"
+          }
+        }
+      },
+      {
+        "label": "weight: NOT_NULL min only",
+        "state": {
+          "weight": {
+            "min": "163"
+          },
+          "weightModifier": "NOT_NULL"
+        },
+        "request": {
+          "weight": {
+            "modifier": "NOT_NULL"
+          }
+        }
+      },
+      {
+        "label": "weight: NOT_NULL max only",
+        "state": {
+          "weight": {
+            "max": "388"
+          },
+          "weightModifier": "NOT_NULL"
+        },
+        "request": {
+          "weight": {
+            "modifier": "NOT_NULL"
+          }
+        }
+      },
+      {
+        "label": "weight: NOT_NULL min and max",
+        "state": {
+          "weight": {
+            "min": "163",
+            "max": "388"
+          },
+          "weightModifier": "NOT_NULL"
+        },
+        "request": {
+          "weight": {
+            "modifier": "NOT_NULL"
+          }
+        }
+      },
+      {
+        "label": "weight: min only",
+        "state": {
+          "weight": {
+            "min": "163"
+          }
+        },
+        "request": {
+          "weight": {
+            "modifier": "BETWEEN",
+            "value": 163
+          }
+        }
+      },
+      {
+        "label": "weight: max only",
+        "state": {
+          "weight": {
+            "max": "388"
+          }
+        },
+        "request": {
+          "weight": {
+            "modifier": "BETWEEN",
+            "value2": 388
+          }
+        }
+      },
+      {
+        "label": "weight: min and max",
+        "state": {
+          "weight": {
+            "min": "163",
+            "max": "388"
+          }
+        },
+        "request": {
+          "weight": {
+            "modifier": "BETWEEN",
+            "value": 163,
+            "value2": 388
+          }
+        }
+      },
+      {
+        "label": "penisLength: BETWEEN min only",
+        "state": {
+          "penisLength": {
+            "min": "5"
+          },
+          "penisLengthModifier": "BETWEEN"
+        },
+        "request": {
+          "penis_length": {
+            "modifier": "BETWEEN",
+            "value": 5
+          }
+        }
+      },
+      {
+        "label": "penisLength: BETWEEN max only",
+        "state": {
+          "penisLength": {
+            "max": "12"
+          },
+          "penisLengthModifier": "BETWEEN"
+        },
+        "request": {
+          "penis_length": {
+            "modifier": "BETWEEN",
+            "value2": 12
+          }
+        }
+      },
+      {
+        "label": "penisLength: BETWEEN min and max",
+        "state": {
+          "penisLength": {
+            "min": "5",
+            "max": "12"
+          },
+          "penisLengthModifier": "BETWEEN"
+        },
+        "request": {
+          "penis_length": {
+            "modifier": "BETWEEN",
+            "value": 5,
+            "value2": 12
+          }
+        }
+      },
+      {
+        "label": "penisLength: IS_NULL min only",
+        "state": {
+          "penisLength": {
+            "min": "5"
+          },
+          "penisLengthModifier": "IS_NULL"
+        },
+        "request": {
+          "penis_length": {
+            "modifier": "IS_NULL"
+          }
+        }
+      },
+      {
+        "label": "penisLength: IS_NULL max only",
+        "state": {
+          "penisLength": {
+            "max": "12"
+          },
+          "penisLengthModifier": "IS_NULL"
+        },
+        "request": {
+          "penis_length": {
+            "modifier": "IS_NULL"
+          }
+        }
+      },
+      {
+        "label": "penisLength: IS_NULL min and max",
+        "state": {
+          "penisLength": {
+            "min": "5",
+            "max": "12"
+          },
+          "penisLengthModifier": "IS_NULL"
+        },
+        "request": {
+          "penis_length": {
+            "modifier": "IS_NULL"
+          }
+        }
+      },
+      {
+        "label": "penisLength: NOT_NULL min only",
+        "state": {
+          "penisLength": {
+            "min": "5"
+          },
+          "penisLengthModifier": "NOT_NULL"
+        },
+        "request": {
+          "penis_length": {
+            "modifier": "NOT_NULL"
+          }
+        }
+      },
+      {
+        "label": "penisLength: NOT_NULL max only",
+        "state": {
+          "penisLength": {
+            "max": "12"
+          },
+          "penisLengthModifier": "NOT_NULL"
+        },
+        "request": {
+          "penis_length": {
+            "modifier": "NOT_NULL"
+          }
+        }
+      },
+      {
+        "label": "penisLength: NOT_NULL min and max",
+        "state": {
+          "penisLength": {
+            "min": "5",
+            "max": "12"
+          },
+          "penisLengthModifier": "NOT_NULL"
+        },
+        "request": {
+          "penis_length": {
+            "modifier": "NOT_NULL"
+          }
+        }
+      },
+      {
+        "label": "penisLength: min only",
+        "state": {
+          "penisLength": {
+            "min": "5"
+          }
+        },
+        "request": {
+          "penis_length": {
+            "modifier": "BETWEEN",
+            "value": 5
+          }
+        }
+      },
+      {
+        "label": "penisLength: max only",
+        "state": {
+          "penisLength": {
+            "max": "12"
+          }
+        },
+        "request": {
+          "penis_length": {
+            "modifier": "BETWEEN",
+            "value2": 12
+          }
+        }
+      },
+      {
+        "label": "penisLength: min and max",
+        "state": {
+          "penisLength": {
+            "min": "5",
+            "max": "12"
+          }
+        },
+        "request": {
+          "penis_length": {
+            "modifier": "BETWEEN",
+            "value": 5,
+            "value2": 12
+          }
+        }
+      }
+    ],
+    "metricOptions": [
+      {
+        "label": "height: BETWEEN min only",
+        "state": {
+          "height": {
+            "min": "138"
+          },
+          "heightModifier": "BETWEEN"
+        },
+        "request": {
+          "height": {
+            "modifier": "BETWEEN",
+            "value": 138
+          }
+        }
+      },
+      {
+        "label": "height: BETWEEN max only",
+        "state": {
+          "height": {
+            "max": "213"
+          },
+          "heightModifier": "BETWEEN"
+        },
+        "request": {
+          "height": {
+            "modifier": "BETWEEN",
+            "value2": 213
+          }
+        }
+      },
+      {
+        "label": "height: BETWEEN min and max",
+        "state": {
+          "height": {
+            "min": "138",
+            "max": "213"
+          },
+          "heightModifier": "BETWEEN"
+        },
+        "request": {
+          "height": {
+            "modifier": "BETWEEN",
+            "value": 138,
+            "value2": 213
+          }
+        }
+      },
+      {
+        "label": "height: IS_NULL min only",
+        "state": {
+          "height": {
+            "min": "138"
+          },
+          "heightModifier": "IS_NULL"
+        },
+        "request": {
+          "height": {
+            "modifier": "IS_NULL"
+          }
+        }
+      },
+      {
+        "label": "height: IS_NULL max only",
+        "state": {
+          "height": {
+            "max": "213"
+          },
+          "heightModifier": "IS_NULL"
+        },
+        "request": {
+          "height": {
+            "modifier": "IS_NULL"
+          }
+        }
+      },
+      {
+        "label": "height: IS_NULL min and max",
+        "state": {
+          "height": {
+            "min": "138",
+            "max": "213"
+          },
+          "heightModifier": "IS_NULL"
+        },
+        "request": {
+          "height": {
+            "modifier": "IS_NULL"
+          }
+        }
+      },
+      {
+        "label": "height: NOT_NULL min only",
+        "state": {
+          "height": {
+            "min": "138"
+          },
+          "heightModifier": "NOT_NULL"
+        },
+        "request": {
+          "height": {
+            "modifier": "NOT_NULL"
+          }
+        }
+      },
+      {
+        "label": "height: NOT_NULL max only",
+        "state": {
+          "height": {
+            "max": "213"
+          },
+          "heightModifier": "NOT_NULL"
+        },
+        "request": {
+          "height": {
+            "modifier": "NOT_NULL"
+          }
+        }
+      },
+      {
+        "label": "height: NOT_NULL min and max",
+        "state": {
+          "height": {
+            "min": "138",
+            "max": "213"
+          },
+          "heightModifier": "NOT_NULL"
+        },
+        "request": {
+          "height": {
+            "modifier": "NOT_NULL"
+          }
+        }
+      },
+      {
+        "label": "height: min only",
+        "state": {
+          "height": {
+            "min": "138"
+          }
+        },
+        "request": {
+          "height": {
+            "modifier": "BETWEEN",
+            "value": 138
+          }
+        }
+      },
+      {
+        "label": "height: max only",
+        "state": {
+          "height": {
+            "max": "213"
+          }
+        },
+        "request": {
+          "height": {
+            "modifier": "BETWEEN",
+            "value2": 213
+          }
+        }
+      },
+      {
+        "label": "height: min and max",
+        "state": {
+          "height": {
+            "min": "138",
+            "max": "213"
+          }
+        },
+        "request": {
+          "height": {
+            "modifier": "BETWEEN",
+            "value": 138,
+            "value2": 213
+          }
+        }
+      },
+      {
+        "label": "weight: BETWEEN min only",
+        "state": {
+          "weight": {
+            "min": "73"
+          },
+          "weightModifier": "BETWEEN"
+        },
+        "request": {
+          "weight": {
+            "modifier": "BETWEEN",
+            "value": 73
+          }
+        }
+      },
+      {
+        "label": "weight: BETWEEN max only",
+        "state": {
+          "weight": {
+            "max": "158"
+          },
+          "weightModifier": "BETWEEN"
+        },
+        "request": {
+          "weight": {
+            "modifier": "BETWEEN",
+            "value2": 158
+          }
+        }
+      },
+      {
+        "label": "weight: BETWEEN min and max",
+        "state": {
+          "weight": {
+            "min": "73",
+            "max": "158"
+          },
+          "weightModifier": "BETWEEN"
+        },
+        "request": {
+          "weight": {
+            "modifier": "BETWEEN",
+            "value": 73,
+            "value2": 158
+          }
+        }
+      },
+      {
+        "label": "weight: IS_NULL min only",
+        "state": {
+          "weight": {
+            "min": "73"
+          },
+          "weightModifier": "IS_NULL"
+        },
+        "request": {
+          "weight": {
+            "modifier": "IS_NULL"
+          }
+        }
+      },
+      {
+        "label": "weight: IS_NULL max only",
+        "state": {
+          "weight": {
+            "max": "158"
+          },
+          "weightModifier": "IS_NULL"
+        },
+        "request": {
+          "weight": {
+            "modifier": "IS_NULL"
+          }
+        }
+      },
+      {
+        "label": "weight: IS_NULL min and max",
+        "state": {
+          "weight": {
+            "min": "73",
+            "max": "158"
+          },
+          "weightModifier": "IS_NULL"
+        },
+        "request": {
+          "weight": {
+            "modifier": "IS_NULL"
+          }
+        }
+      },
+      {
+        "label": "weight: NOT_NULL min only",
+        "state": {
+          "weight": {
+            "min": "73"
+          },
+          "weightModifier": "NOT_NULL"
+        },
+        "request": {
+          "weight": {
+            "modifier": "NOT_NULL"
+          }
+        }
+      },
+      {
+        "label": "weight: NOT_NULL max only",
+        "state": {
+          "weight": {
+            "max": "158"
+          },
+          "weightModifier": "NOT_NULL"
+        },
+        "request": {
+          "weight": {
+            "modifier": "NOT_NULL"
+          }
+        }
+      },
+      {
+        "label": "weight: NOT_NULL min and max",
+        "state": {
+          "weight": {
+            "min": "73",
+            "max": "158"
+          },
+          "weightModifier": "NOT_NULL"
+        },
+        "request": {
+          "weight": {
+            "modifier": "NOT_NULL"
+          }
+        }
+      },
+      {
+        "label": "weight: min only",
+        "state": {
+          "weight": {
+            "min": "73"
+          }
+        },
+        "request": {
+          "weight": {
+            "modifier": "BETWEEN",
+            "value": 73
+          }
+        }
+      },
+      {
+        "label": "weight: max only",
+        "state": {
+          "weight": {
+            "max": "158"
+          }
+        },
+        "request": {
+          "weight": {
+            "modifier": "BETWEEN",
+            "value2": 158
+          }
+        }
+      },
+      {
+        "label": "weight: min and max",
+        "state": {
+          "weight": {
+            "min": "73",
+            "max": "158"
+          }
+        },
+        "request": {
+          "weight": {
+            "modifier": "BETWEEN",
+            "value": 73,
+            "value2": 158
+          }
+        }
+      },
+      {
+        "label": "penisLength: BETWEEN min only",
+        "state": {
+          "penisLength": {
+            "min": "10"
+          },
+          "penisLengthModifier": "BETWEEN"
+        },
+        "request": {
+          "penis_length": {
+            "modifier": "BETWEEN",
+            "value": 10
+          }
+        }
+      },
+      {
+        "label": "penisLength: BETWEEN max only",
+        "state": {
+          "penisLength": {
+            "max": "30"
+          },
+          "penisLengthModifier": "BETWEEN"
+        },
+        "request": {
+          "penis_length": {
+            "modifier": "BETWEEN",
+            "value2": 30
+          }
+        }
+      },
+      {
+        "label": "penisLength: BETWEEN min and max",
+        "state": {
+          "penisLength": {
+            "min": "10",
+            "max": "30"
+          },
+          "penisLengthModifier": "BETWEEN"
+        },
+        "request": {
+          "penis_length": {
+            "modifier": "BETWEEN",
+            "value": 10,
+            "value2": 30
+          }
+        }
+      },
+      {
+        "label": "penisLength: IS_NULL min only",
+        "state": {
+          "penisLength": {
+            "min": "10"
+          },
+          "penisLengthModifier": "IS_NULL"
+        },
+        "request": {
+          "penis_length": {
+            "modifier": "IS_NULL"
+          }
+        }
+      },
+      {
+        "label": "penisLength: IS_NULL max only",
+        "state": {
+          "penisLength": {
+            "max": "30"
+          },
+          "penisLengthModifier": "IS_NULL"
+        },
+        "request": {
+          "penis_length": {
+            "modifier": "IS_NULL"
+          }
+        }
+      },
+      {
+        "label": "penisLength: IS_NULL min and max",
+        "state": {
+          "penisLength": {
+            "min": "10",
+            "max": "30"
+          },
+          "penisLengthModifier": "IS_NULL"
+        },
+        "request": {
+          "penis_length": {
+            "modifier": "IS_NULL"
+          }
+        }
+      },
+      {
+        "label": "penisLength: NOT_NULL min only",
+        "state": {
+          "penisLength": {
+            "min": "10"
+          },
+          "penisLengthModifier": "NOT_NULL"
+        },
+        "request": {
+          "penis_length": {
+            "modifier": "NOT_NULL"
+          }
+        }
+      },
+      {
+        "label": "penisLength: NOT_NULL max only",
+        "state": {
+          "penisLength": {
+            "max": "30"
+          },
+          "penisLengthModifier": "NOT_NULL"
+        },
+        "request": {
+          "penis_length": {
+            "modifier": "NOT_NULL"
+          }
+        }
+      },
+      {
+        "label": "penisLength: NOT_NULL min and max",
+        "state": {
+          "penisLength": {
+            "min": "10",
+            "max": "30"
+          },
+          "penisLengthModifier": "NOT_NULL"
+        },
+        "request": {
+          "penis_length": {
+            "modifier": "NOT_NULL"
+          }
+        }
+      },
+      {
+        "label": "penisLength: min only",
+        "state": {
+          "penisLength": {
+            "min": "10"
+          }
+        },
+        "request": {
+          "penis_length": {
+            "modifier": "BETWEEN",
+            "value": 10
+          }
+        }
+      },
+      {
+        "label": "penisLength: max only",
+        "state": {
+          "penisLength": {
+            "max": "30"
+          }
+        },
+        "request": {
+          "penis_length": {
+            "modifier": "BETWEEN",
+            "value2": 30
+          }
+        }
+      },
+      {
+        "label": "penisLength: min and max",
+        "state": {
+          "penisLength": {
+            "min": "10",
+            "max": "30"
+          }
+        },
+        "request": {
+          "penis_length": {
+            "modifier": "BETWEEN",
+            "value": 10,
+            "value2": 30
+          }
+        }
+      }
+    ]
+  },
+  "prodPresets": [
+    {
+      "name": "Fave Ladies",
+      "stored": {
+        "id": "6a1cdecf-5228-4e23-9205-d235bc8df240",
+        "name": "Fave Ladies",
+        "filters": {
+          "gender": "FEMALE"
+        },
+        "sort": "rating",
+        "direction": "DESC",
+        "createdAt": "2025-11-08T02:04:38.675Z"
+      },
+      "asDefault": {
+        "panelFilters": {
+          "gender": [
+            "FEMALE"
+          ]
+        },
+        "url": "",
+        "request": {
+          "filter": {
+            "page": 1,
+            "per_page": 24,
+            "q": "",
+            "sort": "rating",
+            "direction": "DESC"
+          },
+          "performer_filter": {},
+          "where": {
+            "match": "all",
+            "rules": [
+              {
+                "field": "gender",
+                "criterion": {
+                  "value": [
+                    "FEMALE"
+                  ],
+                  "modifier": "INCLUDES"
+                }
+              }
+            ]
+          }
+        }
+      },
+      "afterLoad": {
+        "panelFilters": {
+          "gender": [
+            "FEMALE"
+          ]
+        },
+        "url": "?gender=FEMALE&sort=rating&dir=DESC",
+        "request": {
+          "filter": {
+            "page": 1,
+            "per_page": 24,
+            "q": "",
+            "sort": "rating",
+            "direction": "DESC"
+          },
+          "performer_filter": {},
+          "where": {
+            "match": "all",
+            "rules": [
+              {
+                "field": "gender",
+                "criterion": {
+                  "value": [
+                    "FEMALE"
+                  ],
+                  "modifier": "INCLUDES"
+                }
+              }
+            ]
+          }
+        }
+      },
+      "buildListQueryFromItsFilters": {
+        "filter": {
+          "page": 1,
+          "per_page": 24,
+          "q": "",
+          "sort": "rating",
+          "direction": "DESC"
+        },
+        "performer_filter": {},
+        "where": {
+          "match": "all",
+          "rules": [
+            {
+              "field": "gender",
+              "criterion": {
+                "value": [
+                  "FEMALE"
+                ],
+                "modifier": "INCLUDES"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

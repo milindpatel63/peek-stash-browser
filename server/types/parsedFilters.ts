@@ -1,0 +1,364 @@
+/**
+ * What the request parser (`utils/listRequest.ts`) hands the query builders:
+ * one already-valid criterion per contract field, the sort, the page and the
+ * search text. The builders rely on it: no unknown keys, every modifier
+ * present and valid for its field, refs parsed into pairs with at most
+ * MAX_REF_VALUES per criterion, depth normalised, the sort a member of the
+ * list's sort keys, the direction upper-case.
+ */
+import type {
+  BooleanSpec,
+  DateSpec,
+  EntityKind,
+  EnumSpec,
+  FieldSpec,
+  FieldSpecOf,
+  InstanceSpec,
+  ListKind,
+  Match,
+  NumberSpec,
+  PlaylistItemSort,
+  PlaylistSpec,
+  PresenceModifier,
+  RefModifier,
+  RefSpec,
+  SortDirection,
+  SortOf,
+  TextSpec,
+} from "@peek/shared-types/filters/index.js";
+import type { MinimalCountFilter, MinimalScope } from "./api/index.js";
+
+/**
+ * A parsed filter value. `instanceId` undefined is a bare legacy id, which
+ * matches that id on every allowed instance (server-sql.md). The resolved
+ * ref, with its instance known, is `EntityRef` in `utils/entityRef.ts`.
+ */
+export interface FilterRef {
+  readonly id: string;
+  readonly instanceId: string | undefined;
+}
+
+/**
+ * Ids of another entity. refs is empty only beside `excludes`. depth is 0
+ * unless the field is hierarchical; -1 means every descendant.
+ */
+export interface RefCriterion {
+  readonly refs: readonly FilterRef[];
+  /** Single-valued fields never INCLUDES_ALL */
+  readonly modifier: RefModifier;
+  readonly depth: number;
+  /**
+   * Ids none of which a row may have, beside `refs` (the fields that
+   * declare `excludable`), to the same depth; never empty when present.
+   * The base builder's `leavesOf` splits them into a leaf of their own
+   * (`<field>_not`, EXCLUDES), so a field's clause never sees them.
+   */
+  readonly excludes?: readonly FilterRef[];
+}
+
+/**
+ * "Has none" (IS_NULL) or "has any" (NOT_NULL) of a ref field, only on the
+ * fields that declare them; refs is empty. Only live related rows the
+ * viewer can see count. `excludes` as on RefCriterion.
+ */
+export interface RefPresenceCriterion {
+  readonly refs: readonly [];
+  readonly modifier: PresenceModifier;
+  readonly depth: number;
+  readonly excludes?: readonly FilterRef[];
+}
+
+/** A ref field's criterion: ids, or presence where the field offers it */
+export type RefFieldCriterion = RefCriterion | RefPresenceCriterion;
+
+/**
+ * Peek playlist ids: positive integers, distinct, 1 to the field's
+ * maxValues. Only the playlists the viewer may read count; any other id
+ * holds no scenes (never refused, so a count reveals nothing about it).
+ */
+export interface PlaylistCriterion {
+  readonly ids: readonly number[];
+  readonly modifier: RefModifier;
+}
+
+/**
+ * BETWEEN has at least one side: value alone is at least it, value2 alone at
+ * most it. NOT_BETWEEN has both. IS_NULL and NOT_NULL only on the fields
+ * that declare them (a number a row may lack).
+ */
+export type NumberCriterion =
+  | {
+      readonly modifier: "EQUALS" | "NOT_EQUALS" | "GREATER_THAN" | "LESS_THAN";
+      readonly value: number;
+    }
+  | {
+      readonly modifier: "BETWEEN";
+      readonly value: number | undefined;
+      readonly value2: number | undefined;
+    }
+  | {
+      readonly modifier: "NOT_BETWEEN";
+      readonly value: number;
+      readonly value2: number;
+    }
+  | { readonly modifier: "IS_NULL" | "NOT_NULL" };
+
+/**
+ * Values are validated YYYY-MM-DD dates or ISO date-times. BETWEEN has at
+ * least one side: value alone is from that day on, value2 alone up to the
+ * end of its day. NOT_BETWEEN has both. A builder reads a day in the
+ * column's kind (`buildDayFilter`, `buildInstantFilter` in
+ * `utils/sqlClauses.ts`).
+ */
+export type DateCriterion =
+  | {
+      readonly modifier: "EQUALS" | "NOT_EQUALS" | "GREATER_THAN" | "LESS_THAN";
+      readonly value: string;
+    }
+  | {
+      readonly modifier: "BETWEEN";
+      readonly value: string | undefined;
+      readonly value2: string | undefined;
+    }
+  | {
+      readonly modifier: "NOT_BETWEEN";
+      readonly value: string;
+      readonly value2: string;
+    }
+  | { readonly modifier: "IS_NULL" | "NOT_NULL" };
+
+/** The value is trimmed, 1 to the field's maxLength characters */
+export type TextCriterion =
+  | {
+      readonly modifier:
+        | "INCLUDES"
+        | "EXCLUDES"
+        | "EQUALS"
+        | "NOT_EQUALS"
+        | "STARTS_WITH";
+      readonly value: string;
+    }
+  | { readonly modifier: "IS_NULL" | "NOT_NULL" };
+
+export interface EnumCriterion<V extends string> {
+  readonly modifier: "EQUALS" | "NOT_EQUALS" | "GREATER_THAN" | "LESS_THAN";
+  readonly value: V;
+}
+
+/** Any of these values (INCLUDES) or, where the field offers it, none (EXCLUDES); never empty */
+export interface MultiEnumCriterion<
+  V extends string,
+  M extends MultiEnumModifier = "INCLUDES",
+> {
+  readonly modifier: M;
+  readonly values: readonly V[];
+}
+
+/** The modifiers a multi-valued enum criterion carries values under */
+export type MultiEnumModifier = "INCLUDES" | "EXCLUDES";
+
+/** A multi-valued enum offering IS_NULL ("not set") and NOT_NULL ("is set") */
+export type MultiEnumFieldCriterion<
+  V extends string,
+  M extends MultiEnumModifier = "INCLUDES",
+> = MultiEnumCriterion<V, M> | { readonly modifier: "IS_NULL" | "NOT_NULL" };
+
+/** The parsed criterion of one field spec */
+export type CriterionOf<S extends FieldSpec> =
+  S extends RefSpec<EntityKind, infer M>
+    ? [Extract<M, PresenceModifier>] extends [never]
+      ? RefCriterion
+      : RefFieldCriterion
+    : S extends PlaylistSpec
+      ? PlaylistCriterion
+      : S extends NumberSpec
+        ? NumberCriterion
+        : S extends DateSpec
+          ? DateCriterion
+          : S extends TextSpec
+            ? TextCriterion
+            : S extends EnumSpec<infer V, infer M, infer Multi>
+              ? Multi extends true
+                ? [Extract<M, PresenceModifier>] extends [never]
+                  ? MultiEnumCriterion<V, Extract<M, MultiEnumModifier>>
+                  : MultiEnumFieldCriterion<V, Extract<M, MultiEnumModifier>>
+                : EnumCriterion<V>
+              : S extends BooleanSpec
+                ? boolean
+                : never;
+
+/**
+ * One optional, already-valid criterion per field of a table; booleans stay
+ * boolean. The instance field is lifted out to `specificInstanceId`.
+ */
+export type ParsedFields<F extends Readonly<Record<string, FieldSpec>>> = {
+  readonly [K in keyof F as F[K] extends InstanceSpec
+    ? never
+    : K]?: CriterionOf<F[K]>;
+};
+
+/** The parsed `<entity>_filter`; top-level ids are merged into `ids` (INCLUDES) */
+export type ParsedFilter<E extends ListKind> = ParsedFields<FieldSpecOf<E>>;
+
+/** The fields a `where` row may name: every parsed field but `ids` (the instance field is already lifted out) */
+type WhereFieldOf<E extends ListKind> = Exclude<
+  keyof ParsedFilter<E> & string,
+  "ids"
+>;
+
+/** One parsed row: a field and its criterion as `filter` would carry it */
+export type ParsedWhereLeaf<E extends ListKind> = {
+  [F in WhereFieldOf<E>]: {
+    readonly field: F;
+    readonly criterion: NonNullable<ParsedFilter<E>[F]>;
+  };
+}[WhereFieldOf<E>];
+
+/**
+ * A parsed `where`: the root's rules are rows and groups, a group's only
+ * rows. Never empty: empty rows and groups drop, and an empty root is no
+ * where. At most WHERE_LIMITS' rows, groups and refs.
+ */
+export interface ParsedWhereGroup<E extends ListKind> {
+  readonly match: Match;
+  readonly rules: readonly (ParsedWhereLeaf<E> | ParsedWhereGroup<E>)[];
+}
+
+/**
+ * A sort only a request within ranked refs carries: the scene list of
+ * Recommended sorts by `recommended`, the rank (`parseRecommendedListRequest`)
+ */
+export type RankedSortOf<K extends ListKind> = K extends "scene"
+  ? "recommended"
+  : never;
+
+export interface ParsedSort<K extends ListKind> {
+  /** Whitelisted; "random_<n>" arrives as field "random", seed n % 1e8 */
+  readonly field: SortOf<K> | RankedSortOf<K>;
+  readonly direction: "ASC" | "DESC";
+  /** Set only for random (the daily seed unless given) */
+  readonly seed: number | undefined;
+}
+
+export interface ParsedListRequest<E extends ListKind> {
+  /** >= 1 */
+  readonly page: number;
+  /** 1..PER_PAGE_MAX */
+  readonly perPage: number;
+  /** Trimmed, non-empty, at most 200 characters */
+  readonly q: string | undefined;
+  readonly sort: ParsedSort<E>;
+  readonly filter: ParsedFilter<E>;
+  /** The user's rows (`where`), AND-ed after `filter`; absent when none */
+  readonly where?: ParsedWhereGroup<E>;
+  /** `<entity>_filter.instance_id`, INSTANCE_ID_PATTERN */
+  readonly specificInstanceId: string | undefined;
+  /**
+   * `filter.count`: false reads the page alone and answers a null total (a
+   * page change of a list whose total the client holds); counted otherwise
+   */
+  readonly count?: boolean;
+}
+
+/**
+ * The clip filter (`clip_filter`, or the old GET's parameters mapped onto
+ * it). `is_generated` absent lists every clip; the Clips page sends true for
+ * its default ("With preview only").
+ */
+export type ParsedClipFilter = ParsedFilter<"clip">;
+
+/**
+ * What the clip builder takes: `POST /api/library/clips` parsed, or `GET
+ * /api/clips` read onto the same fields (`is_generated` absent: every clip,
+ * as the Clips page's All clips and a scene's clips with ungenerated ones)
+ */
+export type ClipListRequest = ParsedListRequest<"clip">;
+
+/** `GET /api/scenes/:id/clips` */
+export interface ParsedSceneClipsQuery {
+  /** The `:id` path parameter, a Stash id */
+  readonly sceneId: string;
+  /** Clips without a generated preview too; false when absent */
+  readonly includeUngenerated: boolean;
+  /** The required `instanceId` parameter, INSTANCE_ID_PATTERN */
+  readonly instanceId: string;
+}
+
+/** `GET /api/library/scenes/:id/similar`: 12 scenes a page */
+export interface ParsedSimilarScenesQuery {
+  /** The `:id` path parameter, a Stash id */
+  readonly sceneId: string;
+  /** >= 1 */
+  readonly page: number;
+  /** The seed's instance (the required `instanceId`), INSTANCE_ID_PATTERN */
+  readonly instanceId: string;
+}
+
+/** `GET /api/library/scenes/recommended` */
+export interface ParsedRecommendedQuery {
+  /** >= 1 */
+  readonly page: number;
+  /** 1..PER_PAGE_MAX; 24 when absent */
+  readonly perPage: number;
+}
+
+/** A playlist's item sort: a member of `PLAYLIST_ITEM_SORTS` */
+export interface ParsedPlaylistItemSort {
+  readonly field: PlaylistItemSort;
+  readonly direction: SortDirection;
+  /** Set when the field is `random`, undefined otherwise */
+  readonly seed: number | undefined;
+}
+
+/** `GET /api/playlists/:id` */
+export interface ParsedPlaylistItemsQuery {
+  /**
+   * One page of the items the viewer can see: page >= 1 (1 when absent),
+   * perPage 1..PLAYLIST_ITEMS_PER_PAGE_MAX (50 when absent)
+   */
+  readonly paging: { readonly page: number; readonly perPage: number };
+  /** Position ASC when the request names none */
+  readonly sort: ParsedPlaylistItemSort;
+}
+
+/** `GET /api/playlists` and `GET /api/playlists/shared` */
+export interface ParsedPlaylistsQuery {
+  /**
+   * `containsScene`: the scene each playlist says it holds or not, with its
+   * instance (a bare id is refused); undefined when not asked
+   */
+  readonly containsScene:
+    | { readonly id: string; readonly instanceId: string }
+    | undefined;
+}
+
+/** The lists with a `/minimal` endpoint (the entity pickers) */
+export type MinimalKind =
+  | "scene"
+  | "performer"
+  | "studio"
+  | "tag"
+  | "group"
+  | "gallery";
+
+/** `POST /api/library/<entities>/minimal`: one page, always in name order */
+export interface ParsedMinimalRequest<E extends MinimalKind> {
+  readonly entity: E;
+  readonly q: string | undefined;
+  /** 1..MINIMAL_PER_PAGE_MAX; 50 when absent */
+  readonly perPage: number;
+  /**
+   * Only these entities (at most MINIMAL_IDS_MAX); a bare ref matches its id
+   * on every instance. Undefined when absent or empty.
+   */
+  readonly ids: readonly FilterRef[] | undefined;
+  /** Only the keys sent, each a non-negative integer; OR semantics */
+  readonly countFilter: MinimalCountFilter | undefined;
+  /**
+   * "allEnabled": every live entity on every enabled, synced instance, in
+   * place of the user's selection and without the user's exclusions (an
+   * admin's Content Restrictions editor); undefined for what the user sees.
+   * Whether the user may send it is the query's check.
+   */
+  readonly scope: MinimalScope | undefined;
+}

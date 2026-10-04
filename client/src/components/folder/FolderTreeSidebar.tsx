@@ -1,10 +1,17 @@
 // client/src/components/folder/FolderTreeSidebar.jsx
-import { useState, useMemo, useEffect, useRef } from "react";
-import { LucideChevronRight, LucideChevronDown, LucideFolder, LucideFolderOpen } from "lucide-react";
-import { buildTagTree } from "../../utils/buildTagTree";
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  LucideChevronDown,
+  LucideChevronRight,
+  LucideFolder,
+  LucideFolderOpen,
+} from "lucide-react";
+import { useIncrementalList } from "../../hooks/useIncrementalList";
+import { buildTagTree, tagTreeKey } from "../../utils/buildTagTree";
 
 interface TagItem {
   id: string;
+  instanceId?: string | null;
   name: string;
   parents?: Array<{ id: string }>;
   image_path?: string | null;
@@ -12,6 +19,7 @@ interface TagItem {
 
 interface TreeNodeData {
   id: string;
+  instanceId?: string | null;
   name: string;
   children?: TreeNodeData[];
 }
@@ -27,25 +35,45 @@ interface Props {
  * Collapsible tree sidebar for folder view on desktop.
  * Shows tag hierarchy with expand/collapse controls.
  * Features sticky parent breadcrumb for scroll context.
+ * Paths and expansion go by each tag's `tagTreeKey` ("id:instanceId"), as
+ * the folder view's paths do.
  */
-const FolderTreeSidebar = ({ tags, currentPath, onNavigate, className = "" }: Props) => {
+const FolderTreeSidebar = ({
+  tags,
+  currentPath,
+  onNavigate,
+  className = "",
+}: Props) => {
   // Build tree from tags
-  const tree = useMemo(() => buildTagTree(tags, { sortField: "name", sortDirection: "ASC" }) as TreeNodeData[], [tags]);
+  const tree: TreeNodeData[] = useMemo(
+    () =>
+      buildTagTree(tags, {
+        sortField: "name",
+        sortDirection: "ASC",
+      }),
+    [tags]
+  );
 
-  // Create a map of tag IDs to names for breadcrumb display
-  const tagNameMap = useMemo(() => {
-    const map = new Map();
-    const addToMap = (nodes: Array<{ id: string; name: string; children?: unknown[] }>) => {
-      for (const node of nodes) {
-        map.set(node.id, node.name);
-        if ((node.children?.length ?? 0) > 0) {
-          addToMap(node.children as Array<{ id: string; name: string; children?: unknown[] }>);
-        }
-      }
-    };
-    addToMap(tree);
-    return map;
-  }, [tree]);
+  // Root folders mount in chunks; the sentinel after the last loads the next.
+  // The open folder's root always shows, even while it is past the chunk.
+  const {
+    visible: visibleRoots,
+    sentinelRef,
+    hasMore: hasMoreRoots,
+  } = useIncrementalList(tree);
+  const pinnedRoot = useMemo(() => {
+    const rootKey = currentPath[0];
+    if (!hasMoreRoots || !rootKey) return null;
+    if (visibleRoots.some((node) => tagTreeKey(node) === rootKey)) return null;
+    return tree.find((node) => tagTreeKey(node) === rootKey) ?? null;
+  }, [tree, visibleRoots, hasMoreRoots, currentPath]);
+  const shownRoots = pinnedRoot ? [...visibleRoots, pinnedRoot] : visibleRoots;
+
+  // Create a map of tag keys to names for breadcrumb display
+  const tagNameMap = useMemo(
+    () => new Map(tags.map((tag) => [tagTreeKey(tag), tag.name])),
+    [tags]
+  );
 
   // Ref for the sidebar container (for scrolling)
   const sidebarRef = useRef<HTMLDivElement>(null);
@@ -74,7 +102,9 @@ const FolderTreeSidebar = ({ tags, currentPath, onNavigate, className = "" }: Pr
       setTimeout(() => {
         // Use the full path as the selector to handle tags with multiple parents
         const pathKey = currentPath.join(",");
-        const nodeElement = scrollContentRef.current?.querySelector(`[data-node-path="${pathKey}"]`);
+        const nodeElement = scrollContentRef.current?.querySelector(
+          `[data-node-path="${pathKey}"]`
+        );
         if (nodeElement) {
           nodeElement.scrollIntoView({ behavior: "smooth", block: "center" });
         }
@@ -159,11 +189,11 @@ const FolderTreeSidebar = ({ tags, currentPath, onNavigate, className = "" }: Pr
 
         {/* Tree nodes */}
         <div className="pb-2">
-          {tree.map((node) => (
+          {shownRoots.map((node) => (
             <TreeNode
-              key={node.id}
+              key={tagTreeKey(node)}
               node={node}
-              nodePath={[node.id]}
+              nodePath={[tagTreeKey(node)]}
               depth={0}
               expanded={expanded}
               toggleExpanded={toggleExpanded}
@@ -171,6 +201,14 @@ const FolderTreeSidebar = ({ tags, currentPath, onNavigate, className = "" }: Pr
               onNavigate={onNavigate}
             />
           ))}
+          {hasMoreRoots && (
+            <div
+              ref={sentinelRef}
+              data-testid="folder-tree-sentinel"
+              aria-hidden="true"
+              className="h-px"
+            />
+          )}
         </div>
       </div>
     </div>
@@ -187,10 +225,20 @@ interface TreeNodeProps {
   onNavigate: (path: string[]) => void;
 }
 
-const TreeNode = ({ node, nodePath, depth, expanded, toggleExpanded, currentPath, onNavigate }: TreeNodeProps) => {
-  const hasChildren = node.children && node.children.length > 0;
-  const isExpanded = expanded.has(node.id);
-  const isInPath = currentPath.includes(node.id);
+const TreeNode = ({
+  node,
+  nodePath,
+  depth,
+  expanded,
+  toggleExpanded,
+  currentPath,
+  onNavigate,
+}: TreeNodeProps) => {
+  const children = node.children ?? [];
+  const hasChildren = children.length > 0;
+  const key = tagTreeKey(node);
+  const isExpanded = expanded.has(key);
+  const isInPath = currentPath.includes(key);
   // Check if this exact path matches the current path (handles multi-parent tags)
   const pathKey = nodePath.join(",");
   const currentPathKey = currentPath.join(",");
@@ -210,15 +258,21 @@ const TreeNode = ({ node, nodePath, depth, expanded, toggleExpanded, currentPath
           type="button"
           onClick={(e) => {
             e.stopPropagation();
-            toggleExpanded(node.id);
+            toggleExpanded(key);
           }}
           className="p-1 hover:bg-[var(--bg-primary)] rounded"
           style={{ visibility: hasChildren ? "visible" : "hidden" }}
         >
           {isExpanded ? (
-            <LucideChevronDown size={14} style={{ color: "var(--text-tertiary)" }} />
+            <LucideChevronDown
+              size={14}
+              style={{ color: "var(--text-tertiary)" }}
+            />
           ) : (
-            <LucideChevronRight size={14} style={{ color: "var(--text-tertiary)" }} />
+            <LucideChevronRight
+              size={14}
+              style={{ color: "var(--text-tertiary)" }}
+            />
           )}
         </button>
 
@@ -244,11 +298,11 @@ const TreeNode = ({ node, nodePath, depth, expanded, toggleExpanded, currentPath
       {/* Children */}
       {hasChildren && isExpanded && (
         <div>
-          {node.children!.map((child) => (
+          {children.map((child) => (
             <TreeNode
-              key={child.id}
+              key={tagTreeKey(child)}
               node={child}
-              nodePath={[...nodePath, child.id]}
+              nodePath={[...nodePath, tagTreeKey(child)]}
               depth={depth + 1}
               expanded={expanded}
               toggleExpanded={toggleExpanded}

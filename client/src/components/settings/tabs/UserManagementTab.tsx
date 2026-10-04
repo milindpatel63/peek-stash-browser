@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { apiGet } from "../../../api";
 import { useAuth } from "../../../hooks/useAuth";
+import { StatusMessage } from "../../ui/index";
 import UserManagementSection from "../UserManagementSection";
 
 interface UserItem {
@@ -20,12 +21,14 @@ const UserManagementTab = () => {
   const [message, setMessage] = useState<string | null>(null);
 
   useEffect(() => {
-    loadUsers();
+    void loadUsers();
   }, []);
 
+  // The spinner shows only until the first answer: a reload after an edit
+  // keeps the table and updates it in place, and a failed one shows the error
+  // above the table it leaves as it was
   const loadUsers = async () => {
     try {
-      setLoading(true);
       setError(null);
       const data = await apiGet<{ users: UserItem[] }>("/user/all");
       setUsers(data.users || []);
@@ -61,36 +64,28 @@ const UserManagementTab = () => {
     <div>
       {/* Messages */}
       {message && (
-        <div
-          className="mb-6 p-4 rounded-lg"
-          style={{
-            backgroundColor: "rgba(34, 197, 94, 0.1)",
-            border: "1px solid rgba(34, 197, 94, 0.3)",
-            color: "rgb(34, 197, 94)",
-          }}
-        >
-          {message}
-        </div>
+        <StatusMessage
+          variant="success"
+          title={null}
+          className="mb-6"
+          message={message}
+        />
       )}
 
       {error && (
-        <div
-          className="mb-6 p-4 rounded-lg"
-          style={{
-            backgroundColor: "rgba(239, 68, 68, 0.1)",
-            border: "1px solid rgba(239, 68, 68, 0.3)",
-            color: "rgb(239, 68, 68)",
-          }}
-        >
-          {error}
-        </div>
+        <StatusMessage
+          variant="error"
+          title={null}
+          className="mb-6"
+          message={error}
+        />
       )}
 
       {/* User Management Section */}
       <UserManagementSection
         users={users}
         currentUser={currentUser as UserItem | null}
-        onUsersChanged={loadUsers}
+        onUsersChanged={() => void loadUsers()}
         onMessage={showMessage}
         onError={showError}
       />

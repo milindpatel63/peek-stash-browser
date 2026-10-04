@@ -1,31 +1,37 @@
-import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
-import { visualizer } from "rollup-plugin-visualizer";
 import path from "path";
+import { visualizer } from "rollup-plugin-visualizer";
 import { fileURLToPath } from "url";
+import { defineConfig } from "vite";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // https://vite.dev/config/
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
   plugins: [
     react({
       babel: {
         plugins: [["babel-plugin-react-compiler"]],
       },
     }),
-    // Bundle analyzer - generates stats.html in dist folder
-    visualizer({
-      filename: "dist/stats.html",
-      open: false,
-      gzipSize: true,
-      brotliSize: true,
-    }),
+    // Bundle analyzer, only for `npm run build:analyze` (--mode analyze):
+    // writes dist/stats.html
+    mode === "analyze" &&
+      visualizer({
+        filename: "dist/stats.html",
+        open: false,
+        gzipSize: true,
+        brotliSize: true,
+      }),
   ],
   build: {
     outDir: "dist",
     assetsDir: "assets",
     sourcemap: false,
+    // Never inline fonts into the render-blocking CSS: as separate files the
+    // browser fetches each unicode-range subset only when a page uses it
+    assetsInlineLimit: (filePath) =>
+      /\.(woff2?|ttf|otf)$/.test(filePath) ? false : undefined,
     // Optimize production build
     minify: "terser",
     terserOptions: {
@@ -36,18 +42,34 @@ export default defineConfig({
     },
     // Chunk splitting configuration
     rollupOptions: {
+      // A barrel (src/**/index.ts) only re-exports (tests/scripts/barrels.test.ts
+      // holds it to that), so it has no side effects of its own: importing one
+      // name from it no longer pulls every module it re-exports into the chunk
+      treeshake: {
+        moduleSideEffects: (id, external) =>
+          external || !/\/client\/src\/.*\/index\.ts$/.test(id),
+      },
       output: {
         manualChunks: {
           // Separate vendor chunks for better caching
-          "react-vendor": ["react", "react-dom", "react-router-dom"],
+          "react-vendor": [
+            "react",
+            "react-dom",
+            "react-dom/client",
+            "react-router-dom",
+          ],
           "query-vendor": ["@tanstack/react-query"],
           "video-vendor": ["video.js"],
-          "ui-vendor": ["lucide-react", "react-hot-toast"],
+          // lucide-react stays out: each chunk that imports an icon carries it,
+          // so the first load holds only the icons the shell draws
+          "ui-vendor": ["react-hot-toast"],
         },
       },
     },
-    // Increase chunk size warning limit (we'll fix with code splitting)
-    chunkSizeWarningLimit: 1000,
+    // video-vendor is video.js with VHS (about 620 kB, no smaller build plays
+    // HLS and DASH); any other chunk this large still warns. The gate is
+    // scripts/bundleBudget.mjs (npm run check:bundle), which fails the build.
+    chunkSizeWarningLimit: 650,
   },
   server: {
     port: 5173,
@@ -87,4 +109,4 @@ export default defineConfig({
     port: 4173,
     host: true,
   },
-});
+}));

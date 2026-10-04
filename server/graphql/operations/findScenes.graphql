@@ -20,10 +20,13 @@ query FindScenes(
       details
       director
       id
+      last_played_at
       o_counter
+      o_history
       organized
       play_count
       play_duration
+      play_history
       rating100
       resume_time
       title
@@ -119,8 +122,6 @@ query FindScenes(
         webp
       }
       sceneStreams {
-        url
-        mime_type
         label
       }
       galleries {

@@ -12,7 +12,12 @@ interface ColorInputProps {
 /**
  * Color picker input component
  */
-const ColorInput = ({ label, value, onChange, description }: ColorInputProps) => {
+const ColorInput = ({
+  label,
+  value,
+  onChange,
+  description,
+}: ColorInputProps) => {
   return (
     <div>
       <label
@@ -67,7 +72,12 @@ interface FontSelectorProps {
 /**
  * Font selector component
  */
-const FontSelector = ({ label, value, onChange, options }: FontSelectorProps) => {
+const FontSelector = ({
+  label,
+  value,
+  onChange,
+  options,
+}: FontSelectorProps) => {
   return (
     <div>
       <label
@@ -139,10 +149,15 @@ interface CustomThemeEditorProps {
 /**
  * Custom theme editor component
  */
-const CustomThemeEditor = ({ theme, onSave, onCancel, isNew = false }: CustomThemeEditorProps) => {
+const CustomThemeEditor = ({
+  theme,
+  onSave,
+  onCancel,
+  isNew = false,
+}: CustomThemeEditorProps) => {
   const [name, setName] = useState(theme?.name || "");
   const [config, setConfig] = useState(
-    theme?.config || {
+    theme?.config ?? {
       mode: "dark",
       fonts: {
         brand: fontOptions.brand[0].value,
@@ -176,11 +191,16 @@ const CustomThemeEditor = ({ theme, onSave, onCancel, isNew = false }: CustomThe
     setConfig((prev) => {
       const newConfig = { ...prev };
       const keys = path.split(".");
-      let current: Record<string, unknown> = newConfig as unknown as Record<string, unknown>;
-      for (let i = 0; i < keys.length - 1; i++) {
-        current = current[keys[i]] as Record<string, unknown>;
+      const lastKey = keys.pop();
+      if (lastKey === undefined) return newConfig;
+      let current: Record<string, unknown> = newConfig as unknown as Record<
+        string,
+        unknown
+      >;
+      for (const key of keys) {
+        current = current[key] as Record<string, unknown>;
       }
-      current[keys[keys.length - 1]] = value;
+      current[lastKey] = value;
       return newConfig;
     });
   };

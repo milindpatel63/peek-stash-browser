@@ -14,7 +14,7 @@
  * Increment O counter for an image
  */
 export interface IncrementImageOCounterRequest {
-  instanceId?: string;
+  instanceId: string;
   imageId: string;
 }
 
@@ -22,6 +22,25 @@ export interface IncrementImageOCounterResponse {
   success: true;
   oCount: number;
   timestamp: string;
+}
+
+// =============================================================================
+// DECREMENT IMAGE O COUNTER
+// =============================================================================
+
+/**
+ * POST /api/image-view-history/decrement-o
+ * Remove the user's newest O on an image ("Remove last O"). At 0 Os it
+ * changes nothing and answers oCount 0.
+ */
+export interface DecrementImageOCounterRequest {
+  instanceId: string;
+  imageId: string;
+}
+
+export interface DecrementImageOCounterResponse {
+  success: true;
+  oCount: number;
 }
 
 // =============================================================================
@@ -33,7 +52,7 @@ export interface IncrementImageOCounterResponse {
  * Record image view when opened in Lightbox
  */
 export interface RecordImageViewRequest {
-  instanceId?: string;
+  instanceId: string;
   imageId: string;
 }
 

@@ -4,7 +4,7 @@
  * Tests that buildPerformerFilter correctly transforms UI filter values
  * into the GraphQL filter format expected by the backend
  */
-import { describe, it, expect } from "vitest";
+import { describe, expect, it } from "vitest";
 import { buildPerformerFilter } from "../../src/utils/filterConfig";
 
 describe("buildPerformerFilter", () => {
@@ -95,21 +95,24 @@ describe("buildPerformerFilter", () => {
   });
 
   describe("Gender Filter", () => {
-    it("should build gender filter with EQUALS modifier", () => {
+    it("a gender stored as one value sends a one-element list under INCLUDES", () => {
       const uiFilters = { gender: "FEMALE" };
       const result = buildPerformerFilter(uiFilters);
       expect(result.gender).toEqual({
-        value: "FEMALE",
-        modifier: "EQUALS",
+        value: ["FEMALE"],
+        modifier: "INCLUDES",
       });
     });
 
-    it("should build gender filter for MALE", () => {
-      const uiFilters = { gender: "MALE" };
+    it("several genders under Is NONE of these send EXCLUDES", () => {
+      const uiFilters = {
+        gender: ["MALE", "TRANSGENDER_MALE"],
+        genderModifier: "EXCLUDES",
+      };
       const result = buildPerformerFilter(uiFilters);
       expect(result.gender).toEqual({
-        value: "MALE",
-        modifier: "EQUALS",
+        value: ["MALE", "TRANSGENDER_MALE"],
+        modifier: "EXCLUDES",
       });
     });
 
@@ -133,25 +136,25 @@ describe("buildPerformerFilter", () => {
       });
     });
 
-    it("should build rating filter with GREATER_THAN modifier (min only)", () => {
+    it("should build rating filter with a lone minimum as BETWEEN (min only)", () => {
       const uiFilters = {
         rating: { min: 70 },
       };
       const result = buildPerformerFilter(uiFilters);
       expect(result.rating100).toEqual({
-        modifier: "GREATER_THAN",
-        value: 69, // min - 1
+        modifier: "BETWEEN",
+        value: 70,
       });
     });
 
-    it("should build rating filter with LESS_THAN modifier (max only)", () => {
+    it("should build rating filter with a lone maximum as BETWEEN (max only)", () => {
       const uiFilters = {
         rating: { max: 50 },
       };
       const result = buildPerformerFilter(uiFilters);
       expect(result.rating100).toEqual({
-        modifier: "LESS_THAN",
-        value: 51, // max + 1
+        modifier: "BETWEEN",
+        value2: 50,
       });
     });
 
@@ -222,14 +225,14 @@ describe("buildPerformerFilter", () => {
   });
 
   describe("Range Filters (Age, Birth Year, Death Year, Career Length)", () => {
-    it("should build age filter with GREATER_THAN modifier (min only)", () => {
+    it("should build age filter with a lone minimum as BETWEEN (min only)", () => {
       const uiFilters = {
         age: { min: 21 },
       };
       const result = buildPerformerFilter(uiFilters);
       expect(result.age).toEqual({
-        value: 20, // min - 1
-        modifier: "GREATER_THAN",
+        value: 21,
+        modifier: "BETWEEN",
       });
     });
 
@@ -245,14 +248,14 @@ describe("buildPerformerFilter", () => {
       });
     });
 
-    it("should build birth_year filter with GREATER_THAN modifier (min only)", () => {
+    it("should build birth_year filter with a lone minimum as BETWEEN (min only)", () => {
       const uiFilters = {
         birthYear: { min: 1990 },
       };
       const result = buildPerformerFilter(uiFilters);
       expect(result.birth_year).toEqual({
-        value: 1989, // min - 1
-        modifier: "GREATER_THAN",
+        value: 1990,
+        modifier: "BETWEEN",
       });
     });
 
@@ -268,14 +271,14 @@ describe("buildPerformerFilter", () => {
       });
     });
 
-    it("should build death_year filter with GREATER_THAN modifier (min only)", () => {
+    it("should build death_year filter with a lone minimum as BETWEEN (min only)", () => {
       const uiFilters = {
         deathYear: { min: 2015 },
       };
       const result = buildPerformerFilter(uiFilters);
       expect(result.death_year).toEqual({
-        value: 2014, // min - 1
-        modifier: "GREATER_THAN",
+        value: 2015,
+        modifier: "BETWEEN",
       });
     });
 
@@ -291,14 +294,14 @@ describe("buildPerformerFilter", () => {
       });
     });
 
-    it("should build career_length filter with GREATER_THAN modifier (min only)", () => {
+    it("should build career_length filter with a lone minimum as BETWEEN (min only)", () => {
       const uiFilters = {
         careerLength: { min: 5 },
       };
       const result = buildPerformerFilter(uiFilters);
       expect(result.career_length).toEqual({
-        value: 4, // min - 1
-        modifier: "GREATER_THAN",
+        value: 5,
+        modifier: "BETWEEN",
       });
     });
 
@@ -314,47 +317,47 @@ describe("buildPerformerFilter", () => {
       });
     });
 
-    it("should build age filter with LESS_THAN modifier (max only)", () => {
+    it("should build age filter with a lone maximum as BETWEEN (max only)", () => {
       const uiFilters = {
         age: { max: 30 },
       };
       const result = buildPerformerFilter(uiFilters);
       expect(result.age).toEqual({
-        value: 31, // max + 1
-        modifier: "LESS_THAN",
+        value2: 30,
+        modifier: "BETWEEN",
       });
     });
 
-    it("should build birth_year filter with LESS_THAN modifier (max only)", () => {
+    it("should build birth_year filter with a lone maximum as BETWEEN (max only)", () => {
       const uiFilters = {
         birthYear: { max: 2000 },
       };
       const result = buildPerformerFilter(uiFilters);
       expect(result.birth_year).toEqual({
-        value: 2001, // max + 1
-        modifier: "LESS_THAN",
+        value2: 2000,
+        modifier: "BETWEEN",
       });
     });
 
-    it("should build death_year filter with LESS_THAN modifier (max only)", () => {
+    it("should build death_year filter with a lone maximum as BETWEEN (max only)", () => {
       const uiFilters = {
         deathYear: { max: 2020 },
       };
       const result = buildPerformerFilter(uiFilters);
       expect(result.death_year).toEqual({
-        value: 2021, // max + 1
-        modifier: "LESS_THAN",
+        value2: 2020,
+        modifier: "BETWEEN",
       });
     });
 
-    it("should build career_length filter with LESS_THAN modifier (max only)", () => {
+    it("should build career_length filter with a lone maximum as BETWEEN (max only)", () => {
       const uiFilters = {
         careerLength: { max: 10 },
       };
       const result = buildPerformerFilter(uiFilters);
       expect(result.career_length).toEqual({
-        value: 11, // max + 1
-        modifier: "LESS_THAN",
+        value2: 10,
+        modifier: "BETWEEN",
       });
     });
 
@@ -372,14 +375,14 @@ describe("buildPerformerFilter", () => {
   });
 
   describe("Physical Attribute Range Filters (Height, Weight, Penis Length)", () => {
-    it("should build height filter with GREATER_THAN modifier (min only)", () => {
+    it("should build height filter with a lone minimum as BETWEEN (min only)", () => {
       const uiFilters = {
         height: { min: 160 },
       };
       const result = buildPerformerFilter(uiFilters);
       expect(result.height).toEqual({
-        value: 159, // min - 1
-        modifier: "GREATER_THAN",
+        value: 160,
+        modifier: "BETWEEN",
       });
     });
 
@@ -395,14 +398,14 @@ describe("buildPerformerFilter", () => {
       });
     });
 
-    it("should build weight filter with GREATER_THAN modifier (min only)", () => {
+    it("should build weight filter with a lone minimum as BETWEEN (min only)", () => {
       const uiFilters = {
         weight: { min: 50 },
       };
       const result = buildPerformerFilter(uiFilters);
       expect(result.weight).toEqual({
-        value: 49, // min - 1
-        modifier: "GREATER_THAN",
+        value: 50,
+        modifier: "BETWEEN",
       });
     });
 
@@ -418,47 +421,47 @@ describe("buildPerformerFilter", () => {
       });
     });
 
-    it("should build height filter with LESS_THAN modifier (max only)", () => {
+    it("should build height filter with a lone maximum as BETWEEN (max only)", () => {
       const uiFilters = {
         height: { max: 180 },
       };
       const result = buildPerformerFilter(uiFilters);
       expect(result.height).toEqual({
-        value: 181, // max + 1
-        modifier: "LESS_THAN",
+        value2: 180,
+        modifier: "BETWEEN",
       });
     });
 
-    it("should build weight filter with LESS_THAN modifier (max only)", () => {
+    it("should build weight filter with a lone maximum as BETWEEN (max only)", () => {
       const uiFilters = {
         weight: { max: 70 },
       };
       const result = buildPerformerFilter(uiFilters);
       expect(result.weight).toEqual({
-        value: 71, // max + 1
-        modifier: "LESS_THAN",
+        value2: 70,
+        modifier: "BETWEEN",
       });
     });
 
-    it("should build penis_length filter with LESS_THAN modifier (max only)", () => {
+    it("should build penis_length filter with a lone maximum as BETWEEN (max only)", () => {
       const uiFilters = {
         penisLength: { max: 20 },
       };
       const result = buildPerformerFilter(uiFilters);
       expect(result.penis_length).toEqual({
-        value: 21, // max + 1
-        modifier: "LESS_THAN",
+        value2: 20,
+        modifier: "BETWEEN",
       });
     });
 
-    it("should build penis_length filter with GREATER_THAN modifier (min only)", () => {
+    it("should build penis_length filter with a lone minimum as BETWEEN (min only)", () => {
       const uiFilters = {
         penisLength: { min: 15 },
       };
       const result = buildPerformerFilter(uiFilters);
       expect(result.penis_length).toEqual({
-        value: 14, // min - 1
-        modifier: "GREATER_THAN",
+        value: 15,
+        modifier: "BETWEEN",
       });
     });
 
@@ -488,25 +491,25 @@ describe("buildPerformerFilter", () => {
       });
     });
 
-    it("should build o_counter filter with GREATER_THAN modifier (min only)", () => {
+    it("should build o_counter filter with a lone minimum as BETWEEN (min only)", () => {
       const uiFilters = {
         oCounter: { min: 10 },
       };
       const result = buildPerformerFilter(uiFilters);
       expect(result.o_counter).toEqual({
-        modifier: "GREATER_THAN",
-        value: 9, // min - 1
+        modifier: "BETWEEN",
+        value: 10,
       });
     });
 
-    it("should build o_counter filter with LESS_THAN modifier (max only)", () => {
+    it("should build o_counter filter with a lone maximum as BETWEEN (max only)", () => {
       const uiFilters = {
         oCounter: { max: 15 },
       };
       const result = buildPerformerFilter(uiFilters);
       expect(result.o_counter).toEqual({
-        modifier: "LESS_THAN",
-        value: 16, // max + 1
+        modifier: "BETWEEN",
+        value2: 15,
       });
     });
 
@@ -522,25 +525,25 @@ describe("buildPerformerFilter", () => {
       });
     });
 
-    it("should build play_count filter with GREATER_THAN modifier (min only)", () => {
+    it("should build play_count filter with a lone minimum as BETWEEN (min only)", () => {
       const uiFilters = {
         playCount: { min: 20 },
       };
       const result = buildPerformerFilter(uiFilters);
       expect(result.play_count).toEqual({
-        modifier: "GREATER_THAN",
-        value: 19, // min - 1
+        modifier: "BETWEEN",
+        value: 20,
       });
     });
 
-    it("should build play_count filter with LESS_THAN modifier (max only)", () => {
+    it("should build play_count filter with a lone maximum as BETWEEN (max only)", () => {
       const uiFilters = {
         playCount: { max: 30 },
       };
       const result = buildPerformerFilter(uiFilters);
       expect(result.play_count).toEqual({
-        modifier: "LESS_THAN",
-        value: 31, // max + 1
+        modifier: "BETWEEN",
+        value2: 30,
       });
     });
 
@@ -556,25 +559,25 @@ describe("buildPerformerFilter", () => {
       });
     });
 
-    it("should build scene_count filter with GREATER_THAN modifier (min only)", () => {
+    it("should build scene_count filter with a lone minimum as BETWEEN (min only)", () => {
       const uiFilters = {
         sceneCount: { min: 100 },
       };
       const result = buildPerformerFilter(uiFilters);
       expect(result.scene_count).toEqual({
-        modifier: "GREATER_THAN",
-        value: 99, // min - 1
+        modifier: "BETWEEN",
+        value: 100,
       });
     });
 
-    it("should build scene_count filter with LESS_THAN modifier (max only)", () => {
+    it("should build scene_count filter with a lone maximum as BETWEEN (max only)", () => {
       const uiFilters = {
         sceneCount: { max: 75 },
       };
       const result = buildPerformerFilter(uiFilters);
       expect(result.scene_count).toEqual({
-        modifier: "LESS_THAN",
-        value: 76, // max + 1
+        modifier: "BETWEEN",
+        value2: 75,
       });
     });
 
@@ -593,14 +596,14 @@ describe("buildPerformerFilter", () => {
   });
 
   describe("Date Range Filters", () => {
-    it("should build birthdate filter with GREATER_THAN modifier (start only)", () => {
+    it("should build birthdate filter with a lone minimum as BETWEEN (start only)", () => {
       const uiFilters = {
         birthdate: { start: "1990-01-01" },
       };
       const result = buildPerformerFilter(uiFilters);
       expect(result.birthdate).toEqual({
         value: "1990-01-01",
-        modifier: "GREATER_THAN",
+        modifier: "BETWEEN",
       });
     });
 
@@ -616,14 +619,14 @@ describe("buildPerformerFilter", () => {
       });
     });
 
-    it("should build death_date filter with GREATER_THAN modifier (start only)", () => {
+    it("should build death_date filter with a lone minimum as BETWEEN (start only)", () => {
       const uiFilters = {
         deathDate: { start: "2015-01-01" },
       };
       const result = buildPerformerFilter(uiFilters);
       expect(result.death_date).toEqual({
         value: "2015-01-01",
-        modifier: "GREATER_THAN",
+        modifier: "BETWEEN",
       });
     });
 
@@ -639,14 +642,14 @@ describe("buildPerformerFilter", () => {
       });
     });
 
-    it("should build created_at filter with GREATER_THAN modifier (start only)", () => {
+    it("should build created_at filter with a lone minimum as BETWEEN (start only)", () => {
       const uiFilters = {
         createdAt: { start: "2023-01-01" },
       };
       const result = buildPerformerFilter(uiFilters);
       expect(result.created_at).toEqual({
         value: "2023-01-01",
-        modifier: "GREATER_THAN",
+        modifier: "BETWEEN",
       });
     });
 
@@ -662,14 +665,14 @@ describe("buildPerformerFilter", () => {
       });
     });
 
-    it("should build updated_at filter with GREATER_THAN modifier (start only)", () => {
+    it("should build updated_at filter with a lone minimum as BETWEEN (start only)", () => {
       const uiFilters = {
         updatedAt: { start: "2024-01-01" },
       };
       const result = buildPerformerFilter(uiFilters);
       expect(result.updated_at).toEqual({
         value: "2024-01-01",
-        modifier: "GREATER_THAN",
+        modifier: "BETWEEN",
       });
     });
 
@@ -735,13 +738,20 @@ describe("buildPerformerFilter", () => {
       };
       const result = buildPerformerFilter(uiFilters);
       expect(result.favorite).toBe(true);
-      expect(result.gender).toEqual({ value: "FEMALE", modifier: "EQUALS" });
+      expect(result.gender).toEqual({
+        value: ["FEMALE"],
+        modifier: "INCLUDES",
+      });
       expect(result.rating100).toEqual({
         modifier: "BETWEEN",
         value: 70,
         value2: 100,
       });
-      expect(result.age).toEqual({ value: 21, modifier: "BETWEEN", value2: 35 });
+      expect(result.age).toEqual({
+        value: 21,
+        modifier: "BETWEEN",
+        value2: 35,
+      });
       expect(result.tags).toEqual({
         value: ["1", "2"],
         modifier: "INCLUDES",
@@ -767,31 +777,41 @@ describe("buildPerformerFilter", () => {
       const result = buildPerformerFilter(uiFilters);
 
       expect(result.favorite).toBe(true);
-      expect(result.gender).toEqual({ value: "FEMALE", modifier: "EQUALS" });
+      expect(result.gender).toEqual({
+        value: ["FEMALE"],
+        modifier: "INCLUDES",
+      });
       expect(result.tags).toEqual({
         value: ["1", "2"],
         modifier: "INCLUDES_ALL",
       });
       expect(result.rating100).toEqual({
-        modifier: "GREATER_THAN",
-        value: 79,
+        modifier: "BETWEEN",
+        value: 80,
       });
-      expect(result.age).toEqual({ value: 25, modifier: "BETWEEN", value2: 40 });
-      expect(result.height).toEqual({ value: 164, modifier: "GREATER_THAN" }); // min - 1
+      expect(result.age).toEqual({
+        value: 25,
+        modifier: "BETWEEN",
+        value2: 40,
+      });
+      expect(result.height).toEqual({ value: 165, modifier: "BETWEEN" });
       expect(result.o_counter).toEqual({
         modifier: "BETWEEN",
         value: 5,
         value2: 20,
       });
       expect(result.play_count).toEqual({
-        modifier: "GREATER_THAN",
-        value: 9,
+        modifier: "BETWEEN",
+        value: 10,
       });
       expect(result.scene_count).toEqual({
-        modifier: "LESS_THAN",
-        value: 101,
+        modifier: "BETWEEN",
+        value2: 100,
       });
-      expect(result.ethnicity).toEqual({ value: "caucasian", modifier: "EQUALS" });
+      expect(result.ethnicity).toEqual({
+        value: "caucasian",
+        modifier: "EQUALS",
+      });
       expect(result.hair_color).toEqual({ value: "brown", modifier: "EQUALS" });
       expect(result.name).toEqual({ value: "Jane", modifier: "INCLUDES" });
       expect(result.created_at).toEqual({
@@ -844,44 +864,36 @@ describe("buildPerformerFilter", () => {
         value2: 50,
       });
       expect(result.o_counter).toEqual({
-        modifier: "GREATER_THAN",
-        value: -1, // 0 - 1
+        modifier: "BETWEEN",
+        value: 0, // 0 - 1
       });
     });
   });
 
-  describe("Imperial Unit Conversion", () => {
-    it("should convert imperial height (feet/inches) to cm", () => {
-      const uiFilters = {
-        height: { feetMin: "5", inchesMin: "10", feetMax: "6", inchesMax: "2" },
-      };
-      const result = buildPerformerFilter(uiFilters, "imperial");
-      // 5'10" = 178cm, 6'2" = 188cm
+  describe("Body measures are metric", () => {
+    it("sends Height as the centimetres the state holds", () => {
+      // An imperial viewer's editor stored 5'10" to 6'2" as 177 to 189 cm
+      const result = buildPerformerFilter({
+        height: { min: "177", max: "189" },
+      });
       expect(result.height).toEqual({
         modifier: "BETWEEN",
-        value: 178,
-        value2: 188,
+        value: 177,
+        value2: 189,
       });
     });
 
-    it("should convert imperial height min only", () => {
-      const uiFilters = {
-        height: { feetMin: "5", inchesMin: "6" },
-      };
-      const result = buildPerformerFilter(uiFilters, "imperial");
-      // 5'6" = 168cm, min - 1 = 167
+    it("sends Height min only as the centimetres the state holds", () => {
+      const result = buildPerformerFilter({ height: { min: "167" } });
       expect(result.height).toEqual({
-        modifier: "GREATER_THAN",
-        value: 167, // min - 1
+        modifier: "BETWEEN",
+        value: 167,
       });
     });
 
-    it("should convert imperial weight (lbs) to kg", () => {
-      const uiFilters = {
-        weight: { min: "110", max: "180" },
-      };
-      const result = buildPerformerFilter(uiFilters, "imperial");
-      // 110 lbs = 50 kg, 180 lbs = 82 kg
+    it("sends Weight as the kilograms the state holds", () => {
+      // An imperial viewer's 110 to 180 lbs, stored as 50 to 82 kg
+      const result = buildPerformerFilter({ weight: { min: "50", max: "82" } });
       expect(result.weight).toEqual({
         modifier: "BETWEEN",
         value: 50,
@@ -889,46 +901,29 @@ describe("buildPerformerFilter", () => {
       });
     });
 
-    it("should convert imperial penis length (inches) to cm", () => {
-      const uiFilters = {
-        penisLength: { min: "5", max: "8" },
-      };
-      const result = buildPerformerFilter(uiFilters, "imperial");
-      // 5 in = 12.7cm -> 12 (parseInt), 8 in = 20.3cm -> 20 (parseInt)
+    it("sends Penis Length as the centimetres the state holds", () => {
+      // 5 in to 8 in stored as 12.7 and 20.32 cm; the request keeps both decimals
+      const result = buildPerformerFilter({
+        penisLength: { min: "12.7", max: "20.32" },
+      });
       expect(result.penis_length).toEqual({
         modifier: "BETWEEN",
-        value: 12,
-        value2: 20,
+        value: 12.7,
+        value2: 20.32,
       });
     });
 
-    it("should not convert when unit preference is metric", () => {
-      const uiFilters = {
-        height: { min: "170", max: "180" },
-        weight: { min: "60", max: "80" },
-      };
-      const result = buildPerformerFilter(uiFilters, "metric");
+    it("reads the old feet-and-inches height shape as centimetres", () => {
+      // A preset saved by an imperial viewer before the state went metric
+      const result = buildPerformerFilter({
+        height: { feetMin: "5", inchesMin: "10", feetMax: "6", inchesMax: "2" },
+      });
+      // 5'10" = 177.8 cm, the request keeps the decimals; a maximum is the
+      // top of its inch, 6'2" up to 189 cm as the editor writes it
       expect(result.height).toEqual({
         modifier: "BETWEEN",
-        value: 170,
-        value2: 180,
-      });
-      expect(result.weight).toEqual({
-        modifier: "BETWEEN",
-        value: 60,
-        value2: 80,
-      });
-    });
-
-    it("should default to metric when no unit preference provided", () => {
-      const uiFilters = {
-        height: { min: "170", max: "180" },
-      };
-      const result = buildPerformerFilter(uiFilters);
-      expect(result.height).toEqual({
-        modifier: "BETWEEN",
-        value: 170,
-        value2: 180,
+        value: 177.8,
+        value2: 189,
       });
     });
   });

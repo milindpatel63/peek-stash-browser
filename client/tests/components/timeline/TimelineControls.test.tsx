@@ -1,7 +1,8 @@
 // client/tests/components/timeline/TimelineControls.test.jsx
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { must } from "@tests/testUtils";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import TimelineControls from "../../../src/components/timeline/TimelineControls";
 
 describe("TimelineControls", () => {
@@ -57,7 +58,10 @@ describe("TimelineControls", () => {
         />
       );
 
-      const daysButton = screen.getByText("Days").closest("button")!;
+      const daysButton = must(
+        screen.getByText("Days").closest("button"),
+        "Days button"
+      );
       await user.click(daysButton);
 
       expect(onZoomLevelChange).toHaveBeenCalledWith("days");
@@ -74,19 +78,21 @@ describe("TimelineControls", () => {
         />
       );
 
-      await user.click(screen.getByText("Years").closest("button")!);
+      await user.click(
+        must(screen.getByText("Years").closest("button"), "Years button")
+      );
       expect(onZoomLevelChange).toHaveBeenCalledWith("years");
 
-      await user.click(screen.getByText("Weeks").closest("button")!);
+      await user.click(
+        must(screen.getByText("Weeks").closest("button"), "Weeks button")
+      );
       expect(onZoomLevelChange).toHaveBeenCalledWith("weeks");
     });
   });
 
   describe("Custom Props", () => {
     it("applies custom className", () => {
-      render(
-        <TimelineControls {...defaultProps} className="custom-class" />
-      );
+      render(<TimelineControls {...defaultProps} className="custom-class" />);
 
       const group = screen.getByRole("group");
       expect(group).toHaveClass("custom-class");
@@ -94,10 +100,7 @@ describe("TimelineControls", () => {
 
     it("renders subset of zoom levels when provided", () => {
       render(
-        <TimelineControls
-          {...defaultProps}
-          zoomLevels={["years", "months"]}
-        />
+        <TimelineControls {...defaultProps} zoomLevels={["years", "months"]} />
       );
 
       expect(screen.getByText("Years")).toBeInTheDocument();

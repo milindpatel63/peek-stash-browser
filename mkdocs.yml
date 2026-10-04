@@ -12,6 +12,13 @@ edit_uri: edit/main/docs/
 # Copyright
 copyright: Copyright &copy; 2025 carrotwaxr
 
+# Internal files kept off the public site
+exclude_docs: |
+  plans/
+  audits/
+  icon-inventory.html
+  icon.svg
+
 # Theme configuration
 theme:
   name: material
@@ -61,6 +68,8 @@ plugins:
         'development/api-reference.md': 'reference/api-reference.md'
         'reference/troubleshooting.md': 'getting-started/troubleshooting.md'
         'reference/faq.md': 'getting-started/faq.md'
+        # The manual regression checklist was retired; the E2E suite covers it
+        'development/regression-testing.md': 'development/local-setup.md#end-to-end-tests'
   - minify:
       minify_html: true
 
@@ -113,6 +122,7 @@ extra_javascript:
 # Page tree navigation
 nav:
   - Home: index.md
+  - What Peek Is: what-peek-is.md
   - Getting Started:
       - Installation: getting-started/installation.md
       - Configuration: getting-started/configuration.md
@@ -133,6 +143,7 @@ nav:
       - Images: user-guide/images.md
       - Keyboard Navigation: user-guide/keyboard-navigation.md
       - Merge Detection: user-guide/merge-detection.md
+      - Multiple Stash Servers: user-guide/multiple-stash-servers.md
       - Personalization: user-guide/personalization.md
       - Playlists: user-guide/playlists.md
       - Recommendations: user-guide/recommendations.md
@@ -147,7 +158,6 @@ nav:
       - Local Setup: development/local-setup.md
       - Technical Overview: development/technical-overview.md
       - Sync Architecture: development/sync-architecture.md
-      - Regression Testing Guide: development/regression-testing.md
 
 # Social links
 extra:

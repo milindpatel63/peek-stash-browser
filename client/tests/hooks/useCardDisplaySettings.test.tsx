@@ -1,12 +1,24 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { renderHook, act, waitFor } from "@testing-library/react";
+import { type ReactNode, useState } from "react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { act, renderHook, waitFor } from "@testing-library/react";
+import { createAuthValue } from "@tests/testUtils";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { getDefaultSettings } from "../../src/config/entityDisplayConfig";
+import {
+  AuthContext,
+  type AuthContextValue,
+} from "../../src/contexts/AuthContextProvider";
+// Import after mock setup
+import {
+  CardDisplaySettingsProvider,
+  useCardDisplaySettings,
+} from "../../src/contexts/CardDisplaySettingsContext";
 
 // Use vi.hoisted to create mock functions that can be accessed in vi.mock
 const { mockGet, mockPut } = vi.hoisted(() => {
   return {
-    mockGet: vi.fn(),
-    mockPut: vi.fn(),
+    mockGet: vi.fn<(...args: unknown[]) => Promise<unknown>>(),
+    mockPut: vi.fn<(...args: unknown[]) => Promise<unknown>>(),
   };
 });
 
@@ -16,8 +28,47 @@ vi.mock("../../src/api", () => ({
   apiPut: (...args: unknown[]) => mockPut(...args),
 }));
 
-// Import after mock setup
-import { CardDisplaySettingsProvider, useCardDisplaySettings } from "../../src/contexts/CardDisplaySettingsContext";
+// The provider loads settings only for a signed-in user (useAuth).
+const signedIn = createAuthValue({ isAuthenticated: true });
+
+/** A fresh query client per render, as the app has one per session */
+const newQueryClient = () =>
+  new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+function Wrapper({ children }: { children: ReactNode }) {
+  const [queryClient] = useState(newQueryClient);
+  return (
+    <QueryClientProvider client={queryClient}>
+      <AuthContext.Provider value={signedIn}>
+        <CardDisplaySettingsProvider>{children}</CardDisplaySettingsProvider>
+      </AuthContext.Provider>
+    </QueryClientProvider>
+  );
+}
+const wrapper = Wrapper;
+
+/** Renders the hook under a provider whose auth state can change. */
+function renderWithAuth(initialAuth: AuthContextValue) {
+  let auth = initialAuth;
+  const queryClient = newQueryClient();
+  const authWrapper = ({ children }: { children: ReactNode }) => (
+    <QueryClientProvider client={queryClient}>
+      <AuthContext.Provider value={auth}>
+        <CardDisplaySettingsProvider>{children}</CardDisplaySettingsProvider>
+      </AuthContext.Provider>
+    </QueryClientProvider>
+  );
+  const view = renderHook(() => useCardDisplaySettings(), {
+    wrapper: authWrapper,
+  });
+  return {
+    ...view,
+    setAuth: (next: AuthContextValue) => {
+      auth = next;
+      view.rerender();
+    },
+  };
+}
 
 describe("useCardDisplaySettings", () => {
   beforeEach(() => {
@@ -30,23 +81,25 @@ describe("useCardDisplaySettings", () => {
   describe("without provider", () => {
     it("throws error when used outside provider", () => {
       // Suppress console.error for this test
-      const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const consoleSpy = vi
+        .spyOn(console, "error")
+        .mockImplementation(() => {});
 
       expect(() => {
         renderHook(() => useCardDisplaySettings());
-      }).toThrow("useCardDisplaySettings must be used within CardDisplaySettingsProvider");
+      }).toThrow(
+        "useCardDisplaySettings must be used within CardDisplaySettingsProvider"
+      );
 
       consoleSpy.mockRestore();
     });
   });
 
   describe("with provider", () => {
-    const wrapper = ({ children }: { children: React.ReactNode }) => (
-      <CardDisplaySettingsProvider>{children}</CardDisplaySettingsProvider>
-    );
-
     it("initially shows loading state then loads", async () => {
-      const { result } = renderHook(() => useCardDisplaySettings(), { wrapper });
+      const { result } = renderHook(() => useCardDisplaySettings(), {
+        wrapper,
+      });
 
       // Initially loading
       expect(result.current.isLoading).toBe(true);
@@ -58,7 +111,9 @@ describe("useCardDisplaySettings", () => {
     });
 
     it("provides getSettings function", async () => {
-      const { result } = renderHook(() => useCardDisplaySettings(), { wrapper });
+      const { result } = renderHook(() => useCardDisplaySettings(), {
+        wrapper,
+      });
 
       await waitFor(() => {
         expect(result.current.isLoading).toBe(false);
@@ -68,7 +123,9 @@ describe("useCardDisplaySettings", () => {
     });
 
     it("provides updateSettings function", async () => {
-      const { result } = renderHook(() => useCardDisplaySettings(), { wrapper });
+      const { result } = renderHook(() => useCardDisplaySettings(), {
+        wrapper,
+      });
 
       await waitFor(() => {
         expect(result.current.isLoading).toBe(false);
@@ -78,13 +135,58 @@ describe("useCardDisplaySettings", () => {
     });
   });
 
-  describe("getSettings", () => {
-    const wrapper = ({ children }: { children: React.ReactNode }) => (
-      <CardDisplaySettingsProvider>{children}</CardDisplaySettingsProvider>
-    );
+  describe("auth", () => {
+    const userSettings = {
+      settings: { cardDisplaySettings: { scene: { showRating: false } } },
+    };
 
+    it("does not ask for user settings while signed out", async () => {
+      mockGet.mockResolvedValue(userSettings);
+      const { result } = renderWithAuth(
+        createAuthValue({ isAuthenticated: false, isLoading: false })
+      );
+
+      // Let any request the mount started settle before checking.
+      await act(async () => {});
+      expect(mockGet).not.toHaveBeenCalled();
+      expect(result.current.isLoading).toBe(false);
+      expect(result.current.getSettings("scene")).toEqual(
+        getDefaultSettings("scene")
+      );
+    });
+
+    it("loads user settings once the user signs in", async () => {
+      mockGet.mockResolvedValue(userSettings);
+      const { result, setAuth } = renderWithAuth(
+        createAuthValue({ isAuthenticated: false, isLoading: false })
+      );
+
+      setAuth(createAuthValue({ isAuthenticated: true, isLoading: false }));
+
+      await waitFor(() => {
+        expect(result.current.getSettings("scene").showRating).toBe(false);
+      });
+      expect(result.current.isLoading).toBe(false);
+      expect(mockGet).toHaveBeenCalledTimes(1);
+      expect(mockGet).toHaveBeenCalledWith("/user/settings", expect.anything());
+    });
+
+    it("stays loading without a request while auth is loading", async () => {
+      const { result } = renderWithAuth(
+        createAuthValue({ isAuthenticated: false, isLoading: true })
+      );
+
+      await act(async () => {});
+      expect(mockGet).not.toHaveBeenCalled();
+      expect(result.current.isLoading).toBe(true);
+    });
+  });
+
+  describe("getSettings", () => {
     it("returns default settings for scene entity type", async () => {
-      const { result } = renderHook(() => useCardDisplaySettings(), { wrapper });
+      const { result } = renderHook(() => useCardDisplaySettings(), {
+        wrapper,
+      });
 
       await waitFor(() => {
         expect(result.current.isLoading).toBe(false);
@@ -97,7 +199,9 @@ describe("useCardDisplaySettings", () => {
     });
 
     it("returns default settings for performer entity type (no showCodeOnCard)", async () => {
-      const { result } = renderHook(() => useCardDisplaySettings(), { wrapper });
+      const { result } = renderHook(() => useCardDisplaySettings(), {
+        wrapper,
+      });
 
       await waitFor(() => {
         expect(result.current.isLoading).toBe(false);
@@ -123,7 +227,9 @@ describe("useCardDisplaySettings", () => {
         },
       });
 
-      const { result } = renderHook(() => useCardDisplaySettings(), { wrapper });
+      const { result } = renderHook(() => useCardDisplaySettings(), {
+        wrapper,
+      });
 
       await waitFor(() => {
         expect(result.current.isLoading).toBe(false);
@@ -142,7 +248,9 @@ describe("useCardDisplaySettings", () => {
     });
 
     it("returns different defaults for different entity types", async () => {
-      const { result } = renderHook(() => useCardDisplaySettings(), { wrapper });
+      const { result } = renderHook(() => useCardDisplaySettings(), {
+        wrapper,
+      });
 
       await waitFor(() => {
         expect(result.current.isLoading).toBe(false);
@@ -162,12 +270,10 @@ describe("useCardDisplaySettings", () => {
   });
 
   describe("updateSettings", () => {
-    const wrapper = ({ children }: { children: React.ReactNode }) => (
-      <CardDisplaySettingsProvider>{children}</CardDisplaySettingsProvider>
-    );
-
     it("performs optimistic update", async () => {
-      const { result } = renderHook(() => useCardDisplaySettings(), { wrapper });
+      const { result } = renderHook(() => useCardDisplaySettings(), {
+        wrapper,
+      });
 
       await waitFor(() => {
         expect(result.current.isLoading).toBe(false);
@@ -181,8 +287,11 @@ describe("useCardDisplaySettings", () => {
         await result.current.updateSettings("scene", "showRating", false);
       });
 
-      // Should immediately reflect change (optimistic)
-      expect(result.current.getSettings("scene").showRating).toBe(false);
+      // Should reflect the change in the one settings cache, with no refetch
+      await waitFor(() =>
+        expect(result.current.getSettings("scene").showRating).toBe(false)
+      );
+      expect(mockGet).toHaveBeenCalledTimes(1);
     });
 
     it("calls API with merged settings", async () => {
@@ -194,7 +303,9 @@ describe("useCardDisplaySettings", () => {
         },
       });
 
-      const { result } = renderHook(() => useCardDisplaySettings(), { wrapper });
+      const { result } = renderHook(() => useCardDisplaySettings(), {
+        wrapper,
+      });
 
       await waitFor(() => {
         expect(result.current.isLoading).toBe(false);
@@ -215,9 +326,13 @@ describe("useCardDisplaySettings", () => {
 
     it("reverts on API error", async () => {
       mockPut.mockRejectedValueOnce(new Error("Network error"));
-      const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const consoleSpy = vi
+        .spyOn(console, "error")
+        .mockImplementation(() => {});
 
-      const { result } = renderHook(() => useCardDisplaySettings(), { wrapper });
+      const { result } = renderHook(() => useCardDisplaySettings(), {
+        wrapper,
+      });
 
       await waitFor(() => {
         expect(result.current.isLoading).toBe(false);
@@ -235,23 +350,25 @@ describe("useCardDisplaySettings", () => {
         }
       });
 
-      // Should revert to original state
-      expect(result.current.getSettings("scene").showRating).toBe(true);
+      // Should revert to original state: the refused save refetches
+      await waitFor(() =>
+        expect(result.current.getSettings("scene").showRating).toBe(true)
+      );
 
       consoleSpy.mockRestore();
     });
   });
 
   describe("error handling", () => {
-    const wrapper = ({ children }: { children: React.ReactNode }) => (
-      <CardDisplaySettingsProvider>{children}</CardDisplaySettingsProvider>
-    );
-
     it("handles API load failure gracefully", async () => {
-      const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const consoleSpy = vi
+        .spyOn(console, "error")
+        .mockImplementation(() => {});
       mockGet.mockRejectedValueOnce(new Error("Network error"));
 
-      const { result } = renderHook(() => useCardDisplaySettings(), { wrapper });
+      const { result } = renderHook(() => useCardDisplaySettings(), {
+        wrapper,
+      });
 
       await waitFor(() => {
         expect(result.current.isLoading).toBe(false);
@@ -269,7 +386,9 @@ describe("useCardDisplaySettings", () => {
         settings: { cardDisplaySettings: null },
       });
 
-      const { result } = renderHook(() => useCardDisplaySettings(), { wrapper });
+      const { result } = renderHook(() => useCardDisplaySettings(), {
+        wrapper,
+      });
 
       await waitFor(() => {
         expect(result.current.isLoading).toBe(false);
@@ -285,7 +404,9 @@ describe("useCardDisplaySettings", () => {
         settings: {},
       });
 
-      const { result } = renderHook(() => useCardDisplaySettings(), { wrapper });
+      const { result } = renderHook(() => useCardDisplaySettings(), {
+        wrapper,
+      });
 
       await waitFor(() => {
         expect(result.current.isLoading).toBe(false);

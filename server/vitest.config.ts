@@ -10,6 +10,10 @@ export default defineConfig({
   test: {
     globals: true,
     environment: "node",
+    // Session tokens need a secret; jwtSecret.test.ts deletes it per test
+    env: {
+      JWT_SECRET: "vitest-only-secret-0123456789abcdef0123456789",
+    },
     include: ["**/*.{test,spec}.{js,ts}"],
     exclude: [
       "node_modules",
@@ -36,10 +40,10 @@ export default defineConfig({
         "index.ts",
       ],
       thresholds: {
-        statements: 63,
-        branches: 72,
-        functions: 68,
-        lines: 63,
+        statements: 87,
+        branches: 89,
+        functions: 94,
+        lines: 87,
       },
     },
   },

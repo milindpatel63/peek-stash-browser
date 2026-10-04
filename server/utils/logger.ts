@@ -4,17 +4,109 @@
  * Log Levels (in order of verbosity):
  * - ERROR: Critical errors that need immediate attention
  * - WARN: Warning conditions that should be addressed
- * - INFO: Important informational messages (default)
- * - DEBUG: Detailed debugging information
+ * - INFO: Server events an admin reads: sync, users, settings,
+ *   restrictions, writes to Stash (default)
+ * - DEBUG: Per-request timings and other detailed debugging information
  * - VERBOSE: Very detailed/noisy debugging information
  */
 
 /**
- * Log context - arbitrary data to include with log messages
- * Can contain any JSON-serializable values or objects
- * Accepts any object with string keys for maximum flexibility
+ * Log context - arbitrary data to include with log messages. Any value is
+ * accepted: `serializeContext` writes errors, BigInts and circular objects
+ * readably, and never throws.
  */
 export type LogContext = { [key: string]: unknown };
+
+const UNSERIALISABLE_CONTEXT = "[unserialisable context]";
+const CIRCULAR = "[Circular]";
+
+/**
+ * An Error as the fields a log reader needs: name, message and stack, plus a
+ * database error's `code` and `meta` (Prisma, SQLite, Node system errors)
+ * and its `cause`, which the walk visits in turn.
+ */
+function serializeError(error: Error): Record<string, unknown> {
+  const fields: Record<string, unknown> = {
+    name: error.name,
+    message: error.message,
+    stack: error.stack,
+  };
+  if ("code" in error && error.code !== undefined) fields.code = error.code;
+  if ("meta" in error && error.meta !== undefined) fields.meta = error.meta;
+  if ("cause" in error && error.cause !== undefined) {
+    fields.cause = error.cause;
+  }
+  return fields;
+}
+
+function hasToJSON(
+  value: object
+): value is { toJSON: (key: string) => unknown } {
+  return "toJSON" in value && typeof value.toJSON === "function";
+}
+
+/**
+ * `value` rebuilt as `JSON.stringify` can write it: an Error as its fields, a
+ * BigInt as a number (a string past 2^53), and an object that is one of its
+ * own ancestors as "[Circular]". `ancestors` is the path from the root to
+ * `value` (pushed on entering an object, popped on leaving it), so the same
+ * object reached twice without a cycle is written twice. `toJSON` is called
+ * once, as `JSON.stringify` does; functions, symbols and undefined pass
+ * through for it to drop.
+ */
+function toLoggable(value: unknown, key: string, ancestors: object[]): unknown {
+  const current =
+    typeof value === "object" && value !== null && hasToJSON(value)
+      ? value.toJSON(key)
+      : value;
+  if (typeof current === "bigint") {
+    const asNumber = Number(current);
+    return Number.isSafeInteger(asNumber) ? asNumber : current.toString();
+  }
+  if (typeof current !== "object" || current === null) return current;
+  // A boxed string, number or boolean: JSON.stringify writes its value
+  if (
+    current instanceof String ||
+    current instanceof Number ||
+    current instanceof Boolean
+  ) {
+    return current;
+  }
+  if (ancestors.includes(current)) return CIRCULAR;
+
+  ancestors.push(current);
+  try {
+    if (Array.isArray(current)) {
+      return current.map((item: unknown, index) =>
+        toLoggable(item, String(index), ancestors)
+      );
+    }
+    const source = current instanceof Error ? serializeError(current) : current;
+    const fields: Record<string, unknown> = {};
+    for (const [name, field] of Object.entries(source)) {
+      fields[name] = toLoggable(field, name, ancestors);
+    }
+    return fields;
+  } finally {
+    ancestors.pop();
+  }
+}
+
+/**
+ * The context as one line of JSON. `JSON.stringify` writes an Error as `{}`
+ * and throws on a BigInt (raw SQL rows carry them) and on a cycle, so
+ * `toLoggable` first turns an Error into its fields, a BigInt into a number
+ * (a string past 2^53), and a true cycle into "[Circular]". Anything else
+ * that throws (a getter, a `toJSON`) gives "[unserialisable context]": a log
+ * call never becomes the caller's exception.
+ */
+export function serializeContext(context: LogContext): string {
+  try {
+    return JSON.stringify(toLoggable(context, "", []));
+  } catch {
+    return UNSERIALISABLE_CONTEXT;
+  }
+}
 
 export enum LogLevel {
   ERROR = 0,
@@ -71,7 +163,7 @@ class Logger {
   }
 
   /**
-   * Format log message with timestamp and level
+   * Format log message with timestamp and level, on one line
    */
   private format(
     level: LogLevel,
@@ -80,7 +172,7 @@ class Logger {
   ): string {
     const timestamp = new Date().toISOString();
     const levelName = LOG_LEVEL_NAMES[level];
-    const contextStr = context ? ` ${JSON.stringify(context)}` : "";
+    const contextStr = context ? ` ${serializeContext(context)}` : "";
     return `[${timestamp}] [${levelName}] ${message}${contextStr}`;
   }
 

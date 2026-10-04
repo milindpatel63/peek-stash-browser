@@ -1,14 +1,21 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Link } from "react-router-dom";
 import type { NormalizedScene } from "@peek/shared-types";
-import { useScenePlayer } from "../../contexts/ScenePlayerContext";
+import { useSceneClips } from "../../api/hooks/useSceneClips";
 import { useCardDisplaySettings } from "../../contexts/CardDisplaySettingsContext";
 import { useConfig } from "../../contexts/ConfigContext";
-import { getClipsForScene } from "../../api";
+import { useScenePlayer } from "../../contexts/ScenePlayerContext";
+import { describePlaybackMethod } from "../../utils/browserPlayback";
+import { formatDate } from "../../utils/date";
+import { getEntityPath } from "../../utils/entityLinks";
+import {
+  formatBitRate,
+  formatDuration,
+  formatFileSize,
+} from "../../utils/format";
+import type { Clip } from "../cards/ClipCard";
 import ClipList from "../clips/ClipList";
 import { LazyThumbnail, Paper, SectionLink, TagChips } from "../ui/index";
-import { formatBitRate, formatFileSize } from "../../utils/format";
-import { getEntityPath } from "../../utils/entityLinks";
 
 interface SceneDetailsProps {
   showDetails: boolean;
@@ -16,20 +23,6 @@ interface SceneDetailsProps {
   showTechnicalDetails: boolean;
   setShowTechnicalDetails: (value: boolean) => void;
 }
-
-const formatDuration = (seconds: number | undefined | null): string => {
-  if (!seconds) return "Unknown";
-  const hours = Math.floor(seconds / 3600);
-  const minutes = Math.floor((seconds % 3600) / 60);
-  const secs = Math.floor(seconds % 60);
-
-  if (hours > 0) {
-    return `${hours}:${minutes.toString().padStart(2, "0")}:${secs
-      .toString()
-      .padStart(2, "0")}`;
-  }
-  return `${minutes}:${secs.toString().padStart(2, "0")}`;
-};
 
 /**
  * Merge and deduplicate tags from scene direct tags and inherited tags
@@ -59,33 +52,16 @@ const SceneDetails = ({
   showTechnicalDetails,
   setShowTechnicalDetails,
 }: SceneDetailsProps) => {
-  const { scene, sceneLoading, compatibility } = useScenePlayer();
+  const { scene, sceneLoading } = useScenePlayer();
   const { getSettings } = useCardDisplaySettings();
   const sceneSettings = getSettings("scene") as Record<string, boolean>;
   const { hasMultipleInstances } = useConfig();
 
-  // Clips state
-  const [clips, setClips] = useState<Record<string, unknown>[]>([]);
-  const [clipsLoading, setClipsLoading] = useState(true);
+  // The scene's clips, shared with the player's timeline
+  const clipsQuery = useSceneClips(scene?.id ?? "", scene?.instanceId ?? "");
+  const clips = clipsQuery.data?.clips ?? [];
+  const clipsLoading = clipsQuery.isLoading;
   const [showClips, setShowClips] = useState(false); // Collapsed by default
-
-  // Fetch clips when scene changes
-  useEffect(() => {
-    async function fetchClips() {
-      if (!scene?.id) return;
-      setClipsLoading(true);
-      try {
-        const response = await getClipsForScene(scene.id, scene.instanceId, true) as { clips?: Record<string, unknown>[] };
-        setClips(response.clips || []);
-      } catch (err) {
-        console.error("Failed to fetch clips", err);
-        setClips([]);
-      } finally {
-        setClipsLoading(false);
-      }
-    }
-    fetchClips();
-  }, [scene?.id, scene?.instanceId]);
 
   // Handle clip click - dispatch event to seek video player
   const handleClipClick = (clip: { seconds: number }) => {
@@ -141,7 +117,11 @@ const SceneDetails = ({
                         Studio
                       </h3>
                       <Link
-                        to={getEntityPath('studio', scene.studio, hasMultipleInstances)}
+                        to={getEntityPath(
+                          "studio",
+                          scene.studio,
+                          hasMultipleInstances
+                        )}
                         className="text-base hover:underline hover:text-blue-400"
                         style={{ color: "var(--text-primary)" }}
                       >
@@ -179,7 +159,7 @@ const SceneDetails = ({
                         className="text-base"
                         style={{ color: "var(--text-primary)" }}
                       >
-                        {new Date(scene.date).toLocaleDateString()}
+                        {formatDate(scene.date)}
                       </p>
                     </div>
                   )}
@@ -215,7 +195,9 @@ const SceneDetails = ({
                     className="text-base"
                     style={{ color: "var(--text-primary)" }}
                   >
-                    {formatDuration(scene.files?.[0]?.duration)}
+                    {scene.files?.[0]?.duration
+                      ? formatDuration(scene.files[0].duration)
+                      : "Unknown"}
                   </p>
                 </div>
 
@@ -235,7 +217,11 @@ const SceneDetails = ({
                       {scene.performers.map((performer) => (
                         <Link
                           key={performer.id}
-                          to={getEntityPath('performer', performer, hasMultipleInstances)}
+                          to={getEntityPath(
+                            "performer",
+                            performer,
+                            hasMultipleInstances
+                          )}
                           className="flex flex-col items-center flex-shrink-0 group w-[120px]"
                         >
                           <LazyThumbnail
@@ -272,7 +258,9 @@ const SceneDetails = ({
                 return allTags.length > 0 ? (
                   <TagChips tags={allTags} />
                 ) : (
-                  <p style={{ color: "var(--text-muted)" }}>No tags for this scene</p>
+                  <p style={{ color: "var(--text-muted)" }}>
+                    No tags for this scene
+                  </p>
                 );
               })()}
             </Paper.Body>
@@ -307,8 +295,8 @@ const SceneDetails = ({
               {showClips && (
                 <Paper.Body>
                   <ClipList
-                    clips={clips as unknown as import("../cards/ClipCard").Clip[]}
-                    onClipClick={handleClipClick as (clip: import("../cards/ClipCard").Clip) => void}
+                    clips={clips}
+                    onClipClick={handleClipClick as (clip: Clip) => void}
                     loading={clipsLoading}
                   />
                 </Paper.Body>
@@ -462,32 +450,33 @@ const SceneDetails = ({
                             className="font-medium"
                             style={{ color: "var(--text-primary)" }}
                           >
-                            {firstFile.size ? formatFileSize(firstFile.size) : "Unknown"}
+                            {firstFile.size
+                              ? formatFileSize(firstFile.size)
+                              : "Unknown"}
                           </span>
                         </div>
                       </div>
                     </div>
-                  </>
-                )}
 
-                {compatibility && (
-                  <div>
-                    <h3
-                      className="text-sm font-semibold uppercase tracking-wide mb-3 pb-2"
-                      style={{
-                        color: "var(--text-primary)",
-                        borderBottom: "2px solid var(--accent-primary)",
-                      }}
-                    >
-                      Playback Method
-                    </h3>
-                    <p
-                      className="text-sm"
-                      style={{ color: "var(--text-muted)" }}
-                    >
-                      {compatibility.reason as string}
-                    </p>
-                  </div>
+                    {/* How the player starts this scene on this browser */}
+                    <div>
+                      <h3
+                        className="text-sm font-semibold uppercase tracking-wide mb-3 pb-2"
+                        style={{
+                          color: "var(--text-primary)",
+                          borderBottom: "2px solid var(--accent-primary)",
+                        }}
+                      >
+                        Playback Method
+                      </h3>
+                      <p
+                        className="text-sm"
+                        style={{ color: "var(--text-muted)" }}
+                      >
+                        {describePlaybackMethod(scene)}
+                      </p>
+                    </div>
+                  </>
                 )}
               </Paper.Body>
             )}

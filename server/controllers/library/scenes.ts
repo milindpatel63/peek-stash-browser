@@ -1,6 +1,16 @@
+import { resolveAccessibleInstanceId } from "../../services/EntityAccessService.js";
+import { findMinimalEntities } from "../../services/MinimalEntityQuery.js";
+import rankingComputeService from "../../services/RankingComputeService.js";
+import { hasAnyCriteria } from "../../services/RecommendationScoringService.js";
+import { recommendationService } from "../../services/RecommendationService.js";
+import { sceneQueryBuilder } from "../../services/SceneQueryBuilder.js";
+import { stashEntityService } from "../../services/StashEntityService.js";
 import type {
-  TypedAuthRequest,
-  TypedResponse,
+  AmbiguousLookupResponse,
+  ApiErrorResponse,
+  FindRecommendedScenesRequest,
+  FindScenesMinimalRequest,
+  FindScenesMinimalResponse,
   FindScenesRequest,
   FindScenesResponse,
   FindSimilarScenesParams,
@@ -8,1708 +18,400 @@ import type {
   FindSimilarScenesResponse,
   GetRecommendedScenesQuery,
   GetRecommendedScenesResponse,
-  UpdateSceneParams,
-  UpdateSceneRequest,
-  UpdateSceneResponse,
-  ApiErrorResponse,
-  AmbiguousLookupResponse,
-  ScoredSceneId,
+  ListCount,
+  ListCountResponse,
+  TypedLibraryRequest,
+  TypedResponse,
+  WithStashUrl,
 } from "../../types/api/index.js";
-import prisma from "../../prisma/singleton.js";
-import { stashEntityService } from "../../services/StashEntityService.js";
-import { stashInstanceManager } from "../../services/StashInstanceManager.js";
-import { entityExclusionHelper } from "../../services/EntityExclusionHelper.js";
-import { sceneQueryBuilder } from "../../services/SceneQueryBuilder.js";
-import { getUserAllowedInstanceIds } from "../../services/UserInstanceService.js";
-import rankingComputeService from "../../services/RankingComputeService.js";
+import type { NormalizedScene } from "../../types/index.js";
+import type { ParsedListRequest } from "../../types/parsedFilters.js";
+import { type EntityRef, entityKey } from "../../utils/entityRef.js";
 import {
-  buildDerivedWeightsFromScoringData,
-  buildImplicitWeightsFromRankings,
-  scoreScoringDataByPreferences,
-  countUserCriteria,
-  hasAnyCriteria,
-  type LightweightEntityPreferences,
-  type SceneRatingInput,
-  type EntityRankingData,
-} from "../../services/RecommendationScoringService.js";
-import type { NormalizedScene, PeekSceneFilter } from "../../types/index.js";
-import { OrientationEnum } from "../../graphql/generated/graphql.js";
-import { isSceneStreamable } from "../../utils/codecDetection.js";
-import { expandStudioIds, expandTagIds } from "../../utils/hierarchyUtils.js";
-import { parseCompositeFilterValues } from "../../utils/sqlFilterBuilders.js";
-import { getEntityInstanceId } from "../../utils/entityInstanceId.js";
-import { coerceEntityRefs } from "@peek/shared-types/instanceAwareId.js";
+  parseListRequest,
+  parseMinimalRequest,
+  parseRecommendedListRequest,
+  parseRecommendedRequest,
+  parseSimilarScenesRequest,
+  singleIdRef,
+} from "../../utils/listRequest.js";
 import { logger } from "../../utils/logger.js";
-import { SeededRandom, parseRandomSort, generateDailySeed } from "../../utils/seededRandom.js";
 import { buildStashEntityUrl } from "../../utils/stashUrl.js";
 
-// Feature flag for SQL query builder
-const USE_SQL_QUERY_BUILDER = process.env.USE_SQL_QUERY_BUILDER !== "false";
-
 /**
- * Merge user-specific data into scenes
- *
- * PERFORMANCE: When fetching data for a small number of scenes (< 100),
- * we filter by sceneId to avoid loading entire watch history tables.
- * For larger sets, we load all data and use Map lookups for efficiency.
+ * Add the View in Stash link to scenes; only an admin viewer gets it
  */
-export async function mergeScenesWithUserData(
+export function addStashUrl(
   scenes: NormalizedScene[],
-  userId: number
-): Promise<NormalizedScene[]> {
-  // Extract scene IDs for targeted queries when dealing with small sets
-  const sceneIds = scenes.map((s) => s.id);
-  const useTargetedQuery = sceneIds.length < 100;
-
-  // Fetch user data in parallel
-  // For small scene sets, filter by sceneId to avoid loading full tables
-  const [
-    watchHistory,
-    sceneRatings,
-    performerRatings,
-    studioRatings,
-    tagRatings,
-  ] = await Promise.all([
-    prisma.watchHistory.findMany({
-      where: useTargetedQuery
-        ? { userId, sceneId: { in: sceneIds } }
-        : { userId },
-    }),
-    prisma.sceneRating.findMany({
-      where: useTargetedQuery
-        ? { userId, sceneId: { in: sceneIds } }
-        : { userId },
-    }),
-    // Performer/studio/tag ratings are kept as full loads since they're
-    // used for nested entity favorites across all scenes
-    prisma.performerRating.findMany({ where: { userId } }),
-    prisma.studioRating.findMany({ where: { userId } }),
-    prisma.tagRating.findMany({ where: { userId } }),
-  ]);
-
-  // Use composite keys (entityId + instanceId) for multi-instance correctness
-  const KEY_SEP = "\0";
-
-  // Create lookup maps for O(1) access
-  const watchMap = new Map(
-    watchHistory.map((wh) => {
-      const oHistory = (Array.isArray(wh.oHistory)
-        ? wh.oHistory
-        : JSON.parse((wh.oHistory as string) || "[]")) as NormalizedScene["o_history"];
-      const playHistory = (Array.isArray(wh.playHistory)
-        ? wh.playHistory
-        : JSON.parse((wh.playHistory as string) || "[]")) as NormalizedScene["play_history"];
-
-      return [
-        `${wh.sceneId}${KEY_SEP}${wh.instanceId || ""}`,
-        {
-          o_counter: wh.oCount || 0,
-          play_count: wh.playCount || 0,
-          play_duration: wh.playDuration || 0,
-          resume_time: wh.resumeTime || 0,
-          play_history: playHistory,
-          o_history: oHistory,
-          last_played_at:
-            playHistory.length > 0 ? (playHistory[playHistory.length - 1] ?? null) : null,
-          last_o_at: oHistory.length > 0 ? String(oHistory[oHistory.length - 1] ?? '') : null,
-        },
-      ];
-    })
-  );
-
-  const ratingMap = new Map(
-    sceneRatings.map((r) => [
-      `${r.sceneId}${KEY_SEP}${r.instanceId || ""}`,
-      {
-        rating: r.rating,
-        rating100: r.rating, // Alias for consistency with Stash API
-        favorite: r.favorite,
-      },
-    ])
-  );
-
-  // Create favorite lookup sets for nested entities (composite key: entityId + instanceId)
-  const performerFavorites = new Set(
-    performerRatings.filter((r) => r.favorite).map((r) => `${r.performerId}${KEY_SEP}${r.instanceId || ""}`)
-  );
-  const studioFavorites = new Set(
-    studioRatings.filter((r) => r.favorite).map((r) => `${r.studioId}${KEY_SEP}${r.instanceId || ""}`)
-  );
-  const tagFavorites = new Set(
-    tagRatings.filter((r) => r.favorite).map((r) => `${r.tagId}${KEY_SEP}${r.instanceId || ""}`)
-  );
-
-  // Merge data and update nested entity favorites
-  return scenes.map((scene) => {
-    const sceneKey = `${scene.id}${KEY_SEP}${scene.instanceId || ""}`;
-    const mergedScene = {
-      ...scene,
-      ...watchMap.get(sceneKey),
-      ...ratingMap.get(sceneKey),
-    };
-
-    // Update favorite status for nested performers
-    if (mergedScene.performers && Array.isArray(mergedScene.performers)) {
-      mergedScene.performers = mergedScene.performers.map((p) => ({
-        ...p,
-        favorite: performerFavorites.has(`${p.id}${KEY_SEP}${p.instanceId || ""}`),
-      }));
-    }
-
-    // Update favorite status for studio
-    if (mergedScene.studio) {
-      mergedScene.studio = {
-        ...mergedScene.studio,
-        favorite: studioFavorites.has(`${mergedScene.studio.id}${KEY_SEP}${mergedScene.studio.instanceId || ""}`),
-      };
-    }
-
-    // Update favorite status for nested tags
-    if (mergedScene.tags && Array.isArray(mergedScene.tags)) {
-      mergedScene.tags = mergedScene.tags.map((t) => ({
-        ...t,
-        favorite: tagFavorites.has(`${t.id}${KEY_SEP}${t.instanceId || ""}`),
-      }));
-    }
-
-    return mergedScene;
-  });
+  viewer: { role: string } | undefined
+): WithStashUrl<NormalizedScene>[] {
+  return scenes.map((scene) => ({
+    ...scene,
+    stashUrl: buildStashEntityUrl("scene", scene.id, scene.instanceId, viewer),
+  }));
 }
 
 /**
- * Add streamability information to scenes
- * This adds codec detection metadata to determine if scenes can be directly played
- * in browsers without transcoding
- */
-export function addStreamabilityInfo(
-  scenes: NormalizedScene[]
-): NormalizedScene[] {
-  return scenes.map((scene) => {
-    const streamabilityInfo = isSceneStreamable(scene);
-    const stashUrl = buildStashEntityUrl('scene', scene.id);
-
-    return {
-      ...scene,
-      isStreamable: streamabilityInfo.isStreamable,
-      streamabilityReasons: streamabilityInfo.reasons,
-      stashUrl,
-    };
-  });
-}
-
-/**
- * Apply quick scene filters (don't require merged user data)
- * These filters only access data already present in the scene object from cache
- */
-export async function applyQuickSceneFilters(
-  scenes: NormalizedScene[],
-  filters: PeekSceneFilter | null | undefined
-): Promise<NormalizedScene[]> {
-  if (!filters) return scenes;
-
-  let filtered = scenes;
-
-  // Filter by IDs (for detail pages)
-  if (filters.ids && Array.isArray(filters.ids) && filters.ids.length > 0) {
-    const idSet = new Set(filters.ids);
-    filtered = filtered.filter((s) => idSet.has(s.id));
-    // Populate sceneStreams for detail views (browse queries return empty streams for performance)
-    filtered = filtered.map((s) => ({
-      ...s,
-      sceneStreams: s.sceneStreams?.length ? s.sceneStreams : stashEntityService.generateSceneStreams(s.id, s.instanceId),
-    }));
-  }
-
-  // Filter by performers
-  if (filters.performers) {
-    const { value: rawPerformerIds, modifier } = filters.performers;
-    if (!rawPerformerIds || rawPerformerIds.length === 0) return filtered;
-    // Strip composite keys ("42:instance-1" -> "42") since UI sends composite format
-    const { parsed: parsedPerformers } = parseCompositeFilterValues(rawPerformerIds.map((id) => String(id)));
-    filtered = filtered.filter((s) => {
-      const scenePerformerIds = (s.performers || []).map((p) => String(p.id));
-      const filterPerformerIds = parsedPerformers.map((p) => p.id);
-      if (modifier === "INCLUDES") {
-        return filterPerformerIds.some((id: string) =>
-          scenePerformerIds.includes(id)
-        );
-      }
-      if (modifier === "INCLUDES_ALL") {
-        return filterPerformerIds.every((id: string) =>
-          scenePerformerIds.includes(id)
-        );
-      }
-      if (modifier === "EXCLUDES") {
-        return !filterPerformerIds.some((id: string) =>
-          scenePerformerIds.includes(id)
-        );
-      }
-      return true;
-    });
-  }
-
-  // Filter by tags (squashed: scene + performers + studio tags)
-  // Supports hierarchical filtering via depth parameter
-  if (filters.tags) {
-    const { value: rawTagIds, modifier, depth } = filters.tags;
-    if (!rawTagIds || rawTagIds.length === 0) return filtered;
-
-    // Strip composite keys ("284:instance-1" -> "284") since UI sends composite format
-    const { parsed } = parseCompositeFilterValues(rawTagIds.map((id) => String(id)));
-    const tagIds = parsed.map(p => p.id);
-
-    // Expand tag IDs to include descendants if depth is specified
-    // depth: 0 or undefined = exact match, -1 = all descendants, N = N levels deep
-    const expandedTagIds = await expandTagIds(
-      tagIds,
-      depth ?? 0
-    );
-
-    // Pre-compute expanded sets for each individual tag (needed for INCLUDES_ALL)
-    const expandedTagSets = new Map<string, string[]>();
-    if (modifier === "INCLUDES_ALL") {
-      for (const originalTagId of tagIds) {
-        const expanded = await expandTagIds([String(originalTagId)], depth ?? 0);
-        expandedTagSets.set(String(originalTagId), expanded);
-      }
-    }
-
-    filtered = filtered.filter((s) => {
-      // Collect all tag IDs from scene, performers, and studio
-      const allTagIds = new Set<string>();
-
-      // Add scene tags
-      (s.tags || []).forEach((t) => allTagIds.add(String(t.id)));
-
-      // Add performer tags
-      (s.performers || []).forEach((p) => {
-        (p.tags || []).forEach((t) => allTagIds.add(String(t.id)));
-      });
-
-      // Add studio tags
-      if (s.studio?.tags) {
-        s.studio.tags.forEach((t) => allTagIds.add(String(t.id)));
-      }
-
-      if (modifier === "INCLUDES") {
-        return expandedTagIds.some((id: string) => allTagIds.has(id));
-      }
-      if (modifier === "INCLUDES_ALL") {
-        // For INCLUDES_ALL with hierarchy, we check that the scene has at least
-        // one tag from each original filter tag's expanded set
-        return tagIds.every((originalTagId) => {
-          const expandedForThisTag = expandedTagSets.get(String(originalTagId)) || [];
-          return expandedForThisTag.some((id) => allTagIds.has(id));
-        });
-      }
-      if (modifier === "EXCLUDES") {
-        return !expandedTagIds.some((id: string) => allTagIds.has(id));
-      }
-      return true;
-    });
-  }
-
-  // Filter by studios
-  // Supports hierarchical filtering via depth parameter
-  if (filters.studios) {
-    const { value: rawStudioIds, modifier, depth } = filters.studios;
-    if (!rawStudioIds || rawStudioIds.length === 0) return filtered;
-
-    // Strip composite keys ("5:instance-1" -> "5") since UI sends composite format
-    const { parsed: parsedStudios } = parseCompositeFilterValues(rawStudioIds.map((id) => String(id)));
-    const studioIds = parsedStudios.map(p => p.id);
-
-    // Expand studio IDs to include descendants if depth is specified
-    // depth: 0 or undefined = exact match, -1 = all descendants, N = N levels deep
-    const expandedStudioIds = new Set(
-      await expandStudioIds(
-        studioIds,
-        depth ?? 0
-      )
-    );
-
-    filtered = filtered.filter((s) => {
-      if (!s.studio) return modifier === "EXCLUDES";
-      const studioId = String(s.studio.id);
-      if (modifier === "INCLUDES") {
-        return expandedStudioIds.has(studioId);
-      }
-      if (modifier === "EXCLUDES") {
-        return !expandedStudioIds.has(studioId);
-      }
-      return true;
-    });
-  }
-
-  // Filter by groups
-  if (filters.groups) {
-    const { value: rawGroupIds, modifier } = filters.groups;
-    if (!rawGroupIds || rawGroupIds.length === 0) return filtered;
-
-    // Strip composite keys ("7:instance-1" -> "7") since UI sends composite format
-    const { parsed: parsedGroups } = parseCompositeFilterValues(rawGroupIds.map((id) => String(id)));
-    filtered = filtered.filter((s) => {
-      // After transformScene, groups are flattened: { id, name, scene_index }
-      // NOT nested: { group: { id, name }, scene_index }
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access -- groups are flattened at runtime, type says SceneGroup (nested)
-      const sceneGroupIds = (s.groups || []).map((g: any) => String(g.id));
-      const filterGroupIds = parsedGroups.map((p) => p.id);
-      if (modifier === "INCLUDES") {
-        return filterGroupIds.some((id: string) => sceneGroupIds.includes(id));
-      }
-      if (modifier === "INCLUDES_ALL") {
-        return filterGroupIds.every((id: string) => sceneGroupIds.includes(id));
-      }
-      if (modifier === "EXCLUDES") {
-        return !filterGroupIds.some((id: string) => sceneGroupIds.includes(id));
-      }
-      return true;
-    });
-  }
-
-  // Filter by bitrate
-  if (filters.bitrate) {
-    const { modifier, value, value2 } = filters.bitrate;
-    filtered = filtered.filter((s) => {
-      const bitrate = s.files?.[0]?.bit_rate || 0;
-      if (modifier === "GREATER_THAN") return bitrate > value;
-      if (modifier === "LESS_THAN") return bitrate < value;
-      if (modifier === "EQUALS") return bitrate === value;
-      if (modifier === "BETWEEN")
-        return (
-          value2 !== null &&
-          value2 !== undefined &&
-          bitrate >= value &&
-          bitrate <= value2
-        );
-      return true;
-    });
-  }
-
-  // Filter by duration
-  if (filters.duration) {
-    const { modifier, value, value2 } = filters.duration;
-    filtered = filtered.filter((s) => {
-      const duration = s.files?.[0]?.duration || 0;
-      if (modifier === "GREATER_THAN") return duration > value;
-      if (modifier === "LESS_THAN") return duration < value;
-      if (modifier === "EQUALS") return duration === value;
-      if (modifier === "BETWEEN")
-        return (
-          value2 !== null &&
-          value2 !== undefined &&
-          duration >= value &&
-          duration <= value2
-        );
-      return true;
-    });
-  }
-
-  // Filter by created_at
-  if (filters.created_at) {
-    const { modifier, value, value2 } = filters.created_at;
-    filtered = filtered.filter((s) => {
-      if (!s.created_at) return false;
-      const sceneDate = new Date(s.created_at);
-      if (!value) return false;
-      const filterDate = new Date(value);
-      if (modifier === "GREATER_THAN") return sceneDate > filterDate;
-      if (modifier === "LESS_THAN") return sceneDate < filterDate;
-      if (modifier === "EQUALS") {
-        return sceneDate.toDateString() === filterDate.toDateString();
-      }
-      if (modifier === "BETWEEN") {
-        if (!value2) return false;
-        const filterDate2 = new Date(value2);
-        return sceneDate >= filterDate && sceneDate <= filterDate2;
-      }
-      return true;
-    });
-  }
-
-  // Filter by updated_at
-  if (filters.updated_at) {
-    const { modifier, value, value2 } = filters.updated_at;
-    filtered = filtered.filter((s) => {
-      if (!s.updated_at) return false;
-      const sceneDate = new Date(s.updated_at);
-      if (!value) return false;
-      const filterDate = new Date(value);
-      if (modifier === "GREATER_THAN") return sceneDate > filterDate;
-      if (modifier === "LESS_THAN") return sceneDate < filterDate;
-      if (modifier === "EQUALS") {
-        return sceneDate.toDateString() === filterDate.toDateString();
-      }
-      if (modifier === "BETWEEN") {
-        if (!value2) return false;
-        const filterDate2 = new Date(value2);
-        return sceneDate >= filterDate && sceneDate <= filterDate2;
-      }
-      return true;
-    });
-  }
-
-  // Filter by performer_count
-  if (filters.performer_count) {
-    const { modifier, value, value2 } = filters.performer_count;
-    filtered = filtered.filter((s) => {
-      const performerCount = s.performers?.length || 0;
-      if (modifier === "GREATER_THAN") return performerCount > value;
-      if (modifier === "LESS_THAN") return performerCount < value;
-      if (modifier === "EQUALS") return performerCount === value;
-      if (modifier === "BETWEEN")
-        return (
-          value2 !== null &&
-          value2 !== undefined &&
-          performerCount >= value &&
-          performerCount <= value2
-        );
-      return true;
-    });
-  }
-
-  // Filter by tag_count
-  if (filters.tag_count) {
-    const { modifier, value, value2 } = filters.tag_count;
-    filtered = filtered.filter((s) => {
-      const tagCount = s.tags?.length || 0;
-      if (modifier === "GREATER_THAN") return tagCount > value;
-      if (modifier === "LESS_THAN") return tagCount < value;
-      if (modifier === "EQUALS") return tagCount === value;
-      if (modifier === "BETWEEN")
-        return (
-          value2 !== null &&
-          value2 !== undefined &&
-          tagCount >= value &&
-          tagCount <= value2
-        );
-      return true;
-    });
-  }
-
-  // Filter by framerate
-  if (filters.framerate) {
-    const { modifier, value, value2 } = filters.framerate;
-    filtered = filtered.filter((s) => {
-      const framerate = s.files?.[0]?.frame_rate || 0;
-      if (modifier === "GREATER_THAN") return framerate > value;
-      if (modifier === "LESS_THAN") return framerate < value;
-      if (modifier === "EQUALS") return framerate === value;
-      if (modifier === "BETWEEN")
-        return (
-          value2 !== null &&
-          value2 !== undefined &&
-          framerate >= value &&
-          framerate <= value2
-        );
-      return true;
-    });
-  }
-
-  // Filter by orientation
-  if (filters.orientation) {
-    const { value: orientations } = filters.orientation;
-    if (!orientations || orientations.length === 0) return filtered;
-
-    filtered = filtered.filter((s) => {
-      const width = s.files?.[0]?.width || 0;
-      const height = s.files?.[0]?.height || 0;
-
-      // Determine scene orientation from dimensions
-      let sceneOrientation: OrientationEnum;
-      if (width > height) {
-        sceneOrientation = OrientationEnum.Landscape;
-      } else if (width < height) {
-        sceneOrientation = OrientationEnum.Portrait;
-      } else {
-        sceneOrientation = OrientationEnum.Square;
-      }
-
-      // Check if scene orientation matches any of the filter orientations
-      return orientations.includes(sceneOrientation);
-    });
-  }
-
-  // Filter by resolution
-  if (filters.resolution) {
-    const { value: resolutionEnum, modifier } = filters.resolution;
-    if (!resolutionEnum) return filtered;
-
-    // Map resolution enum to pixel heights
-    const resolutionHeights: Record<string, number> = {
-      VERY_LOW: 144,
-      LOW: 240,
-      R360P: 360,
-      STANDARD: 480,
-      WEB_HD: 540,
-      STANDARD_HD: 720,
-      FULL_HD: 1080,
-      QUAD_HD: 1440,
-      FOUR_K: 2160,
-      FIVE_K: 2880,
-      SIX_K: 3384,
-      SEVEN_K: 4320,
-      EIGHT_K: 4320,
-      HUGE: 8640,
-    };
-
-    const filterHeight = resolutionHeights[resolutionEnum];
-    if (filterHeight === undefined) return filtered;
-
-    filtered = filtered.filter((s) => {
-      const height = s.files?.[0]?.height || 0;
-      if (modifier === "EQUALS") return height === filterHeight;
-      if (modifier === "NOT_EQUALS") return height !== filterHeight;
-      if (modifier === "GREATER_THAN") return height > filterHeight;
-      if (modifier === "LESS_THAN") return height < filterHeight;
-      return true;
-    });
-  }
-
-  // Filter by title
-  if (filters.title) {
-    const { value, modifier } = filters.title;
-    const searchValue = value.toLowerCase();
-    filtered = filtered.filter((s) => {
-      const title = (s.title || "").toLowerCase();
-      if (modifier === "INCLUDES") return title.includes(searchValue);
-      if (modifier === "EXCLUDES") return !title.includes(searchValue);
-      if (modifier === "EQUALS") return title === searchValue;
-      return true;
-    });
-  }
-
-  // Filter by details
-  if (filters.details) {
-    const { value, modifier } = filters.details;
-    const searchValue = value.toLowerCase();
-    filtered = filtered.filter((s) => {
-      const details = (s.details || "").toLowerCase();
-      if (modifier === "INCLUDES") return details.includes(searchValue);
-      if (modifier === "EXCLUDES") return !details.includes(searchValue);
-      if (modifier === "EQUALS") return details === searchValue;
-      return true;
-    });
-  }
-
-  // Filter by video codec
-  if (filters.video_codec) {
-    const { value, modifier } = filters.video_codec;
-    const searchValue = value.toLowerCase();
-    filtered = filtered.filter((s) => {
-      const videoCodec = (s.files?.[0]?.video_codec || "").toLowerCase();
-      if (modifier === "INCLUDES") return videoCodec.includes(searchValue);
-      if (modifier === "EXCLUDES") return !videoCodec.includes(searchValue);
-      if (modifier === "EQUALS") return videoCodec === searchValue;
-      return true;
-    });
-  }
-
-  // Filter by audio codec
-  if (filters.audio_codec) {
-    const { value, modifier } = filters.audio_codec;
-    const searchValue = value.toLowerCase();
-    filtered = filtered.filter((s) => {
-      const audioCodec = (s.files?.[0]?.audio_codec || "").toLowerCase();
-      if (modifier === "INCLUDES") return audioCodec.includes(searchValue);
-      if (modifier === "EXCLUDES") return !audioCodec.includes(searchValue);
-      if (modifier === "EQUALS") return audioCodec === searchValue;
-      return true;
-    });
-  }
-
-  return filtered;
-}
-
-/**
- * Apply expensive scene filters (require merged user data)
- * These filters access user-specific data (ratings, watch history, favorites)
- */
-export function applyExpensiveSceneFilters(
-  scenes: NormalizedScene[],
-  filters: PeekSceneFilter | null | undefined
-): NormalizedScene[] {
-  if (!filters) return scenes;
-
-  let filtered = scenes;
-
-  // Filter by favorite
-  if (filters.favorite !== undefined) {
-    filtered = filtered.filter((s) => s.favorite === filters.favorite);
-  }
-
-  // Filter by rating100
-  if (filters.rating100) {
-    const { modifier, value, value2 } = filters.rating100;
-    filtered = filtered.filter((s) => {
-      const rating = s.rating100 || 0;
-      if (modifier === "GREATER_THAN") return rating > value;
-      if (modifier === "LESS_THAN") return rating < value;
-      if (modifier === "EQUALS") return rating === value;
-      if (modifier === "NOT_EQUALS") return rating !== value;
-      if (modifier === "BETWEEN")
-        return (
-          value !== undefined &&
-          value2 !== null &&
-          value2 !== undefined &&
-          rating >= value &&
-          rating <= value2
-        );
-      return true;
-    });
-  }
-
-  // Filter by o_counter
-  if (filters.o_counter) {
-    const { modifier, value, value2 } = filters.o_counter;
-    filtered = filtered.filter((s) => {
-      const oCounter = s.o_counter || 0;
-      if (modifier === "GREATER_THAN")
-        return value !== undefined && oCounter > value;
-      if (modifier === "LESS_THAN")
-        return value !== undefined && oCounter < value;
-      if (modifier === "EQUALS") return oCounter === value;
-      if (modifier === "NOT_EQUALS") return oCounter !== value;
-      if (modifier === "BETWEEN")
-        return (
-          value !== undefined &&
-          value2 !== null &&
-          value2 !== undefined &&
-          oCounter >= value &&
-          oCounter <= value2
-        );
-      return true;
-    });
-  }
-
-  // Filter by play_count
-  if (filters.play_count) {
-    const { modifier, value, value2 } = filters.play_count;
-    filtered = filtered.filter((s) => {
-      const playCount = s.play_count || 0;
-      if (modifier === "GREATER_THAN")
-        return value !== undefined && playCount > value;
-      if (modifier === "LESS_THAN")
-        return value !== undefined && playCount < value;
-      if (modifier === "EQUALS") return playCount === value;
-      if (modifier === "NOT_EQUALS") return playCount !== value;
-      if (modifier === "BETWEEN")
-        return (
-          value !== undefined &&
-          value2 !== null &&
-          value2 !== undefined &&
-          playCount >= value &&
-          playCount <= value2
-        );
-      return true;
-    });
-  }
-
-  // Filter by play_duration
-  if (filters.play_duration) {
-    const { modifier, value, value2 } = filters.play_duration;
-    filtered = filtered.filter((s) => {
-      const playDuration = s.play_duration || 0;
-      if (modifier === "GREATER_THAN") return playDuration > value;
-      if (modifier === "LESS_THAN") return playDuration < value;
-      if (modifier === "EQUALS") return playDuration === value;
-      if (modifier === "BETWEEN")
-        return (
-          value2 !== null &&
-          value2 !== undefined &&
-          playDuration >= value &&
-          playDuration <= value2
-        );
-      return true;
-    });
-  }
-
-  // Filter by last_played_at
-  if (filters.last_played_at) {
-    const { modifier, value, value2 } = filters.last_played_at;
-    filtered = filtered.filter((s) => {
-      if (!s.last_played_at) return false;
-      const lastPlayedDate = new Date(s.last_played_at);
-      if (!value) return false;
-      const filterDate = new Date(value);
-      if (modifier === "GREATER_THAN") return lastPlayedDate > filterDate;
-      if (modifier === "LESS_THAN") return lastPlayedDate < filterDate;
-      if (modifier === "EQUALS") {
-        return lastPlayedDate.toDateString() === filterDate.toDateString();
-      }
-      if (modifier === "BETWEEN") {
-        if (!value2) return false;
-        const filterDate2 = new Date(value2);
-        return lastPlayedDate >= filterDate && lastPlayedDate <= filterDate2;
-      }
-      return true;
-    });
-  }
-
-  // Filter by last_o_at
-  if (filters.last_o_at) {
-    const { modifier, value, value2 } = filters.last_o_at;
-    filtered = filtered.filter((s) => {
-      if (!s.last_o_at) return false;
-      const lastODate = new Date(s.last_o_at);
-      if (!value) return false;
-      const filterDate = new Date(value);
-      if (modifier === "GREATER_THAN") return lastODate > filterDate;
-      if (modifier === "LESS_THAN") return lastODate < filterDate;
-      if (modifier === "EQUALS") {
-        return lastODate.toDateString() === filterDate.toDateString();
-      }
-      if (modifier === "BETWEEN") {
-        if (!value2) return false;
-        const filterDate2 = new Date(value2);
-        return lastODate >= filterDate && lastODate <= filterDate2;
-      }
-      return true;
-    });
-  }
-
-  // Filter by performer favorite
-  if (filters.performer_favorite) {
-    filtered = filtered.filter((s) => {
-      const performers = s.performers || [];
-      return performers.some((p) => p.favorite === true);
-    });
-  }
-
-  // Filter by studio favorite
-  if (filters.studio_favorite) {
-    filtered = filtered.filter((s) => {
-      return s.studio?.favorite === true;
-    });
-  }
-
-  // Filter by tag favorite
-  if (filters.tag_favorite) {
-    filtered = filtered.filter((s) => {
-      const tags = s.tags || [];
-      return tags.some((t) => t.favorite === true);
-    });
-  }
-
-  return filtered;
-}
-
-/**
- * Sort scenes
- */
-export function sortScenes(
-  scenes: NormalizedScene[],
-  sortField: string,
-  direction: string,
-  groupId?: number
-): NormalizedScene[] {
-  const sorted = [...scenes];
-
-  sorted.sort((a, b) => {
-    const aValue = getFieldValue(a, sortField, groupId);
-    const bValue = getFieldValue(b, sortField, groupId);
-
-    let comparison = 0;
-    if (typeof aValue === "string" && typeof bValue === "string") {
-      comparison = aValue.localeCompare(bValue);
-    } else {
-      const aNum = aValue || 0;
-      const bNum = bValue || 0;
-      comparison = aNum > bNum ? 1 : aNum < bNum ? -1 : 0;
-    }
-
-    if (direction.toUpperCase() === "DESC") {
-      comparison = -comparison;
-    }
-
-    // Secondary sort by title
-    if (comparison === 0) {
-      const aTitle = a.title || "";
-      const bTitle = b.title || "";
-      return aTitle.localeCompare(bTitle);
-    }
-
-    return comparison;
-  });
-
-  return sorted;
-}
-
-/**
- * Get field value from scene for sorting
- */
-function getFieldValue(
-  scene: NormalizedScene,
-  field: string,
-  groupId?: number
-): string | number {
-  // Scene index in group (requires groupId context)
-  if (field === "scene_index") {
-    if (!groupId || !scene.groups || !Array.isArray(scene.groups)) {
-      return 999999; // Put scenes without scene_index at the end
-    }
-    // After transformScene, groups are flattened: { id, name, scene_index }
-    const group = scene.groups.find(
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access -- groups are flattened at runtime, type says SceneGroup (nested)
-      (g: any) => String(g.id) === String(groupId)
-    );
-    return group?.scene_index ?? 999999; // Put scenes without scene_index at the end
-  }
-
-  // Watch history fields
-  if (field === "o_counter") return scene.o_counter || 0;
-  if (field === "play_count") return scene.play_count || 0;
-  if (field === "last_played_at") return scene.last_played_at || "";
-  if (field === "last_o_at") return scene.last_o_at || "";
-
-  // Rating fields
-  if (field === "rating") return scene.rating || 0;
-  if (field === "rating100") return scene.rating100 || 0;
-
-  // Standard Stash fields
-  if (field === "date") return scene.date || "";
-  if (field === "created_at") return scene.created_at || "";
-  if (field === "updated_at") return scene.updated_at || "";
-  if (field === "title") return scene.title || "";
-  if (field === "random") return Math.random();
-
-  // Count fields
-  if (field === "performer_count") return scene.performers?.length || 0;
-  if (field === "tag_count") return scene.tags?.length || 0;
-
-  // File fields
-  if (field === "bitrate") return scene.files?.[0]?.bit_rate || 0;
-  if (field === "duration") return scene.files?.[0]?.duration || 0;
-  if (field === "filesize") return scene.files?.[0]?.size || 0;
-  if (field === "framerate") return scene.files?.[0]?.frame_rate || 0;
-  if (field === "path") return scene.files?.[0]?.path || "";
-
-  // Fallback for dynamic field access (safe as function is only called with known fields)
-  const value = (scene as unknown as Record<string, unknown>)[field];
-  return typeof value === "string" || typeof value === "number" ? value : 0;
-}
-
-/**
- * Simplified findScenes using cache with pagination-aware filtering
+ * Lists scenes through SceneQueryBuilder: filters, sort and paging run in SQL
  */
 export const findScenes = async (
-  req: TypedAuthRequest<FindScenesRequest>,
-  res: TypedResponse<FindScenesResponse | ApiErrorResponse | AmbiguousLookupResponse>
+  req: TypedLibraryRequest<FindScenesRequest>,
+  res: TypedResponse<
+    FindScenesResponse<ListCount> | ApiErrorResponse | AmbiguousLookupResponse
+  >
 ) => {
   const requestStart = Date.now();
-  try {
-    const userId = req.user?.id;
-    if (!userId) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
+  const userId = req.user.id;
+  // A ValidationError (400) reaches the central error handler
+  const request = parseListRequest("scene", req.body, { userId });
 
-    const { filter, scene_filter, ids } = req.body;
+  const { specificInstanceId } = request;
+  // A detail page asks for its scene by id
+  const lookup = singleIdRef(request.filter.ids);
 
-    const sortFieldRaw = filter?.sort || "created_at";
-    const sortDirection = filter?.direction || "DESC";
-    const page = filter?.page || 1;
-    const perPage = filter?.per_page || 40;
-    const searchQuery = filter?.q || "";
+  const { allowedInstanceIds, timeZone } = req;
 
-    // Parse random sort with seed
-    const { sortField, randomSeed } = parseRandomSort(sortFieldRaw, userId);
+  // Execute query (applyExclusions defaults to true)
+  const result = await sceneQueryBuilder.execute({
+    userId,
+    allowedInstanceIds,
+    timeZone,
+    request,
+  });
 
-    // Normalize ids to PeekSceneFilter format
-    const normalizedIds = ids
-      ? { value: coerceEntityRefs(ids), modifier: "INCLUDES" }
-      : scene_filter?.ids;
-    const mergedFilter: PeekSceneFilter = { ...scene_filter, ids: normalizedIds };
-    const _requestingUser = req.user;
-
-    // NEW: Use SQL query builder if enabled (now supports text search too)
-    if (USE_SQL_QUERY_BUILDER) {
-      logger.info("findScenes: using SQL query builder path", { hasSearchQuery: !!searchQuery });
-
-      // Get user's allowed instance IDs for multi-instance filtering
-      const allowedInstanceIds = await getUserAllowedInstanceIds(userId);
-
-      // Build filters object
-      const filters: PeekSceneFilter = { ...scene_filter };
-      if (ids && ids.length > 0) {
-        filters.ids = { value: coerceEntityRefs(ids), modifier: "INCLUDES" };
-      }
-
-      // Extract specific instance ID for disambiguation (from scene_filter.instance_id)
-      const specificInstanceId = scene_filter?.instance_id as string | undefined;
-
-      // Execute query (applyExclusions defaults to true)
-      const result = await sceneQueryBuilder.execute({
-        userId,
-        filters,
-        allowedInstanceIds,
-        specificInstanceId,
-        sort: sortField,
-        sortDirection: sortDirection.toUpperCase() as "ASC" | "DESC",
-        page,
-        perPage,
-        randomSeed: sortField === 'random' ? randomSeed : userId,
-        searchQuery: searchQuery || undefined,
-      });
-
-      // Check for ambiguous results on single-ID lookups
-      // This happens when the same ID exists in multiple Stash instances
-      if (ids && ids.length === 1 && !specificInstanceId && result.scenes.length > 1) {
-        logger.warn("Ambiguous scene lookup", {
-          id: ids[0],
-          matchCount: result.scenes.length,
-          instances: result.scenes.map(s => s.instanceId),
-        });
-        return res.status(400).json({
-          error: "Ambiguous lookup",
-          message: `Multiple scenes found with ID ${ids[0]}. Specify instance_id parameter.`,
-          matches: result.scenes.map(s => ({
-            id: s.id,
-            title: s.title,
-            instanceId: s.instanceId,
-          })),
-        });
-      }
-
-      // Add streamability info
-      const scenes = addStreamabilityInfo(result.scenes);
-
-      logger.info("findScenes complete (SQL path)", {
-        totalTimeMs: Date.now() - requestStart,
-        resultCount: scenes.length,
-        total: result.total,
-      });
-
-      return res.json({
-        findScenes: {
-          count: result.total,
-          scenes,
-        },
-      });
-    }
-
-    // Check if we can use the FAST PATH (pure DB pagination)
-    // Fast path requires: no search, no filters, simple sort field
-    // Now works for ALL users (admins and regular users) with pre-computed exclusions
-    const dbSortFields = new Set(['created_at', 'updated_at', 'date', 'title', 'duration', 'filesize', 'bitrate', 'framerate']);
-
-    // Check if scene_filter has any actual filter properties (not just an empty object)
-    const hasSceneFilters = scene_filter && Object.keys(scene_filter).length > 0;
-
-    const canUseDbPagination =
-      !searchQuery &&
-      !ids &&
-      !hasSceneFilters &&
-      dbSortFields.has(sortField);
-
-    // Debug logging to understand why fast path is/isn't used
-    logger.info(`findScenes: fast path check - searchQuery=${!!searchQuery}, ids=${!!ids}, hasSceneFilters=${hasSceneFilters}, sortField=${sortField}, inDbSortFields=${dbSortFields.has(sortField)}, canUse=${canUseDbPagination}`);
-
-    if (canUseDbPagination) {
-      // FAST PATH: Database pagination with pre-computed exclusions (sub-second response)
-      logger.info('findScenes: using FAST PATH (DB pagination with exclusions)');
-
-      // Get pre-computed scene exclusions
-      const exclusionStart = Date.now();
-      const excludeIds = await entityExclusionHelper.getExcludedIds(userId, 'scene');
-      logger.info(`findScenes: getExcludedIds took ${Date.now() - exclusionStart}ms (${excludeIds.size} exclusions)`);
-
-      const dbStart = Date.now();
-      // eslint-disable-next-line @typescript-eslint/no-deprecated -- intentional use in legacy fallback path when USE_SQL_QUERY_BUILDER=false
-      const { scenes: paginatedScenes, total } = await stashEntityService.getScenesPaginated({
-        page,
-        perPage,
-        sortField,
-        sortDirection: sortDirection.toUpperCase() as 'ASC' | 'DESC',
-        excludeIds,
-      });
-      logger.info(`findScenes: DB pagination took ${Date.now() - dbStart}ms`);
-
-      // Merge user data for paginated scenes only
-      const mergeStart = Date.now();
-      const scenesWithUserData = await mergeScenesWithUserData(paginatedScenes, userId);
-      logger.info(`findScenes: merge user data took ${Date.now() - mergeStart}ms (${paginatedScenes.length} scenes)`);
-
-      // Add streamability info
-      const scenesWithStreamability = addStreamabilityInfo(scenesWithUserData);
-
-      logger.info(`findScenes: TOTAL request took ${Date.now() - requestStart}ms (FAST PATH)`);
-
-      return res.json({
-        findScenes: {
-          count: total,
-          scenes: scenesWithStreamability,
-        },
-      });
-    }
-
-    // STANDARD PATH: Load all scenes and filter in memory
-    // Get pre-computed scene exclusions (instance-aware)
-    const exclusionStart = Date.now();
-    const exclusionData = await entityExclusionHelper.getExclusionData(userId, 'scene');
-    logger.info(`findScenes: getExclusionData took ${Date.now() - exclusionStart}ms (${exclusionData.globalIds.size} global, ${exclusionData.scopedKeys.size} scoped exclusions)`);
-
-    // Step 1: Get all scenes from cache
-    const cacheStart = Date.now();
-    // eslint-disable-next-line @typescript-eslint/no-deprecated -- intentional use in legacy fallback path when USE_SQL_QUERY_BUILDER=false
-    let scenes = await stashEntityService.getAllScenes();
-    logger.info(`findScenes: cache fetch took ${Date.now() - cacheStart}ms for ${scenes.length} scenes`);
-
-    if (scenes.length === 0) {
-      logger.warn("Cache not initialized, returning empty result");
-      return res.json({
-        findScenes: {
-          count: 0,
-          scenes: [],
-        },
-      });
-    }
-
-    // Apply pre-computed exclusions immediately (instance-aware filtering)
-    const preFilterStart = Date.now();
-    scenes = scenes.filter(s => !entityExclusionHelper.isExcluded(s.id, s.instanceId, exclusionData));
-    logger.info(`findScenes: applied exclusions in ${Date.now() - preFilterStart}ms, ${scenes.length} scenes remaining`);
-
-    // Determine if we can use optimized pipeline
-    // Expensive sort fields require user data, so we must merge all scenes first
-    const expensiveSortFields = new Set([
-      "o_counter",
-      "play_count",
-      "last_played_at",
-      "last_o_at",
-      "rating",
-      "rating100",
-    ]);
-    const requiresUserDataForSort = expensiveSortFields.has(sortField);
-
-    // Check if any expensive filters are being used
-    const hasExpensiveFilters =
-      scene_filter?.favorite !== undefined ||
-      scene_filter?.rating100 !== undefined ||
-      scene_filter?.o_counter !== undefined ||
-      scene_filter?.play_count !== undefined ||
-      scene_filter?.play_duration !== undefined ||
-      scene_filter?.last_played_at !== undefined ||
-      scene_filter?.last_o_at !== undefined ||
-      scene_filter?.performer_favorite !== undefined ||
-      scene_filter?.studio_favorite !== undefined ||
-      scene_filter?.tag_favorite !== undefined;
-
-    if (requiresUserDataForSort || hasExpensiveFilters) {
-      // OLD PIPELINE: Merge all → filter → sort → paginate
-      // (Required when sorting/filtering by user-specific data)
-
-      // Step 2: Merge with user data (all scenes)
-      const mergeStart = Date.now();
-      scenes = await mergeScenesWithUserData(scenes, userId);
-      logger.info(`findScenes: merge user data took ${Date.now() - mergeStart}ms`);
-
-      // Step 3: Apply search query
-      if (searchQuery) {
-        const lowerQuery = searchQuery.toLowerCase();
-        scenes = scenes.filter((s) => {
-          const title = s.title || "";
-          const details = s.details || "";
-          const filePath = s.files?.[0]?.path || "";
-          const performers = (s.performers || [])
-            .map((p) => p.name || "")
-            .join(" ");
-          const studio = s.studio?.name || "";
-          const tags = (s.tags || []).map((t) => t.name || "").join(" ");
-
-          return (
-            title.toLowerCase().includes(lowerQuery) ||
-            details.toLowerCase().includes(lowerQuery) ||
-            filePath.toLowerCase().includes(lowerQuery) ||
-            performers.toLowerCase().includes(lowerQuery) ||
-            studio.toLowerCase().includes(lowerQuery) ||
-            tags.toLowerCase().includes(lowerQuery)
-          );
-        });
-      }
-
-      // Step 4: Apply all filters (quick + expensive)
-      const filterStart = Date.now();
-      scenes = await applyQuickSceneFilters(scenes, mergedFilter);
-      scenes = applyExpensiveSceneFilters(scenes, mergedFilter);
-      logger.info(`findScenes: filters took ${Date.now() - filterStart}ms`);
-
-      // Note: Exclusions already applied via pre-computed excludeIds above
-
-      // Step 6: Sort
-      const sortStart = Date.now();
-      const groupIdRaw = scene_filter?.groups?.value?.[0];
-      const groupIdForSort = groupIdRaw ? parseInt(groupIdRaw, 10) : undefined;
-      scenes = sortScenes(scenes, sortField, sortDirection, groupIdForSort);
-      logger.info(`findScenes: sort took ${Date.now() - sortStart}ms`);
-
-      // Step 7: Paginate
-      const total = scenes.length;
-      const startIndex = (page - 1) * perPage;
-      const endIndex = startIndex + perPage;
-      const paginatedScenes = scenes.slice(startIndex, endIndex);
-
-      // Step 8: Add streamability information
-      const scenesWithStreamability = addStreamabilityInfo(paginatedScenes);
-
-      logger.info(`findScenes: TOTAL request took ${Date.now() - requestStart}ms (expensive pipeline)`);
-
-      return res.json({
-        findScenes: {
-          count: total,
-          scenes: scenesWithStreamability,
-        },
-      });
-    } else {
-      // NEW OPTIMIZED PIPELINE: Filter → sort → paginate → merge only paginated scenes
-      // (99% reduction: merge only 40 scenes instead of 20k)
-
-      // Step 2: Apply search query
-      if (searchQuery) {
-        const lowerQuery = searchQuery.toLowerCase();
-        scenes = scenes.filter((s) => {
-          const title = s.title || "";
-          const details = s.details || "";
-          const filePath = s.files?.[0]?.path || "";
-          const performers = (s.performers || [])
-            .map((p) => p.name || "")
-            .join(" ");
-          const studio = s.studio?.name || "";
-          const tags = (s.tags || []).map((t) => t.name || "").join(" ");
-
-          return (
-            title.toLowerCase().includes(lowerQuery) ||
-            details.toLowerCase().includes(lowerQuery) ||
-            filePath.toLowerCase().includes(lowerQuery) ||
-            performers.toLowerCase().includes(lowerQuery) ||
-            studio.toLowerCase().includes(lowerQuery) ||
-            tags.toLowerCase().includes(lowerQuery)
-          );
-        });
-      }
-
-      // Step 3: Apply quick filters (don't need user data)
-      const filterStart = Date.now();
-      scenes = await applyQuickSceneFilters(scenes, mergedFilter);
-      logger.info(`findScenes: quick filters took ${Date.now() - filterStart}ms`);
-
-      // Note: Exclusions already applied via pre-computed excludeIds above
-
-      // Step 4: Sort (using quick sort fields only)
-      const sortStart = Date.now();
-      const groupIdRaw = scene_filter?.groups?.value?.[0];
-      const groupIdForSort = groupIdRaw ? parseInt(groupIdRaw, 10) : undefined;
-      scenes = sortScenes(scenes, sortField, sortDirection, groupIdForSort);
-      logger.info(`findScenes: sort took ${Date.now() - sortStart}ms`);
-
-      // Step 6: Paginate BEFORE merging user data
-      const total = scenes.length;
-      const startIndex = (page - 1) * perPage;
-      const endIndex = startIndex + perPage;
-      const paginatedScenes = scenes.slice(startIndex, endIndex);
-
-      // Step 7: Merge user data (ONLY for paginated scenes - huge win!)
-      const mergeStart = Date.now();
-      const scenesWithUserData = await mergeScenesWithUserData(
-        paginatedScenes,
-        userId
-      );
-      logger.info(`findScenes: merge user data took ${Date.now() - mergeStart}ms (${paginatedScenes.length} scenes)`);
-
-      // Step 8: Apply expensive filters (shouldn't match anything since no expensive filters)
-      // Included for completeness, will be no-op
-      const finalScenes = applyExpensiveSceneFilters(
-        scenesWithUserData,
-        mergedFilter
-      );
-
-      // Step 9: Add streamability information
-      const scenesWithStreamability = addStreamabilityInfo(finalScenes);
-
-      logger.info(`findScenes: TOTAL request took ${Date.now() - requestStart}ms (optimized pipeline)`);
-
-      return res.json({
-        findScenes: {
-          count: total,
-          scenes: scenesWithStreamability,
-        },
-      });
-    }
-  } catch (error) {
-    logger.error("Error in findScenes", {
-      error: error instanceof Error ? error.message : "Unknown error",
+  // Check for ambiguous results on single-ID lookups
+  // This happens when the same ID exists in multiple Stash instances
+  if (lookup && !specificInstanceId && result.items.length > 1) {
+    logger.warn("Ambiguous scene lookup", {
+      id: lookup.id,
+      matchCount: result.items.length,
+      instances: result.items.map((s) => s.instanceId),
     });
-    res.status(500).json({
-      error: "Failed to find scenes",
-      details: error instanceof Error ? error.message : "Unknown error",
+    res.status(400).json({
+      error: "Ambiguous lookup",
+      message: `Multiple scenes found with ID ${lookup.id}. Specify instance_id parameter.`,
+      matches: result.items.map((s) => ({
+        id: s.id,
+        title: s.title,
+        instanceId: s.instanceId,
+      })),
     });
+    return;
   }
-};
 
-export const updateScene = async (
-  req: TypedAuthRequest<UpdateSceneRequest, UpdateSceneParams>,
-  res: TypedResponse<UpdateSceneResponse | ApiErrorResponse>
-) => {
-  try {
-    const { id } = req.params;
-    const userId = req.user?.id;
-    const updateData = req.body;
+  // Add streamability info
+  let scenes = addStashUrl(result.items, req.user);
 
-    const instanceId = await getEntityInstanceId('scene', id);
-    const stash = stashInstanceManager.get(instanceId);
-    if (!stash) {
-      return res.status(404).json({ error: "Stash instance not found for scene" });
-    }
-
-    const updatedScene = await stash.sceneUpdate({
-      input: {
-        id,
-        ...updateData,
-      },
-    });
-
-    if (!updatedScene.sceneUpdate) {
-      return res.status(500).json({ error: "Scene update returned null" });
-    }
-
-    // Override with per-user watch history
-    const sceneWithUserHistory = await mergeScenesWithUserData(
-      [updatedScene.sceneUpdate] as unknown as NormalizedScene[],
-      userId
+  // The Scene page loads one scene by id: only then build its stream
+  // list. Lists keep sceneStreams empty.
+  if (lookup) {
+    scenes = await Promise.all(
+      scenes.map(async (s) => ({
+        ...s,
+        sceneStreams: await stashEntityService.getPlaybackStreams(
+          s.id,
+          s.instanceId
+        ),
+      }))
     );
-
-    res.json({ success: true, scene: sceneWithUserHistory[0] as NormalizedScene });
-  } catch (error) {
-    logger.error("Error updating scene", { error: error instanceof Error ? error.message : "Unknown error" });
-    res.status(500).json({ error: "Failed to update scene" });
   }
+
+  logger.debug("findScenes complete (SQL path)", {
+    totalTimeMs: Date.now() - requestStart,
+    resultCount: scenes.length,
+    total: result.total,
+  });
+
+  res.json({
+    findScenes: {
+      count: result.total,
+      scenes,
+    },
+  });
 };
 
 /**
- * Find similar scenes based on weighted scoring
- * Performers: 3 points each
- * Studio: 2 points
- * Tags: 1 point each
+ * "Scenes like this": scenes on the seed's instance sharing its performers
+ * (3 points each), studio (2) or tags (1 each), most shared first.
  *
- * Uses SQL-based candidate selection (max 500 candidates) for scalability:
- * 1. SQL query finds scenes sharing performers, tags, or studio with weights
- * 2. SceneQueryBuilder fetches full scene data for paginated results
+ * The seed is resolved through the user's own access check (404 when it is
+ * hidden, restricted, deleted or on an instance the user doesn't see), the
+ * candidates come from one SQL query with the exclusion anti-join (at most
+ * 500), and the requested page is fetched by (id, instance) refs through the
+ * scene builder, which applies the exclusions and allowed instances again.
  */
 export const findSimilarScenes = async (
-  req: TypedAuthRequest<unknown, FindSimilarScenesParams, FindSimilarScenesQuery>,
+  req: TypedLibraryRequest<
+    unknown,
+    FindSimilarScenesParams,
+    FindSimilarScenesQuery
+  >,
   res: TypedResponse<FindSimilarScenesResponse | ApiErrorResponse>
 ) => {
   const startTime = Date.now();
-  try {
-    const { id } = req.params;
-    const page = parseInt(req.query.page as string) || 1;
-    const perPage = 12;
-    const userId = req.user?.id;
+  const userId = req.user.id;
+  // A ValidationError (400) reaches the central error handler
+  const request = parseSimilarScenesRequest(req.params.id, req.query, {
+    userId,
+  });
 
-    if (!userId) {
-      return res.status(401).json({ error: "User not authenticated" });
-    }
+  const { sceneId: id, page } = request;
+  const perPage = 12;
 
-    // Get pre-computed scene exclusions for this user
-    const excludedIds = await entityExclusionHelper.getExcludedIds(userId, 'scene');
+  const instanceId = await resolveAccessibleInstanceId(
+    userId,
+    "scene",
+    id,
+    request.instanceId
+  );
+  if (!instanceId) {
+    res.status(404).json({ error: "Scene not found" });
+    return;
+  }
 
-    // Use SQL-based candidate selection (max 500 candidates)
-    // This replaces loading ALL scenes and scoring in memory
-    const candidates = await stashEntityService.getSimilarSceneCandidates(
-      id,
-      excludedIds,
-      500 // Max candidates
-    );
+  const candidates = await stashEntityService.getSimilarSceneCandidates(
+    { id, instanceId },
+    userId,
+    500
+  );
 
-    // Empty result if no candidates found
-    if (candidates.length === 0) {
-      return res.json({
-        scenes: [],
-        count: 0,
-        page,
-        perPage,
-      });
-    }
+  // The page's refs, in candidate order (weight desc, date desc from SQL)
+  const startIndex = (page - 1) * perPage;
+  const pageRefs: EntityRef[] = candidates
+    .slice(startIndex, startIndex + perPage)
+    .map((c) => ({ id: c.sceneId, instanceId: c.instanceId }));
 
-    // Paginate candidate IDs (already sorted by weight desc, date desc from SQL)
-    const startIndex = (page - 1) * perPage;
-    const paginatedIds = candidates
-      .slice(startIndex, startIndex + perPage)
-      .map(c => c.sceneId);
+  if (pageRefs.length === 0) {
+    res.json({ scenes: [], count: candidates.length, page, perPage });
+    return;
+  }
 
-    if (paginatedIds.length === 0) {
-      return res.json({
-        scenes: [],
-        count: candidates.length,
-        page,
-        perPage,
-      });
-    }
+  const { allowedInstanceIds } = req;
+  const scenes = await sceneQueryBuilder.getByRefs({
+    userId,
+    refs: pageRefs,
+    allowedInstanceIds,
+  });
 
-    // Get user's allowed instance IDs for multi-instance filtering
-    const allowedInstanceIds = await getUserAllowedInstanceIds(userId);
+  // Back into candidate order, each scene by its (id, instance)
+  const sceneByKey = new Map(
+    scenes.map((s) => [entityKey(s.id, s.instanceId), s])
+  );
+  const orderedScenes = pageRefs
+    .map((ref) => sceneByKey.get(entityKey(ref.id, ref.instanceId)))
+    .filter((s): s is NormalizedScene => s !== undefined);
 
-    // Fetch full scene data via SceneQueryBuilder
-    const { scenes } = await sceneQueryBuilder.getByIds({
-      userId,
-      ids: paginatedIds,
-      allowedInstanceIds,
-    });
+  logger.debug("findSimilarScenes completed", {
+    totalTime: `${Date.now() - startTime}ms`,
+    sceneId: id,
+    instanceId,
+    candidateCount: candidates.length,
+    resultCount: orderedScenes.length,
+    page,
+  });
 
-    // Preserve score order (getByIds may return in different order)
-    const sceneMap = new Map(scenes.map(s => [s.id, s]));
-    const orderedScenes = paginatedIds
-      .map(id => sceneMap.get(id))
-      .filter((s): s is NormalizedScene => s !== undefined);
+  res.json({
+    scenes: orderedScenes,
+    count: candidates.length,
+    page,
+    perPage,
+  });
+};
 
-    logger.info("findSimilarScenes completed", {
-      totalTime: `${Date.now() - startTime}ms`,
-      sceneId: id,
-      candidateCount: candidates.length,
-      resultCount: orderedScenes.length,
-      page,
-    });
+/** The counts Recommended's empty answers carry */
+type RecommendedCriteria = NonNullable<
+  GetRecommendedScenesResponse["criteria"]
+>;
 
+/**
+ * What a Recommended request runs within: the user's ranked refs (scored
+ * once per change to their ratings, plays, hidden items or rankings or to
+ * the library, over their allowed instances), or the empty answer to send
+ */
+type RankedWithin =
+  | { readonly refs: readonly EntityRef[] }
+  | { readonly empty: string };
+
+async function rankedWithin(
+  userId: number,
+  allowedInstanceIds: readonly string[]
+): Promise<{
+  within: RankedWithin;
+  criteria: RecommendedCriteria;
+}> {
+  const { refs, criteria } = await recommendationService.getRankedRefs(
+    userId,
+    allowedInstanceIds
+  );
+  if (!hasAnyCriteria(criteria)) {
+    return { within: { empty: "No recommendations yet" }, criteria };
+  }
+  if (refs.length === 0) {
+    return { within: { empty: "No matching recommendations found" }, criteria };
+  }
+  return { within: { refs }, criteria };
+}
+
+/** Rankings over an hour old are recomputed, awaited; a failed recompute is logged by the service and the request scores with the stored rankings */
+async function freshRankings(userId: number): Promise<void> {
+  await rankingComputeService
+    .ensureFresh(userId, { wait: true })
+    .catch(() => undefined);
+}
+
+/**
+ * Recommended scenes for a parsed scene list request: the scene builder lists
+ * the user's ranked scenes with the request's filter, `where`, search, sort
+ * and paging, in SQL, so every page is full and the count is what the user
+ * can see (their exclusions and instances apply to the ranked refs again).
+ * Rankings are refreshed on page 1 only, so the pages that follow are scored
+ * with the rankings page 1 used.
+ */
+async function listRecommended(
+  req: Pick<TypedLibraryRequest, "user" | "allowedInstanceIds" | "timeZone">,
+  res: TypedResponse<GetRecommendedScenesResponse | ApiErrorResponse>,
+  request: ParsedListRequest<"scene">
+): Promise<void> {
+  const startTime = Date.now();
+  const userId = req.user.id;
+  const { page, perPage } = request;
+
+  if (page === 1) await freshRankings(userId);
+
+  const { allowedInstanceIds, timeZone } = req;
+  const { within, criteria } = await rankedWithin(userId, allowedInstanceIds);
+
+  if ("empty" in within) {
     res.json({
-      scenes: orderedScenes,
-      count: candidates.length,
+      scenes: [],
+      count: 0,
       page,
       perPage,
+      message: within.empty,
+      criteria,
     });
-  } catch (error) {
-    logger.error("Error finding similar scenes:", { error: error as Error });
-    res.status(500).json({ error: "Failed to find similar scenes" });
+    return;
   }
+
+  const result = await sceneQueryBuilder.execute({
+    userId,
+    allowedInstanceIds,
+    timeZone,
+    request,
+    ranked: within.refs,
+  });
+
+  logger.debug("findRecommendedScenes completed", {
+    totalTime: `${Date.now() - startTime}ms`,
+    userId,
+    candidateCount: within.refs.length,
+    resultCount: result.items.length,
+    total: result.total,
+    page,
+  });
+
+  res.json({
+    scenes: addStashUrl(result.items, req.user),
+    count: result.total,
+    page,
+    perPage,
+  });
+}
+
+/**
+ * `POST /api/library/scenes/recommended`: the scene list request within the
+ * user's ranked list. A ValidationError (400) reaches the central error
+ * handler.
+ */
+export const findRecommendedScenes = async (
+  req: TypedLibraryRequest<FindRecommendedScenesRequest>,
+  res: TypedResponse<GetRecommendedScenesResponse | ApiErrorResponse>
+) => {
+  const request = parseRecommendedListRequest(req.body, {
+    userId: req.user.id,
+  });
+  await listRecommended(req, res, request);
 };
 
 /**
- * Get recommended scenes based on user preferences and watch history
- * Uses favorites, ratings (80+), watch status, and engagement quality
- *
- * Two-phase query architecture:
- * 1. Lightweight scoring: Score all scenes using IDs only (SceneScoringData)
- * 2. Full fetch: Get complete scene data for paginated results via SceneQueryBuilder
+ * `POST /api/library/scenes/recommended/count`: how many scenes the
+ * request matches within the ranked list, the number `findRecommendedScenes`
+ * answers as `count` on page 1. It first makes the rankings fresh as page 1
+ * does, so the sheet's "Show N" and the page it opens score with the same
+ * rankings: fresh rankings cost a lookup in memory (0.3 µs), and stale ones
+ * (over an hour old, or after a rating or play) are recomputed once, the
+ * recompute page 1 would otherwise wait on, shared with it. No ranked
+ * scenes answer 0.
+ */
+export const countRecommendedScenes = async (
+  req: TypedLibraryRequest<FindRecommendedScenesRequest>,
+  res: TypedResponse<ListCountResponse | ApiErrorResponse>
+) => {
+  const userId = req.user.id;
+  const request = parseRecommendedListRequest(req.body, { userId });
+  const { allowedInstanceIds, timeZone } = req;
+
+  await freshRankings(userId);
+  const { within } = await rankedWithin(userId, allowedInstanceIds);
+  if ("empty" in within) {
+    res.json({ count: 0 });
+    return;
+  }
+
+  res.json({
+    count: await sceneQueryBuilder.count({
+      userId,
+      allowedInstanceIds,
+      timeZone,
+      request,
+      ranked: within.refs,
+    }),
+  });
+};
+
+/**
+ * `GET /api/library/scenes/recommended`: kept for a browser tab still on the
+ * 3.4.0-beta.8 bundle, which pages the ranked list with `page` and
+ * `per_page`. It runs the POST's path with no filter and the Recommended
+ * sort. Remove it in the release after 3.4.0-beta.9, with the beta.8 tabs.
  */
 export const getRecommendedScenes = async (
-  req: TypedAuthRequest<unknown, Record<string, string>, GetRecommendedScenesQuery>,
+  req: TypedLibraryRequest<
+    unknown,
+    Record<string, string>,
+    GetRecommendedScenesQuery
+  >,
   res: TypedResponse<GetRecommendedScenesResponse | ApiErrorResponse>
 ) => {
-  const startTime = Date.now();
-  try {
-    const page = parseInt(req.query.page as string) || 1;
-    const perPage = parseInt(req.query.per_page as string) || 24;
-    const userId = req.user?.id;
+  const userId = req.user.id;
+  // page >= 1 and per_page 1..250 (24 when absent); a ValidationError (400)
+  // reaches the central error handler
+  const { page, perPage } = parseRecommendedRequest(req.query, { userId });
+  const request = parseRecommendedListRequest(
+    { filter: { page, per_page: perPage } },
+    { userId }
+  );
+  await listRecommended(req, res, request);
+};
 
-    if (!userId) {
-      return res.status(401).json({ error: "User not authenticated" });
-    }
+/**
+ * One page of scenes for the scene picker (a clip filter's scenes), by
+ * displayed title: the title or file name matched in SQL, or the ids a
+ * picker has selected, only scenes the viewer can see. No scope: the
+ * Content Restrictions editor restricts no scenes (a 400). A
+ * ValidationError (400) reaches the central error handler.
+ */
+export const findScenesMinimal = async (
+  req: TypedLibraryRequest<FindScenesMinimalRequest>,
+  res: TypedResponse<FindScenesMinimalResponse | ApiErrorResponse>
+) => {
+  const userId = req.user.id;
+  const request = parseMinimalRequest("scene", req.body, { userId });
 
-    // Fetch user ratings, watch history, engagement rankings, and lightweight scoring data in parallel
-    const [
-      performerRatings,
-      studioRatings,
-      tagRatings,
-      sceneRatings,
-      watchHistory,
-      allScoringData,
-      exclusionData,
-      engagementRankings,
-    ] = await Promise.all([
-      prisma.performerRating.findMany({ where: { userId } }),
-      prisma.studioRating.findMany({ where: { userId } }),
-      prisma.tagRating.findMany({ where: { userId } }),
-      prisma.sceneRating.findMany({ where: { userId } }),
-      prisma.watchHistory.findMany({ where: { userId } }),
-      stashEntityService.getScenesForScoring(),
-      entityExclusionHelper.getExclusionData(userId, 'scene'),
-      // Fetch implicit engagement signals from pre-computed rankings
-      prisma.userEntityRanking.findMany({
-        where: { userId, entityType: { in: ['performer', 'studio', 'tag'] } },
-        select: { entityId: true, entityType: true, engagementRate: true, percentileRank: true },
-      }),
-    ]);
-
-    // Check if rankings are stale (>1 hour since last compute)
-    // Recompute in background without blocking current request
-    const lastRanking = await prisma.userEntityRanking.findFirst({
-      where: { userId },
-      orderBy: { updatedAt: 'desc' },
-      select: { updatedAt: true }
-    });
-
-    const ONE_HOUR_MS = 60 * 60 * 1000;
-    const isStale = !lastRanking ||
-      (Date.now() - lastRanking.updatedAt.getTime() > ONE_HOUR_MS);
-
-    if (isStale) {
-      rankingComputeService.recomputeAllRankings(userId).catch(err => {
-        logger.error("Background ranking recompute failed", { userId, error: (err as Error).message });
-      });
-    }
-
-    // Build sets of favorite and highly-rated entities using composite keys (id + instanceId)
-    // to prevent cross-instance favorites from influencing recommendations for the wrong instance
-    const favoritePerformers = new Set(
-      performerRatings.filter((r) => r.favorite).map((r) => `${r.performerId}\0${r.instanceId || ""}`)
-    );
-    const highlyRatedPerformers = new Set(
-      performerRatings
-        .filter((r) => r.rating !== null && r.rating >= 80)
-        .map((r) => `${r.performerId}\0${r.instanceId || ""}`)
-    );
-    const favoriteStudios = new Set(
-      studioRatings.filter((r) => r.favorite).map((r) => `${r.studioId}\0${r.instanceId || ""}`)
-    );
-    const highlyRatedStudios = new Set(
-      studioRatings
-        .filter((r) => r.rating !== null && r.rating >= 80)
-        .map((r) => `${r.studioId}\0${r.instanceId || ""}`)
-    );
-    const favoriteTags = new Set(
-      tagRatings.filter((r) => r.favorite).map((r) => `${r.tagId}\0${r.instanceId || ""}`)
-    );
-    const highlyRatedTags = new Set(
-      tagRatings
-        .filter((r) => r.rating !== null && r.rating >= 80)
-        .map((r) => `${r.tagId}\0${r.instanceId || ""}`)
-    );
-
-    // Count user criteria for feedback
-    const criteriaCounts = countUserCriteria(
-      performerRatings,
-      studioRatings,
-      tagRatings,
-      sceneRatings
-    );
-
-    // Check if user has any criteria (now includes scenes)
-    if (!hasAnyCriteria(criteriaCounts)) {
-      return res.json({
-        scenes: [],
-        count: 0,
-        page,
-        perPage,
-        message: "No recommendations yet",
-        criteria: criteriaCounts,
-      });
-    }
-
-    // Build watch history map
-    const watchMap = new Map(
-      watchHistory.map((wh) => {
-        const playHistory = (Array.isArray(wh.playHistory)
-          ? wh.playHistory
-          : JSON.parse((wh.playHistory as string) || "[]")) as string[];
-        const lastEntry = playHistory[playHistory.length - 1];
-        const lastPlayedAt = lastEntry != null
-            ? new Date(lastEntry)
-            : null;
-
-        return [
-          wh.sceneId,
-          {
-            playCount: wh.playCount || 0,
-            lastPlayedAt,
-          },
-        ];
-      })
-    );
-
-    // Filter excluded scenes from scoring data (instance-aware)
-    const scoringData = allScoringData.filter((s) => !entityExclusionHelper.isExcluded(s.id, s.instanceId, exclusionData));
-
-    // Build derived weights from rated/favorited scenes using lightweight data
-    const sceneRatingsForDerived: SceneRatingInput[] = sceneRatings.map((r) => ({
-      sceneId: r.sceneId,
-      rating: r.rating,
-      favorite: r.favorite,
-    }));
-
-    const scoringDataMap = new Map(scoringData.map((s) => [s.id, s]));
-    const getScoringDataById = (id: string) => scoringDataMap.get(id);
-
-    const {
-      derivedPerformerWeights,
-      derivedStudioWeights,
-      derivedTagWeights,
-    } = buildDerivedWeightsFromScoringData(sceneRatingsForDerived, getScoringDataById);
-
-    // Build implicit weights from engagement rankings (top 50% by percentile)
-    const rankingData: EntityRankingData[] = engagementRankings.map((r) => ({
-      entityId: r.entityId,
-      entityType: r.entityType,
-      engagementRate: r.engagementRate,
-      percentileRank: r.percentileRank,
-    }));
-
-    const {
-      implicitPerformerWeights,
-      implicitStudioWeights,
-      implicitTagWeights,
-    } = buildImplicitWeightsFromRankings(rankingData, 50);
-
-    // Build entity preferences object
-    const prefs: LightweightEntityPreferences = {
-      favoritePerformers,
-      highlyRatedPerformers,
-      favoriteStudios,
-      highlyRatedStudios,
-      favoriteTags,
-      highlyRatedTags,
-      derivedPerformerWeights,
-      derivedStudioWeights,
-      derivedTagWeights,
-      implicitPerformerWeights,
-      implicitStudioWeights,
-      implicitTagWeights,
-    };
-
-    // Phase 1: Score all scenes using lightweight data
-    const scoredScenes: ScoredSceneId[] = [];
-    const now = new Date();
-
-    for (const data of scoringData) {
-      const baseScore = scoreScoringDataByPreferences(data, prefs);
-
-      // Skip if no base score (doesn't match any criteria)
-      if (baseScore === 0) continue;
-
-      // Watch status modifier (reduced dominance: was +100/-100, now +30/-30)
-      let adjustedScore = baseScore;
-      const watchData = watchMap.get(data.id);
-      if (!watchData || watchData.playCount === 0) {
-        // Never watched
-        adjustedScore += 30;
-      } else if (watchData.lastPlayedAt) {
-        const daysSinceWatched =
-          (now.getTime() - watchData.lastPlayedAt.getTime()) /
-          (24 * 60 * 60 * 1000);
-
-        if (daysSinceWatched > 14) {
-          // Not recently watched
-          adjustedScore += 20;
-        } else if (daysSinceWatched >= 1) {
-          // Recently watched (1-14 days)
-          adjustedScore -= 10;
-        } else {
-          // Very recently watched (<24 hours)
-          adjustedScore -= 30;
-        }
-      }
-
-      // Engagement quality multiplier
-      const engagementMultiplier = 1.0 + Math.min(data.oCounter, 10) * 0.03;
-      const finalScore = adjustedScore * engagementMultiplier;
-
-      // Only include scenes with positive final scores
-      if (finalScore > 0) {
-        scoredScenes.push({ id: data.id, score: finalScore, oCounter: data.oCounter });
-      }
-    }
-
-    // Sort by score descending
-    scoredScenes.sort((a, b) => b.score - a.score);
-
-    // Add diversity through score tier randomization
-    // Group scenes into score tiers (10% bands) and randomize within each tier
-    // This creates variety while maintaining general quality order
-    const diversifiedScenes: ScoredSceneId[] = [];
-    if (scoredScenes.length > 0) {
-      const firstScene = scoredScenes[0] as ScoredSceneId;
-      const lastScene = scoredScenes[scoredScenes.length - 1] as ScoredSceneId;
-      const maxScore = firstScene.score;
-      const minScore = lastScene.score;
-      const scoreRange = maxScore - minScore;
-      const tierSize = scoreRange / 10; // 10 tiers
-
-      // Group scenes by tier
-      const tiers: ScoredSceneId[][] = Array.from({ length: 10 }, () => []);
-      for (const scoredScene of scoredScenes) {
-        const tierIndex = Math.min(
-          9,
-          Math.floor((maxScore - scoredScene.score) / tierSize)
-        );
-        (tiers[tierIndex] as ScoredSceneId[]).push(scoredScene);
-      }
-
-      // Use seeded random for consistent shuffle order per user
-      // This prevents duplicates across pages while maintaining diversity
-      // Seed changes daily for fresh shuffle order
-      const rng = new SeededRandom(generateDailySeed(userId));
-
-      // Randomize within each tier and combine
-      for (const tier of tiers) {
-        // Fisher-Yates shuffle with seeded random
-        for (let i = tier.length - 1; i > 0; i--) {
-          const j = rng.nextInt(i + 1);
-          [tier[i], tier[j]] = [tier[j] as ScoredSceneId, tier[i] as ScoredSceneId];
-        }
-        diversifiedScenes.push(...tier);
-      }
-    }
-
-    // Cap at top 500 recommendations
-    const cappedScenes = diversifiedScenes.slice(0, 500);
-
-    // If no recommendations after scoring, include criteria for feedback
-    if (cappedScenes.length === 0) {
-      return res.json({
-        scenes: [],
-        count: 0,
-        page,
-        perPage,
-        message: "No matching recommendations found",
-        criteria: criteriaCounts,
-      });
-    }
-
-    // Paginate scene IDs
-    const startIndex = (page - 1) * perPage;
-    const endIndex = startIndex + perPage;
-    const paginatedIds = cappedScenes.slice(startIndex, endIndex).map((s) => s.id);
-
-    // Get user's allowed instance IDs for multi-instance filtering
-    const allowedInstanceIds = await getUserAllowedInstanceIds(userId);
-
-    // Fetch full scene data via SceneQueryBuilder
-    const { scenes } = await sceneQueryBuilder.getByIds({
-      userId,
-      ids: paginatedIds,
-      allowedInstanceIds,
-    });
-
-    // Preserve score order (getByIds returns in arbitrary order)
-    const sceneMap = new Map(scenes.map((s) => [s.id, s]));
-    const orderedScenes = paginatedIds
-      .map((id) => sceneMap.get(id))
-      .filter((s): s is NormalizedScene => s !== undefined);
-
-    logger.info("getRecommendedScenes completed", {
-      totalTime: `${Date.now() - startTime}ms`,
-      userId,
-      candidateCount: cappedScenes.length,
-      resultCount: orderedScenes.length,
-      page,
-    });
-
-    res.json({
-      scenes: orderedScenes,
-      count: cappedScenes.length,
-      page,
-      perPage,
-    });
-  } catch (error) {
-    const err = error as Error;
-    logger.error("Error getting recommended scenes:", {
-      message: err.message,
-      name: err.name,
-      stack: err.stack,
-      userId: req.user?.id,
-    });
-
-    const errorType = err.name || "Unknown error";
-    res.status(500).json({
-      error: "Failed to get recommended scenes",
-      errorType,
-    });
-  }
+  const scenes = await findMinimalEntities(
+    req.user,
+    request,
+    req.allowedInstanceIds
+  );
+  res.json({ scenes });
 };

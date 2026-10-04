@@ -1,18 +1,22 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import type { CarouselData } from "@peek/shared-types";
 import {
+  AlertCircle,
   ChevronDown,
   ChevronUp,
   Eye,
   EyeOff,
-  Plus,
-  Pencil,
-  Trash2,
   Loader2,
+  Pencil,
+  Plus,
+  Trash2,
 } from "lucide-react";
-import * as LucideIcons from "lucide-react";
-import { Button } from "../ui/index";
-import { libraryApi } from "../../api";
+import { getErrorMessage } from "../../api";
+import { useCarousels, useDeleteCarousel } from "../../api/hooks/useCarousels";
+import { showError } from "../../utils/toast";
+import { getCarouselIcon } from "../carousel-builder/carouselIcons";
+import { Button, StatusMessage } from "../ui/index";
 
 /**
  * Carousel metadata mapping fetchKey to display information
@@ -61,50 +65,42 @@ interface CarouselPreference {
 
 interface Props {
   carouselPreferences?: CarouselPreference[];
-  onSave: (preferences: CarouselPreference[]) => void;
+  /** Rejects when the save failed, after reporting it. */
+  onSave: (preferences: CarouselPreference[]) => Promise<void>;
 }
+
+const NO_CAROUSELS: CarouselData[] = [];
 
 /**
  * CarouselSettings Component
  * Allows users to enable/disable and reorder homepage carousels using up/down buttons
  * Now supports custom user-defined carousels with edit/delete functionality
  */
-interface CustomCarousel {
-  id: string;
-  title: string;
-  icon: string;
-}
-
 const CarouselSettings = ({ carouselPreferences = [], onSave }: Props) => {
   const navigate = useNavigate();
-  const [userPreferences, setUserPreferences] = useState<CarouselPreference[] | null>(null);
-  const [customCarousels, setCustomCarousels] = useState<CustomCarousel[]>([]);
-  const [loadingCustom, setLoadingCustom] = useState(true);
+  const [userPreferences, setUserPreferences] = useState<
+    CarouselPreference[] | null
+  >(null);
+  // The custom carousels: the query Home reads. Without them the merged
+  // list drops their places, and a save would store it that way: show Retry
+  // instead of the list
+  const carouselsQuery = useCarousels();
+  const customCarousels = carouselsQuery.data ?? NO_CAROUSELS;
+  const loadingCustom = carouselsQuery.isPending;
+  const loadError =
+    carouselsQuery.isError && !carouselsQuery.data
+      ? getErrorMessage(carouselsQuery.error)
+      : null;
+  const deleteCarousel = useDeleteCarousel();
   const [hasChanges, setHasChanges] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
-
-  // Load custom carousels from API
-  useEffect(() => {
-    const loadCustomCarousels = async () => {
-      try {
-        const { carousels } = (await libraryApi.getCarousels()) as { carousels: CustomCarousel[] };
-        setCustomCarousels(carousels || []);
-      } catch (err) {
-        console.error("Failed to load custom carousels:", err);
-      } finally {
-        setLoadingCustom(false);
-      }
-    };
-
-    loadCustomCarousels();
-  }, []);
 
   // Derive merged preferences at render time instead of via effect
   const preferences = useMemo(() => {
     if (loadingCustom) return [];
 
     // Use user-modified preferences if available, otherwise start from props
-    const base = userPreferences || carouselPreferences;
+    const base = userPreferences ?? carouselPreferences;
 
     // Start with saved preferences
     let merged = [...base].sort((a, b) => a.order - b.order);
@@ -138,10 +134,11 @@ const CarouselSettings = ({ carouselPreferences = [], onSave }: Props) => {
     if (index === 0) return;
 
     const newPreferences = [...preferences];
-    [newPreferences[index - 1], newPreferences[index]] = [
-      newPreferences[index],
-      newPreferences[index - 1],
-    ];
+    const current = newPreferences[index];
+    const previous = newPreferences[index - 1];
+    if (!current || !previous) return;
+    newPreferences[index - 1] = current;
+    newPreferences[index] = previous;
 
     const reordered = newPreferences.map((pref, idx) => ({
       ...pref,
@@ -156,10 +153,11 @@ const CarouselSettings = ({ carouselPreferences = [], onSave }: Props) => {
     if (index === preferences.length - 1) return;
 
     const newPreferences = [...preferences];
-    [newPreferences[index], newPreferences[index + 1]] = [
-      newPreferences[index + 1],
-      newPreferences[index],
-    ];
+    const current = newPreferences[index];
+    const next = newPreferences[index + 1];
+    if (!current || !next) return;
+    newPreferences[index] = next;
+    newPreferences[index + 1] = current;
 
     const reordered = newPreferences.map((pref, idx) => ({
       ...pref,
@@ -178,9 +176,13 @@ const CarouselSettings = ({ carouselPreferences = [], onSave }: Props) => {
     setHasChanges(true);
   };
 
-  const handleSave = () => {
-    onSave(preferences);
-    setHasChanges(false);
+  const handleSave = async () => {
+    try {
+      await onSave(preferences);
+      setHasChanges(false);
+    } catch {
+      // onSave reported the failure; the changes stay marked unsaved
+    }
   };
 
   const handleReset = () => {
@@ -189,13 +191,13 @@ const CarouselSettings = ({ carouselPreferences = [], onSave }: Props) => {
   };
 
   const handleCreateCarousel = () => {
-    navigate("/settings/carousels/new");
+    void navigate("/settings/carousels/new");
   };
 
   const handleEditCarousel = (carouselId: string) => {
     // carouselId is the full "custom-{uuid}" format, extract the uuid
     const actualId = carouselId.replace("custom-", "");
-    navigate(`/settings/carousels/${actualId}/edit`);
+    void navigate(`/settings/carousels/${actualId}/edit`);
   };
 
   const handleDeleteCarousel = async (carouselId: string) => {
@@ -203,21 +205,27 @@ const CarouselSettings = ({ carouselPreferences = [], onSave }: Props) => {
 
     setDeletingId(carouselId);
     try {
-      await libraryApi.deleteCarousel(actualId);
-
-      // Remove from custom carousels list
-      setCustomCarousels((prev) => prev.filter((c) => c.id !== actualId));
-
-      // Remove from preferences
-      const updatedPrefs = preferences
-        .filter((p) => p.id !== carouselId)
-        .map((p, idx) => ({ ...p, order: idx }));
-      setUserPreferences(updatedPrefs);
-
-      // Save the updated preferences immediately
-      onSave(updatedPrefs);
+      // Home drops it and its scenes at once
+      await deleteCarousel.mutateAsync(actualId);
     } catch (err) {
-      console.error("Failed to delete carousel:", err);
+      showError(getErrorMessage(err, "Failed to delete carousel"));
+      setDeletingId(null);
+      return;
+    }
+
+    // Remove from preferences
+    const updatedPrefs = preferences
+      .filter((p) => p.id !== carouselId)
+      .map((p, idx) => ({ ...p, order: idx }));
+    setUserPreferences(updatedPrefs);
+
+    // Save the updated preferences (and any unsaved changes) immediately
+    try {
+      await onSave(updatedPrefs);
+      setHasChanges(false);
+    } catch {
+      // onSave reported the failure; the order stays marked unsaved
+      setHasChanges(true);
     } finally {
       setDeletingId(null);
     }
@@ -231,7 +239,7 @@ const CarouselSettings = ({ carouselPreferences = [], onSave }: Props) => {
       const actualId = prefId.replace("custom-", "");
       const carousel = customCarousels.find((c) => c.id === actualId);
       if (carousel) {
-        const IconComponent = (LucideIcons as unknown as Record<string, React.ComponentType<{ className?: string; style?: React.CSSProperties }>>)[carousel.icon] || LucideIcons.Film;
+        const IconComponent = getCarouselIcon(carousel.icon);
         return {
           title: carousel.title,
           description: "Custom carousel",
@@ -243,11 +251,16 @@ const CarouselSettings = ({ carouselPreferences = [], onSave }: Props) => {
         title: "Unknown Carousel",
         description: "Custom carousel not found",
         isCustom: true,
-        icon: LucideIcons.AlertCircle,
+        icon: AlertCircle,
       };
     }
 
-    const metadata = (CAROUSEL_METADATA as Record<string, { title: string; description: string }>)[prefId];
+    const metadata = (
+      CAROUSEL_METADATA as Record<
+        string,
+        { title: string; description: string }
+      >
+    )[prefId];
     return {
       title: metadata?.title || prefId,
       description: metadata?.description || "",
@@ -262,7 +275,29 @@ const CarouselSettings = ({ carouselPreferences = [], onSave }: Props) => {
   if (loadingCustom) {
     return (
       <div className="flex items-center justify-center py-8">
-        <Loader2 className="w-6 h-6 animate-spin" style={{ color: "var(--accent-primary)" }} />
+        <Loader2
+          className="w-6 h-6 animate-spin"
+          style={{ color: "var(--accent-primary)" }}
+        />
+      </div>
+    );
+  }
+
+  if (loadError) {
+    return (
+      <div className="space-y-4">
+        <h3
+          className="text-lg font-semibold"
+          style={{ color: "var(--text-primary)" }}
+        >
+          Homepage Carousels
+        </h3>
+        <StatusMessage
+          variant="error"
+          title="Failed to load your custom carousels"
+          message={loadError}
+          onRetry={() => void carouselsQuery.refetch()}
+        />
       </div>
     );
   }
@@ -277,7 +312,10 @@ const CarouselSettings = ({ carouselPreferences = [], onSave }: Props) => {
           >
             Homepage Carousels
           </h3>
-          <p className="text-sm mb-4" style={{ color: "var(--text-secondary)" }}>
+          <p
+            className="text-sm mb-4"
+            style={{ color: "var(--text-secondary)" }}
+          >
             Use arrow buttons to reorder carousels, click the eye icon to toggle
             visibility
           </p>
@@ -395,7 +433,7 @@ const CarouselSettings = ({ carouselPreferences = [], onSave }: Props) => {
                       title="Edit carousel"
                     />
                     <Button
-                      onClick={() => handleDeleteCarousel(pref.id)}
+                      onClick={() => void handleDeleteCarousel(pref.id)}
                       variant="secondary"
                       className="p-2"
                       disabled={deletingId === pref.id}
@@ -441,7 +479,11 @@ const CarouselSettings = ({ carouselPreferences = [], onSave }: Props) => {
         >
           Cancel
         </Button>
-        <Button disabled={!hasChanges} onClick={handleSave} variant="primary">
+        <Button
+          disabled={!hasChanges}
+          onClick={() => void handleSave()}
+          variant="primary"
+        >
           Save Changes
         </Button>
       </div>

@@ -1,8 +1,18 @@
-import { useEffect, useRef, useState } from "react";
+import { Fragment, type ReactNode, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { getEffectiveImageMetadata, getImageTitle } from "../../utils/imageGalleryInheritance";
+/**
+ * Adaptive metadata drawer that opens on the longer viewport axis:
+ * - Landscape (wider): opens from the right as a side panel
+ * - Portrait (taller): opens from the bottom as a sheet
+ */
+import type { ImageListItem } from "@peek/shared-types";
+import { useDecrementImageOCounter } from "../../api/hooks";
 import { useConfig } from "../../contexts/ConfigContext";
+import { useMediaQuery } from "../../hooks/useMediaQuery";
+import { formatDate } from "../../utils/date";
 import { getEntityPath } from "../../utils/entityLinks";
+import { getImageTitle } from "../../utils/imageTitle";
+import EntityMenu from "./EntityMenu";
 import FavoriteButton from "./FavoriteButton";
 import OCounterButton from "./OCounterButton";
 import RatingBadge from "./RatingBadge";
@@ -10,17 +20,10 @@ import RatingSliderDialog from "./RatingSliderDialog";
 import SectionLink from "./SectionLink";
 import TagChips from "./TagChips";
 
-/**
- * Adaptive metadata drawer that opens on the longer viewport axis:
- * - Landscape (wider): opens from the right as a side panel
- * - Portrait (taller): opens from the bottom as a sheet
- */
-import type { NormalizedImage } from "@peek/shared-types";
-
 interface Props {
   open: boolean;
   onClose: () => void;
-  image: NormalizedImage | null;
+  image: ImageListItem | null;
   rating: number | null;
   isFavorite: boolean;
   oCounter: number;
@@ -28,6 +31,44 @@ interface Props {
   onFavoriteChange: (isFavorite: boolean) => void;
   onOCounterChange: (count: number) => void;
 }
+
+interface RemoveLastOMenuProps {
+  image: ImageListItem;
+  oCount: number;
+  onRemoved: (count: number) => void;
+}
+
+/** The menu beside the O counter, holding only Remove last O (none at 0 Os) */
+const RemoveLastOMenu = ({
+  image,
+  oCount,
+  onRemoved,
+}: RemoveLastOMenuProps) => {
+  const decrement = useDecrementImageOCounter();
+
+  const handleRemoveLastO = async () => {
+    try {
+      const response = await decrement.mutateAsync({
+        imageId: image.id,
+        instanceId: image.instanceId,
+      });
+      onRemoved(response.oCount);
+    } catch (error) {
+      console.error("Failed to remove the last O:", error);
+    }
+  };
+
+  return (
+    <EntityMenu
+      entityType="image"
+      entityId={image.id}
+      entityName={image.title ?? ""}
+      instanceId={image.instanceId}
+      oCount={oCount}
+      onRemoveLastO={() => void handleRemoveLastO()}
+    />
+  );
+};
 
 const MetadataDrawer = ({
   open,
@@ -41,45 +82,33 @@ const MetadataDrawer = ({
   onOCounterChange,
 }: Props) => {
   const [isRatingPopoverOpen, setIsRatingPopoverOpen] = useState(false);
-  const [isLandscape, setIsLandscape] = useState(
-    () => window.innerWidth > window.innerHeight
-  );
+  const isLandscape = useMediaQuery("(orientation: landscape)");
   const ratingBadgeRef = useRef(null);
   const { hasMultipleInstances } = useConfig();
 
-  // Track viewport orientation via matchMedia (fires only on actual orientation change,
-  // consistent with hover detection pattern in Lightbox.jsx)
-  useEffect(() => {
-    const mq = window.matchMedia("(orientation: landscape)");
-    setIsLandscape(mq.matches);
-    const handler = (e: MediaQueryListEvent) => setIsLandscape(e.matches);
-    mq.addEventListener("change", handler);
-    return () => mq.removeEventListener("change", handler);
-  }, []);
-
   if (!open || !image) return null;
 
-  // Get effective metadata (inherits from galleries if image doesn't have its own)
-  const {
-    effectivePerformers,
-    effectiveTags,
-    effectiveStudio,
-    effectiveDate,
-    effectiveDetails,
-    effectivePhotographer,
-    effectiveUrls,
-  } = getEffectiveImageMetadata(image as Parameters<typeof getEffectiveImageMetadata>[0]);
-
-  const date = effectiveDate
-    ? new Date(effectiveDate).toLocaleDateString()
-    : null;
+  const date = image.date ? formatDate(image.date) : null;
   const resolution =
     image.width && image.height ? `${image.width}×${image.height}` : null;
 
-  // Build subtitle parts
-  const photographerText = effectivePhotographer ? `by ${effectivePhotographer}` : null;
-  const subtitleParts = [effectiveStudio?.name, date, photographerText, resolution].filter(Boolean);
-  const subtitle = subtitleParts.join(" • ");
+  // Subtitle parts in order: studio (a link), date, photographer, resolution
+  const subtitleParts: ReactNode[] = [];
+  if (image.studio?.name) {
+    subtitleParts.push(
+      <Link
+        key="studio"
+        to={getEntityPath("studio", image.studio, hasMultipleInstances)}
+        className="hover:underline hover:text-blue-400"
+        onClick={onClose}
+      >
+        {image.studio.name}
+      </Link>
+    );
+  }
+  if (date) subtitleParts.push(date);
+  if (image.photographer) subtitleParts.push(`by ${image.photographer}`);
+  if (resolution) subtitleParts.push(resolution);
 
   return (
     <>
@@ -114,7 +143,9 @@ const MetadataDrawer = ({
           }
         >
           <div
-            className={isLandscape ? "h-10 w-1 rounded-full" : "w-10 h-1 rounded-full"}
+            className={
+              isLandscape ? "h-10 w-1 rounded-full" : "w-10 h-1 rounded-full"
+            }
             style={{ backgroundColor: "var(--text-muted)" }}
           />
         </div>
@@ -134,7 +165,7 @@ const MetadataDrawer = ({
               className="text-lg font-semibold line-clamp-2 flex-1"
               style={{ color: "var(--text-primary)" }}
             >
-              {getImageTitle(image as Parameters<typeof getImageTitle>[0])}
+              {getImageTitle(image)}
             </h2>
             <div className="flex items-center gap-2 flex-shrink-0">
               <div ref={ratingBadgeRef}>
@@ -144,14 +175,22 @@ const MetadataDrawer = ({
                   size="medium"
                 />
               </div>
-              <OCounterButton
-                imageId={image.id}
-                initialCount={oCounter}
-                onChange={onOCounterChange}
-                size="medium"
-                variant="card"
-                interactive={true}
-              />
+              <div className="flex items-center">
+                <OCounterButton
+                  imageId={image.id}
+                  instanceId={image.instanceId}
+                  initialCount={oCounter}
+                  onChange={onOCounterChange}
+                  size="medium"
+                  variant="card"
+                  interactive={true}
+                />
+                <RemoveLastOMenu
+                  image={image}
+                  oCount={oCounter}
+                  onRemoved={onOCounterChange}
+                />
+              </div>
               <FavoriteButton
                 isFavorite={isFavorite}
                 onChange={onFavoriteChange}
@@ -161,30 +200,23 @@ const MetadataDrawer = ({
             </div>
           </div>
 
-          {/* Subtitle: Studio • Date • Resolution */}
-          {subtitle && (
+          {/* Subtitle: Studio • Date • Photographer • Resolution */}
+          {subtitleParts.length > 0 && (
             <p
               className="text-sm mb-4"
               style={{ color: "var(--text-secondary)" }}
             >
-              {effectiveStudio ? (
-                <Link
-                  to={getEntityPath('studio', effectiveStudio, hasMultipleInstances)}
-                  className="hover:underline hover:text-blue-400"
-                  onClick={onClose}
-                >
-                  {effectiveStudio.name}
-                </Link>
-              ) : null}
-              {effectiveStudio && (date || resolution) ? " • " : null}
-              {date}
-              {date && resolution ? " • " : null}
-              {resolution}
+              {subtitleParts.map((part, index) => (
+                <Fragment key={index}>
+                  {index > 0 ? " • " : null}
+                  {part}
+                </Fragment>
+              ))}
             </p>
           )}
 
           {/* Performers section */}
-          {effectivePerformers.length > 0 && (
+          {image.performers.length > 0 && (
             <div className="mb-4">
               <h3
                 className="text-sm font-semibold uppercase tracking-wide mb-3 pb-2"
@@ -199,10 +231,14 @@ const MetadataDrawer = ({
                 className="flex gap-4 overflow-x-auto pb-2 scroll-smooth"
                 style={{ scrollbarWidth: "thin" }}
               >
-                {effectivePerformers.map((performer) => (
+                {image.performers.map((performer) => (
                   <Link
                     key={performer.id}
-                    to={getEntityPath('performer', performer, hasMultipleInstances)}
+                    to={getEntityPath(
+                      "performer",
+                      performer,
+                      hasMultipleInstances
+                    )}
                     className="flex flex-col items-center flex-shrink-0 group w-[120px]"
                     onClick={onClose}
                   >
@@ -213,7 +249,7 @@ const MetadataDrawer = ({
                       {performer.image_path ? (
                         <img
                           src={performer.image_path}
-                          alt={performer.name ?? undefined}
+                          alt={performer.name}
                           className="w-full h-full object-cover"
                         />
                       ) : (
@@ -240,7 +276,7 @@ const MetadataDrawer = ({
           )}
 
           {/* Tags section */}
-          {effectiveTags.length > 0 && (
+          {image.tags.length > 0 && (
             <div className="mb-4">
               <h3
                 className="text-sm font-semibold uppercase tracking-wide mb-3 pb-2"
@@ -251,12 +287,14 @@ const MetadataDrawer = ({
               >
                 Tags
               </h3>
-              <TagChips tags={effectiveTags as Parameters<typeof TagChips>[0]['tags']} />
+              <TagChips
+                tags={image.tags as Parameters<typeof TagChips>[0]["tags"]}
+              />
             </div>
           )}
 
           {/* Details section (if description exists) */}
-          {effectiveDetails && (
+          {image.details && (
             <div className="mb-4">
               <h3
                 className="text-sm font-semibold uppercase tracking-wide mb-3 pb-2"
@@ -271,13 +309,13 @@ const MetadataDrawer = ({
                 className="text-sm leading-relaxed"
                 style={{ color: "var(--text-primary)" }}
               >
-                {effectiveDetails}
+                {image.details}
               </p>
             </div>
           )}
 
           {/* URLs section */}
-          {effectiveUrls.length > 0 && (
+          {image.urls.length > 0 && (
             <div>
               <h3
                 className="text-sm font-semibold uppercase tracking-wide mb-3 pb-2"
@@ -289,7 +327,7 @@ const MetadataDrawer = ({
                 Links
               </h3>
               <div className="flex flex-wrap gap-2">
-                {effectiveUrls.map((url, index) => (
+                {image.urls.map((url, index) => (
                   <SectionLink key={index} url={url} />
                 ))}
               </div>
@@ -305,7 +343,7 @@ const MetadataDrawer = ({
         initialRating={rating}
         onSave={onRatingChange}
         entityType="image"
-        entityTitle={getImageTitle(image as Parameters<typeof getImageTitle>[0]) ?? undefined}
+        entityTitle={getImageTitle(image) ?? undefined}
         anchorEl={ratingBadgeRef.current}
       />
     </>

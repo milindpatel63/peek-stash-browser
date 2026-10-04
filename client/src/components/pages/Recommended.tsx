@@ -1,19 +1,28 @@
-import { useEffect, useRef, useState } from "react";
-import { useSearchParams } from "react-router-dom";
-import { useInitialFocus } from "../../hooks/useFocusTrap";
-import { usePageTitle } from "../../hooks/usePageTitle";
-import { useTVMode } from "../../hooks/useTVMode";
-import { apiGet } from "../../api";
-import { ApiError } from "../../api/client";
-import SceneGrid from "../scene-search/SceneGrid";
-import { Info } from "lucide-react";
+import { useMemo } from "react";
 import {
-  SyncProgressBanner,
-  PageHeader,
-  PageLayout,
-  Pagination,
-  Tooltip,
-} from "../ui/index";
+  type GetRecommendedScenesResponse,
+  RECOMMENDED_LIMIT,
+} from "@peek/shared-types";
+import { Info } from "lucide-react";
+import { useListFilters } from "../../hooks/useListFilters";
+import { useFilterOptions } from "../../hooks/useListOptions";
+import { RECOMMENDED_SORT_OPTIONS } from "../../utils/filterConfig";
+import { treeCounts } from "../../utils/filterFields";
+import { sortOffered } from "../../utils/listQuery";
+import EntityListPage from "../list/EntityListPage";
+import type {
+  ListPageConfig,
+  ListPageData,
+  ListPageExtras,
+} from "../list/listPageConfigs";
+import { RECOMMENDED_SOURCE } from "../list/listSources";
+import { SCENE_LIST, useSceneListPage } from "../scene-search/sceneList";
+import { Tooltip } from "../ui/index";
+
+/** The counts the server sends with an empty result (`GetRecommendedScenesResponse`) */
+type RecommendationCriteria = NonNullable<
+  GetRecommendedScenesResponse["criteria"]
+>;
 
 const RecommendationInfoContent = () => (
   <div className="text-sm max-w-sm">
@@ -28,8 +37,8 @@ const RecommendationInfoContent = () => (
     </p>
     <p className="mb-1">
       <span className="font-medium">Implicit signals</span> &mdash; Your
-      top-engaged entities (top 50% by engagement rank) also contribute, weighted
-      by how strongly you engage with them.
+      top-engaged entities (top 50% by engagement rank) also contribute,
+      weighted by how strongly you engage with them.
     </p>
     <p className="mb-1">
       <span className="font-medium">Freshness</span> &mdash; Unwatched scenes
@@ -44,255 +53,155 @@ const RecommendationInfoContent = () => (
   </div>
 );
 
-const Recommended = () => {
-  usePageTitle("Recommended");
-  const [searchParams, setSearchParams] = useSearchParams();
-  const pageRef = useRef<HTMLDivElement>(null);
-  const { isTVMode } = useTVMode();
+// Render criteria feedback for empty state
+const renderCriteriaFeedback = (criteria: RecommendationCriteria) => {
+  const hasAnyActivity =
+    criteria.favoritedPerformers > 0 ||
+    criteria.ratedPerformers > 0 ||
+    criteria.favoritedStudios > 0 ||
+    criteria.ratedStudios > 0 ||
+    criteria.favoritedTags > 0 ||
+    criteria.ratedTags > 0 ||
+    criteria.favoritedScenes > 0 ||
+    criteria.ratedScenes > 0 ||
+    criteria.rankedEntities > 0;
 
-  const [scenes, setScenes] = useState<Record<string, unknown>[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<{ message: string; errorType: string | null } | null>(null);
-  const [totalCount, setTotalCount] = useState(0);
-  const [message, setMessage] = useState<string | null>(null);
-  const [initMessage, setInitMessage] = useState<string | null>(null);
-  const [criteria, setCriteria] = useState<Record<string, number> | null>(null);
-
-  // Get pagination params from URL
-  const page = parseInt(searchParams.get("page") ?? "1") || 1;
-  const perPage = parseInt(searchParams.get("per_page") ?? "24") || 24;
-
-  // Calculate total pages
-  const totalPages = Math.ceil(totalCount / perPage);
-
-  // Fetch recommended scenes
-  useEffect(() => {
-    let retryCount = 0;
-    const MAX_RETRIES = 60;
-
-    const fetchRecommended = async () => {
-      try {
-        setLoading(true);
-        setError(null);
-        setMessage(null);
-        setInitMessage(null);
-
-        const data = await apiGet<{
-          scenes: Record<string, unknown>[];
-          count: number;
-          message?: string;
-          criteria?: Record<string, number>;
-        }>(
-          `/library/scenes/recommended?page=${page}&per_page=${perPage}`
-        );
-
-        const {
-          scenes: fetchedScenes,
-          count,
-          message: msg,
-          criteria: criteriaCounts,
-        } = data;
-
-        setScenes(fetchedScenes);
-        setTotalCount(count);
-        setCriteria(criteriaCounts || null);
-        if (msg) {
-          setMessage(msg);
-        }
-        setLoading(false);
-      } catch (err) {
-        console.error("Error fetching recommended scenes:", err);
-
-        // Check if server is initializing cache
-        const isInitializing =
-          err instanceof ApiError && err.status === 503 && err.data?.ready === false;
-
-        if (isInitializing && retryCount < MAX_RETRIES) {
-          setInitMessage("Server is syncing library, please wait...");
-          retryCount++;
-          setTimeout(() => {
-            fetchRecommended();
-          }, 5000);
-          return;
-        }
-
-        setError({
-          message: (err instanceof ApiError ? err.message : null) || "Failed to load recommendations",
-          errorType: (err instanceof ApiError ? (err.data as Record<string, unknown>)?.errorType as string : null) || null,
-        });
-        setLoading(false);
-      }
-    };
-
-    fetchRecommended();
-  }, [page, perPage]);
-
-  // Handle page change
-  const handlePageChange = (newPage: number) => {
-    const newParams = new URLSearchParams(searchParams);
-    newParams.set("page", newPage.toString());
-    setSearchParams(newParams);
-
-    // Scroll to page container (always rendered, unlike pagination which unmounts during loading)
-    setTimeout(() => {
-      if (pageRef.current) {
-        pageRef.current.scrollIntoView({
-          behavior: "smooth",
-          block: "start",
-        });
-      }
-    }, 50);
-  };
-
-  // Handle per page change
-  const handlePerPageChange = (newPerPage: number) => {
-    const newParams = new URLSearchParams(searchParams);
-    newParams.set("per_page", newPerPage.toString());
-    newParams.set("page", "1"); // Reset to page 1 when changing per page
-    setSearchParams(newParams);
-
-    // Scroll to page container (always rendered, unlike pagination which unmounts during loading)
-    setTimeout(() => {
-      if (pageRef.current) {
-        pageRef.current.scrollIntoView({
-          behavior: "smooth",
-          block: "start",
-        });
-      }
-    }, 50);
-  };
-
-  // Handle successful hide - remove scene from state
-  const handleHideSuccess = (sceneId: string) => {
-    setScenes((prev) => prev.filter((s) => s.id !== sceneId));
-    setTotalCount((prev) => Math.max(0, prev - 1));
-  };
-
-  // Initial focus for TV mode
-  useInitialFocus(
-    pageRef,
-    '[tabindex="0"]',
-    !loading && scenes.length > 0 && isTVMode
-  );
-
-  // Render criteria feedback for empty state
-  const renderCriteriaFeedback = () => {
-    if (!criteria) return null;
-
-    const hasAnyActivity =
-      criteria.favoritedPerformers > 0 ||
-      criteria.ratedPerformers > 0 ||
-      criteria.favoritedStudios > 0 ||
-      criteria.ratedStudios > 0 ||
-      criteria.favoritedTags > 0 ||
-      criteria.ratedTags > 0 ||
-      criteria.favoritedScenes > 0 ||
-      criteria.ratedScenes > 0;
-
-    if (!hasAnyActivity) {
-      return (
-        <div className="text-gray-400 text-sm mt-2">
-          <p>
-            To get personalized suggestions, try favoriting or rating (7.0+)
-            performers, studios, tags, or scenes you enjoy.
-          </p>
-        </div>
-      );
-    }
-
+  if (!hasAnyActivity) {
     return (
-      <div className="text-gray-400 text-sm mt-2">
-        <p className="mb-2">Your current activity:</p>
-        <ul className="list-disc list-inside space-y-1">
-          <li>
-            {criteria.favoritedPerformers} favorited performer
-            {criteria.favoritedPerformers !== 1 ? "s" : ""},{" "}
-            {criteria.ratedPerformers} highly-rated
-          </li>
-          <li>
-            {criteria.favoritedStudios} favorited studio
-            {criteria.favoritedStudios !== 1 ? "s" : ""},{" "}
-            {criteria.ratedStudios} highly-rated
-          </li>
-          <li>
-            {criteria.favoritedTags} favorited tag
-            {criteria.favoritedTags !== 1 ? "s" : ""}, {criteria.ratedTags}{" "}
-            highly-rated
-          </li>
-          <li>
-            {criteria.favoritedScenes} favorited scene
-            {criteria.favoritedScenes !== 1 ? "s" : ""}, {criteria.ratedScenes}{" "}
-            rated scene
-            {criteria.ratedScenes !== 1 ? "s" : ""}
-          </li>
-        </ul>
-        <p className="mt-2 italic">
-          Tip: Rating more scenes helps us learn your preferences!
+      <div className="text-sm mt-2" style={{ color: "var(--text-muted)" }}>
+        <p>
+          To get personalized suggestions, try favoriting or rating (7.0+)
+          performers, studios, tags, or scenes you enjoy. Or just keep watching:
+          the performers, studios and tags you watch most count too.
         </p>
       </div>
     );
-  };
+  }
 
   return (
-    <PageLayout>
-      <div ref={pageRef}>
-        <div className="flex items-start gap-2">
-          <PageHeader
-            title="Recommended"
-            subtitle="Personalized recommendations based on your favorites and ratings"
-          />
-          <Tooltip content={<RecommendationInfoContent />} position="bottom">
-            <button
-              className="p-1 mt-1 rounded-full hover:bg-[var(--bg-secondary)] transition-colors"
-              aria-label="How recommendations work"
-            >
-              <Info size={18} style={{ color: "var(--text-muted)" }} />
-            </button>
-          </Tooltip>
-        </div>
-
-        {initMessage && <SyncProgressBanner message={initMessage} />}
-
-        {/* Top Pagination */}
-        {!loading && !error && !message && !initMessage && totalPages > 1 && (
-          <div className="mb-6">
-            <Pagination
-              currentPage={page}
-              totalPages={totalPages}
-              onPageChange={handlePageChange}
-              perPage={perPage}
-              onPerPageChange={handlePerPageChange}
-              totalCount={totalCount}
-            />
-          </div>
-        )}
-
-        {/* Error type display */}
-        {error && error.errorType && (
-          <div className="mb-4 text-sm text-gray-500">
-            (Error type: {error.errorType})
-          </div>
-        )}
-
-        {/* Scene Grid (includes bottom pagination) */}
-        <SceneGrid
-          scenes={scenes as unknown as import("@peek/shared-types").NormalizedScene[]}
-          loading={loading}
-          error={!initMessage && error ? error.message : undefined}
-          currentPage={page}
-          totalPages={totalPages}
-          onPageChange={handlePageChange}
-          onHideSuccess={handleHideSuccess as (sceneId: string, entityType: string) => void}
-          emptyMessage={message ?? "No Recommendations Yet"}
-          emptyDescription={(
-            criteria
-              ? renderCriteriaFeedback()
-              : "Rate or Favorite more items to get personalized recommendations."
-          ) as string | undefined}
-        />
-      </div>
-    </PageLayout>
+    <div className="text-sm mt-2" style={{ color: "var(--text-muted)" }}>
+      <p className="mb-2">Your current activity:</p>
+      <ul className="list-disc list-inside space-y-1">
+        <li>
+          {criteria.favoritedPerformers} favorited performer
+          {criteria.favoritedPerformers !== 1 ? "s" : ""},{" "}
+          {criteria.ratedPerformers} highly-rated
+        </li>
+        <li>
+          {criteria.favoritedStudios} favorited studio
+          {criteria.favoritedStudios !== 1 ? "s" : ""}, {criteria.ratedStudios}{" "}
+          highly-rated
+        </li>
+        <li>
+          {criteria.favoritedTags} favorited tag
+          {criteria.favoritedTags !== 1 ? "s" : ""}, {criteria.ratedTags}{" "}
+          highly-rated
+        </li>
+        <li>
+          {criteria.favoritedScenes} favorited scene
+          {criteria.favoritedScenes !== 1 ? "s" : ""}, {criteria.ratedScenes}{" "}
+          rated scene
+          {criteria.ratedScenes !== 1 ? "s" : ""}
+        </li>
+        <li>
+          {criteria.rankedEntities === 1
+            ? "1 performer, studio or tag from your viewing"
+            : `${criteria.rankedEntities} performers, studios and tags from your viewing`}
+        </li>
+      </ul>
+      <p className="mt-2 italic">
+        Tip: Rating more scenes helps us learn your preferences!
+      </p>
+    </div>
   );
 };
+
+/**
+ * Recommended's own part over the scene list's (a card opens the scene with
+ * the page's scenes as its queue, named "Recommended"): while a search or a
+ * filter narrows the list, a notice that it narrows the top 500 only, and
+ * the server's empty-state message with the user's activity.
+ */
+function useRecommendedListPage(data: ListPageData): ListPageExtras {
+  const sceneExtras = useSceneListPage(data);
+  const { listState, response } = data;
+  const filterOptions = useFilterOptions("scene");
+  const listFilters = useListFilters("scene", listState, filterOptions);
+  const filtering = listState.q !== "" || treeCounts(listFilters.tree).rows > 0;
+
+  const answer = response as
+    | Partial<Pick<GetRecommendedScenesResponse, "message" | "criteria">>
+    | undefined;
+  const message = answer?.message;
+  const criteria = answer?.criteria;
+  const empty = useMemo(
+    () =>
+      message
+        ? {
+            message,
+            description: criteria
+              ? renderCriteriaFeedback(criteria)
+              : "Rate or Favorite more items to get personalized recommendations.",
+          }
+        : null,
+    [message, criteria]
+  );
+
+  return {
+    ...sceneExtras,
+    ...(filtering
+      ? {
+          notice: (
+            <p
+              role="status"
+              className="text-sm mb-3"
+              style={{ color: "var(--text-muted)" }}
+            >
+              {`Filtering within your top ${RECOMMENDED_LIMIT} recommendations`}
+            </p>
+          ),
+        }
+      : {}),
+    ...(empty ? { empty } : {}),
+  };
+}
+
+/** Recommended's sorts: its rank first, then the scene sorts the filters allow */
+const recommendedSortOptions = (filters: Record<string, unknown>) =>
+  RECOMMENDED_SORT_OPTIONS.filter(
+    (option) => sortOffered("scene", option.value, filters) === option.value
+  );
+
+// The scene list without its folder view: Recommended has no timeline or
+// folders (PR 12)
+const { folder: _sceneFolder, ...SCENE_LIST_BASE } = SCENE_LIST;
+
+/** The user's top 500 as a scene list: Grid, Wall and Table, sorted by rank */
+const RECOMMENDED_LIST: ListPageConfig = {
+  ...SCENE_LIST_BASE,
+  title: "Recommended",
+  subtitle: `Your top ${RECOMMENDED_LIMIT} scenes, from your favorites, ratings and viewing`,
+  headerAside: (
+    <Tooltip content={<RecommendationInfoContent />} position="bottom">
+      <button
+        className="p-1 mt-1 rounded-full hover:bg-[var(--bg-secondary)] transition-colors"
+        aria-label="How recommendations work"
+      >
+        <Info size={18} style={{ color: "var(--text-muted)" }} />
+      </button>
+    </Tooltip>
+  ),
+  context: "scene_recommended",
+  defaultSort: "recommended",
+  viewModes: SCENE_LIST.viewModes.filter(
+    (mode) => mode.id !== "timeline" && mode.id !== "folder"
+  ),
+  sortOptions: recommendedSortOptions,
+  source: RECOMMENDED_SOURCE,
+  emptyMessage: "No recommendations match these filters",
+  usePage: useRecommendedListPage,
+};
+
+const Recommended = () => <EntityListPage config={RECOMMENDED_LIST} />;
 
 export default Recommended;

@@ -1,14 +1,28 @@
 import express from "express";
-import { getDateDistribution } from "../controllers/timelineController.js";
-import { authenticate } from "../middleware/auth.js";
-import { authenticated } from "../utils/routeHelpers.js";
+import {
+  getDateDistribution,
+  postDateDistribution,
+} from "../controllers/timelineController.js";
+import { authenticate, withAllowedInstances } from "../middleware/auth.js";
+import { libraryHandler } from "../utils/routeHelpers.js";
 
 const router = express.Router();
 
 // All timeline routes require authentication
 router.use(authenticate);
 
-// Get date distribution for entity type
-router.get("/:entityType/distribution", authenticated(getDateDistribution));
+// The bars of a list: the list's own request (filter, search, ids) plus the period
+router.post(
+  "/:entityType/distribution",
+  withAllowedInstances,
+  libraryHandler(postDateDistribution)
+);
+
+// The documented form: one entity parameter (performerId, tagId, ...)
+router.get(
+  "/:entityType/distribution",
+  withAllowedInstances,
+  libraryHandler(getDateDistribution)
+);
 
 export default router;

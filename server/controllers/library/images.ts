@@ -1,308 +1,94 @@
+import { imageQueryBuilder } from "../../services/ImageQueryBuilder.js";
 import type {
-  TypedAuthRequest,
-  TypedResponse,
+  AmbiguousLookupResponse,
+  ApiErrorResponse,
   FindImagesRequest,
   FindImagesResponse,
-  GetImageParams,
-  GetImageResponse,
-  ApiErrorResponse,
+  ListCount,
+  TypedLibraryRequest,
+  TypedResponse,
 } from "../../types/api/index.js";
-import prisma from "../../prisma/singleton.js";
-import { stashEntityService } from "../../services/StashEntityService.js";
-import { stashInstanceManager } from "../../services/StashInstanceManager.js";
-import {
-  imageQueryBuilder,
-  type ImageFilter,
-} from "../../services/ImageQueryBuilder.js";
-import { getUserAllowedInstanceIds } from "../../services/UserInstanceService.js";
+import { parseListRequest, singleIdRef } from "../../utils/listRequest.js";
 import { logger } from "../../utils/logger.js";
 import { buildStashEntityUrl } from "../../utils/stashUrl.js";
-import type { NormalizedImage } from "../../types/index.js";
-
-/**
- * Merge images with user rating/favorite data and O counter
- * Used by findImageById for single image lookups
- */
-async function mergeImagesWithUserData(
-  images: NormalizedImage[],
-  userId: number
-): Promise<NormalizedImage[]> {
-  // Fetch ratings and view history in parallel
-  const [ratings, viewHistories] = await Promise.all([
-    prisma.imageRating.findMany({ where: { userId } }),
-    prisma.imageViewHistory.findMany({ where: { userId } }),
-  ]);
-
-  const KEY_SEP = "\0";
-  const ratingMap = new Map(
-    ratings.map((r) => [
-      `${r.imageId}${KEY_SEP}${r.instanceId || ""}`,
-      {
-        rating: r.rating,
-        rating100: r.rating,
-        favorite: r.favorite,
-      },
-    ])
-  );
-
-  const viewHistoryMap = new Map(
-    viewHistories.map((vh) => [
-      `${vh.imageId}${KEY_SEP}${vh.instanceId || ""}`,
-      {
-        oCounter: vh.oCount,
-        viewCount: vh.viewCount,
-      },
-    ])
-  );
-
-  return images.map((image) => ({
-    ...image,
-    rating: null,
-    rating100: image.rating100 ?? null,
-    favorite: false,
-    oCounter: 0,
-    viewCount: 0,
-    ...ratingMap.get(`${image.id}${KEY_SEP}${image.instanceId || ""}`),
-    ...viewHistoryMap.get(`${image.id}${KEY_SEP}${image.instanceId || ""}`),
-  }));
-}
-
-/**
- * Transform ImageQueryBuilder result to match expected API response format
- */
-/* eslint-disable @typescript-eslint/no-unsafe-assignment -- data transformer between ImageQueryBuilder's internal DB row format and API response; all property accesses on Record<string, any> are inherently unsafe */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any -- spread of dynamic fields prevents specific return type
-function transformImageResult(image: Record<string, any>): any {
-  return {
-    ...image,
-    // Map user data fields to expected names
-    rating100: image.userRating ?? image.stashRating100 ?? null,
-    favorite: image.userFavorite === 1 || image.userFavorite === true,
-    oCounter: image.userOCount ?? image.stashOCounter ?? 0,
-    viewCount: image.userViewCount ?? 0,
-    lastViewedAt: image.userLastViewedAt ?? null,
-    // Add paths object for frontend compatibility
-    paths: {
-      thumbnail: image.pathThumbnail,
-      preview: image.pathPreview,
-      image: image.pathImage,
-    },
-    // Clean up internal field names
-    userRating: undefined,
-    userFavorite: undefined,
-    userViewCount: undefined,
-    userOCount: undefined,
-    userLastViewedAt: undefined,
-    stashRating100: undefined,
-    stashOCounter: undefined,
-  };
-}
-/* eslint-enable @typescript-eslint/no-unsafe-assignment */
 
 /**
  * Find images endpoint - uses SQL-native ImageQueryBuilder
  */
 export const findImages = async (
-  req: TypedAuthRequest<FindImagesRequest>,
-  res: TypedResponse<FindImagesResponse | ApiErrorResponse>
+  req: TypedLibraryRequest<FindImagesRequest>,
+  res: TypedResponse<
+    FindImagesResponse<ListCount> | ApiErrorResponse | AmbiguousLookupResponse
+  >
 ) => {
   const startTime = Date.now();
-  try {
-    const userId = req.user?.id;
-    const requestingUser = req.user;
-    const { filter, image_filter, ids } = req.body;
+  // A ValidationError (400) reaches the central error handler
+  const request = parseListRequest("image", req.body, { userId: req.user.id });
 
-    const sortFieldRaw = filter?.sort || "title";
-    const sortDirection = filter?.direction || "ASC";
-    const page = filter?.page || 1;
-    const perPage = filter?.per_page || 40;
-    const searchQuery = filter?.q || "";
+  const userId = req.user.id;
+  const { page, perPage, specificInstanceId } = request;
+  // A gallery or detail view asks for one image by id
+  const lookup = singleIdRef(request.filter.ids);
 
-    // Parse random_<seed> format
-    let randomSeed: number | undefined;
-    let sortField = sortFieldRaw;
+  // Exclusions apply to every user; an admin's rows hold only their own hides
+  const applyExclusions = true;
 
-    if (sortFieldRaw.startsWith("random_")) {
-      const seedStr = sortFieldRaw.slice(7);
-      const parsedSeed = parseInt(seedStr, 10);
-      if (!isNaN(parsedSeed)) {
-        randomSeed = parsedSeed % 1e8;
-        sortField = "random";
-      }
-    } else if (sortFieldRaw === "random") {
-      randomSeed = (userId + Date.now()) % 1e8;
-    }
+  const { allowedInstanceIds, timeZone } = req;
 
-    // Build filter object from request
-    const filters: ImageFilter = {};
+  // The request's instance_id (specificInstanceId) narrows the list to
+  // one instance
+  const result = await imageQueryBuilder.execute({
+    userId,
+    allowedInstanceIds,
+    timeZone,
+    request,
+    applyExclusions,
+  });
 
-    if (searchQuery) {
-      filters.q = searchQuery;
-    }
-
-    // Support both top-level ids and image_filter.ids (like scenes controller)
-    if (ids && Array.isArray(ids) && ids.length > 0) {
-      filters.ids = { value: ids, modifier: "INCLUDES" };
-    } else if (image_filter?.ids?.value) {
-      filters.ids = {
-        value: image_filter.ids.value.map(String),
-        modifier: image_filter.ids.modifier || "INCLUDES",
-      };
-    }
-
-    if (image_filter?.favorite !== undefined) {
-      filters.favorite = image_filter.favorite;
-    }
-
-    if (image_filter?.rating100) {
-      filters.rating100 = image_filter.rating100;
-    }
-
-    if (image_filter?.o_counter) {
-      filters.o_counter = image_filter.o_counter;
-    }
-
-    if (image_filter?.performers?.value) {
-      filters.performers = {
-        value: image_filter.performers.value.map(String),
-        modifier: image_filter.performers.modifier || "INCLUDES",
-      };
-    }
-
-    if (image_filter?.tags?.value) {
-      filters.tags = {
-        value: image_filter.tags.value.map(String),
-        modifier: image_filter.tags.modifier || "INCLUDES",
-      };
-    }
-
-    if (image_filter?.studios?.value) {
-      filters.studios = {
-        value: image_filter.studios.value.map(String),
-        modifier: image_filter.studios.modifier || "INCLUDES",
-      };
-    }
-
-    if (image_filter?.galleries?.value) {
-      filters.galleries = {
-        value: image_filter.galleries.value.map(String),
-        modifier: image_filter.galleries.modifier || "INCLUDES",
-      };
-    }
-
-    // Date filters
-    if (image_filter?.date) {
-      filters.date = {
-        value: image_filter.date.value,
-        value2: image_filter.date.value2,
-        modifier: image_filter.date.modifier || "GREATER_THAN",
-      };
-    }
-
-    if (image_filter?.created_at) {
-      filters.created_at = {
-        value: image_filter.created_at.value,
-        value2: image_filter.created_at.value2,
-        modifier: image_filter.created_at.modifier || "GREATER_THAN",
-      };
-    }
-
-    if (image_filter?.updated_at) {
-      filters.updated_at = {
-        value: image_filter.updated_at.value,
-        value2: image_filter.updated_at.value2,
-        modifier: image_filter.updated_at.modifier || "GREATER_THAN",
-      };
-    }
-
-    // Admins skip exclusions
-    const applyExclusions = requestingUser?.role !== "ADMIN";
-
-    // Get user's allowed instance IDs for multi-instance filtering
-    const allowedInstanceIds = await getUserAllowedInstanceIds(userId);
-
-    // Execute query
-    const result = await imageQueryBuilder.execute({
-      userId,
-      filters,
-      applyExclusions,
-      allowedInstanceIds,
-      sort: sortField,
-      sortDirection: sortDirection.toUpperCase() as "ASC" | "DESC",
-      page,
-      perPage,
-      randomSeed,
+  // Check for ambiguous results on single-ID lookups
+  // This happens when the same ID exists in multiple Stash instances
+  if (lookup && !specificInstanceId && result.items.length > 1) {
+    logger.warn("Ambiguous image lookup", {
+      id: lookup.id,
+      matchCount: result.items.length,
+      instances: result.items.map((i) => i.instanceId),
     });
-
-    // Transform and add stashUrl to each image
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-return -- transformImageResult intentionally returns any (dynamic DB row transformer)
-    const imagesWithStashUrl = result.images.map((image) => ({
-      ...transformImageResult(image),
-      stashUrl: buildStashEntityUrl("image", image.id),
-    }));
-
-    const totalTime = Date.now() - startTime;
-    logger.debug("findImages completed", {
-      totalTime: `${totalTime}ms`,
-      totalImages: result.total,
-      returnedImages: imagesWithStashUrl.length,
-      page,
-      perPage,
+    res.status(400).json({
+      error: "Ambiguous lookup",
+      message: `Multiple images found with ID ${lookup.id}. Specify instance_id parameter.`,
+      matches: result.items.map((i) => ({
+        id: i.id,
+        title: i.title,
+        instanceId: i.instanceId,
+      })),
     });
-
-    res.json({
-      findImages: {
-        count: result.total,
-        images: imagesWithStashUrl as NormalizedImage[],
-      },
-    });
-  } catch (error) {
-    logger.error("Error in findImages", {
-      error: error instanceof Error ? error.message : "Unknown error",
-    });
-    res.status(500).json({
-      error: "Failed to find images",
-      details: error instanceof Error ? error.message : "Unknown error",
-    });
+    return;
   }
-};
 
-/**
- * Find single image by ID
- */
-export const findImageById = async (
-  req: TypedAuthRequest<unknown, GetImageParams>,
-  res: TypedResponse<GetImageResponse | ApiErrorResponse>
-) => {
-  try {
-    const userId = req.user?.id;
-    const { id } = req.params;
+  // Add stashUrl to each image
+  const imagesWithStashUrl = result.items.map((image) => ({
+    ...image,
+    stashUrl: buildStashEntityUrl(
+      "image",
+      image.id,
+      image.instanceId,
+      req.user
+    ),
+  }));
 
-    const imageInstanceId = (req.query.instanceId as string | undefined) || stashInstanceManager.getDefaultConfig().id;
-    const image = await stashEntityService.getImage(id, imageInstanceId);
+  const totalTime = Date.now() - startTime;
+  logger.debug("findImages completed", {
+    totalTime: `${totalTime}ms`,
+    totalImages: result.total,
+    returnedImages: imagesWithStashUrl.length,
+    page,
+    perPage,
+  });
 
-    if (!image) {
-      return res.status(404).json({ error: "Image not found" });
-    }
-
-    // Merge with user data
-    const images = await mergeImagesWithUserData([image], userId);
-    const mergedImage = images[0] as (typeof images)[number];
-
-    // Add stashUrl
-    const imageWithStashUrl = {
-      ...mergedImage,
-      stashUrl: buildStashEntityUrl("image", mergedImage.id) || "",
-    };
-
-    res.json(imageWithStashUrl);
-  } catch (error) {
-    logger.error("Error in findImageById", {
-      error: error instanceof Error ? error.message : "Unknown error",
-    });
-    res.status(500).json({
-      error: "Failed to find image",
-      details: error instanceof Error ? error.message : "Unknown error",
-    });
-  }
+  res.json({
+    findImages: {
+      count: result.total,
+      images: imagesWithStashUrl,
+    },
+  });
 };

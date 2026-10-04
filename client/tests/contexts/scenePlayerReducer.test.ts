@@ -1,8 +1,16 @@
-import { describe, it, expect } from "vitest";
+import type { NormalizedScene, WithStashUrl } from "@peek/shared-types";
+import { untrusted } from "@tests/helpers/untrusted";
+import { must } from "@tests/testUtils";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { MockInstance } from "vitest";
 import {
-  scenePlayerReducer,
   initialState,
+  nextIndex,
+  prevIndex,
+  scenePlayerReducer,
 } from "@/contexts/scenePlayerReducer";
+import type { ScenePlayerReducerState } from "@/contexts/scenePlayerReducer";
+import { buildPlaybackQueue } from "@/utils/playbackQueue";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -12,17 +20,111 @@ import {
 function makePlaylist(count: number, overrides: Record<string, unknown> = {}) {
   return {
     scenes: Array.from({ length: count }, (_, i) => ({ id: `scene-${i}` })),
-    autoplayNext: true,
     shuffle: false,
     repeat: "none",
-    shuffleHistory: [],
     ...overrides,
   };
 }
 
 /** Deep-clone a plain object so we can later assert the original was not mutated. */
-function snapshot(obj: unknown) {
-  return JSON.parse(JSON.stringify(obj));
+function snapshot<T>(obj: T): T {
+  return JSON.parse(JSON.stringify(obj)) as T;
+}
+
+/** The state without the four playback controls the toggles own */
+function withoutControls(state: ScenePlayerReducerState) {
+  const controls = new Set([
+    "autoplayNext",
+    "shuffle",
+    "repeat",
+    "shuffleHistory",
+  ]);
+  return Object.fromEntries(
+    Object.entries(state).filter(([key]) => !controls.has(key))
+  );
+}
+
+/** A queue as the grids, carousels and history build it (no autoplayNext) */
+function rowQueue(options: { shuffle?: boolean; repeat?: "none" | "all" }) {
+  return buildPlaybackQueue({
+    userId: 1,
+    id: "virtual-grid",
+    name: "Scene Grid",
+    scenes: untrusted<NormalizedScene[]>([
+      { id: "1", instanceId: "inst-a" },
+      { id: "2", instanceId: "inst-a" },
+      { id: "3", instanceId: "inst-a" },
+    ]),
+    currentIndex: 0,
+    ...options,
+  });
+}
+
+type Mode = "sequential" | "shuffle";
+type Repeat = "none" | "all" | "one";
+type Where = "first" | "middle" | "last";
+type Step = { index: number; history: number[] } | null;
+
+/** 5 scenes: first 0, middle 2, last 4; an empty shuffle history; random 0 */
+const POSITIONS: Record<Where, number> = { first: 0, middle: 2, last: 4 };
+
+const NEXT_TABLE: Array<[Mode, Repeat, Where, Step]> = [
+  ["sequential", "none", "first", { index: 1, history: [] }],
+  ["sequential", "none", "middle", { index: 3, history: [] }],
+  ["sequential", "none", "last", null],
+  ["sequential", "all", "first", { index: 1, history: [] }],
+  ["sequential", "all", "middle", { index: 3, history: [] }],
+  ["sequential", "all", "last", { index: 0, history: [] }],
+  ["sequential", "one", "first", { index: 1, history: [] }],
+  ["sequential", "one", "middle", { index: 3, history: [] }],
+  ["sequential", "one", "last", null],
+  // Shuffle picks the first unplayed index other than the current one
+  ["shuffle", "none", "first", { index: 1, history: [0] }],
+  ["shuffle", "none", "middle", { index: 0, history: [2] }],
+  ["shuffle", "none", "last", { index: 0, history: [4] }],
+  ["shuffle", "all", "first", { index: 1, history: [0] }],
+  ["shuffle", "all", "middle", { index: 0, history: [2] }],
+  ["shuffle", "all", "last", { index: 0, history: [4] }],
+  ["shuffle", "one", "first", { index: 1, history: [0] }],
+  ["shuffle", "one", "middle", { index: 0, history: [2] }],
+  ["shuffle", "one", "last", { index: 0, history: [4] }],
+];
+
+const PREV_TABLE: Array<[Mode, Repeat, Where, Step]> = [
+  ["sequential", "none", "first", null],
+  ["sequential", "none", "middle", { index: 1, history: [] }],
+  ["sequential", "none", "last", { index: 3, history: [] }],
+  ["sequential", "all", "first", { index: 4, history: [] }],
+  ["sequential", "all", "middle", { index: 1, history: [] }],
+  ["sequential", "all", "last", { index: 3, history: [] }],
+  ["sequential", "one", "first", null],
+  ["sequential", "one", "middle", { index: 1, history: [] }],
+  ["sequential", "one", "last", { index: 3, history: [] }],
+  // No history: a random other index, the history unchanged
+  ["shuffle", "none", "first", { index: 1, history: [] }],
+  ["shuffle", "none", "middle", { index: 0, history: [] }],
+  ["shuffle", "none", "last", { index: 0, history: [] }],
+  ["shuffle", "all", "first", { index: 1, history: [] }],
+  ["shuffle", "all", "middle", { index: 0, history: [] }],
+  ["shuffle", "all", "last", { index: 0, history: [] }],
+  ["shuffle", "one", "first", { index: 1, history: [] }],
+  ["shuffle", "one", "middle", { index: 0, history: [] }],
+  ["shuffle", "one", "last", { index: 0, history: [] }],
+];
+
+function tableState(
+  mode: Mode,
+  repeat: Repeat,
+  where: Where
+): ScenePlayerReducerState {
+  return {
+    ...initialState,
+    playlist: makePlaylist(5),
+    currentIndex: POSITIONS[where],
+    shuffle: mode === "shuffle",
+    repeat,
+    shuffleHistory: [],
+  };
 }
 
 // ===========================================================================
@@ -40,15 +142,6 @@ describe("scenePlayerReducer", () => {
         sceneLoading: false,
         sceneError: null,
 
-        video: null,
-        videoLoading: false,
-        videoError: null,
-        sessionId: null,
-        quality: "direct",
-
-        isInitializing: false,
-        isAutoFallback: false,
-        isSwitchingMode: false,
         ready: false,
         shouldAutoplay: false,
 
@@ -59,11 +152,242 @@ describe("scenePlayerReducer", () => {
         shuffle: false,
         repeat: "none",
         shuffleHistory: [],
+        restartCount: 0,
 
-        compatibility: null,
+        requested: null,
+        unavailable: [],
+        direction: "next",
 
         oCounter: 0,
       });
+      expect(initialState).not.toHaveProperty("compatibility");
+      expect(initialState).not.toHaveProperty("quality");
+    });
+
+    it("deleted actions are gone", () => {
+      expect(initialState).not.toHaveProperty("video");
+      expect(initialState).not.toHaveProperty("sessionId");
+      expect(initialState).not.toHaveProperty("isAutoFallback");
+      for (const type of [
+        "LOAD_VIDEO_START",
+        "SET_VIDEO",
+        "SET_SESSION_ID",
+        "CLEAR_VIDEO",
+        "SET_CURRENT_INDEX",
+        "SET_AUTO_FALLBACK",
+        "SET_SWITCHING_MODE",
+        "SET_INITIALIZING",
+        "SET_SHUFFLE_HISTORY",
+        "SET_QUALITY",
+      ]) {
+        const state = { ...initialState, playlist: makePlaylist(3) };
+        expect(scenePlayerReducer(state, { type, payload: 1 })).toBe(state);
+      }
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // One advance path: NEXT_SCENE and PREV_SCENE step through nextIndex and
+  // prevIndex, and the controls live in the reducer's own fields
+  // -------------------------------------------------------------------------
+  describe("One advance path", () => {
+    let random: MockInstance<() => number>;
+
+    beforeEach(() => {
+      random = vi.spyOn(Math, "random").mockReturnValue(0);
+    });
+
+    afterEach(() => {
+      random.mockRestore();
+    });
+
+    it.each(NEXT_TABLE)(
+      "the reducer exports nextIndex and prevIndex, which NEXT_SCENE and PREV_SCENE use: next, %s, repeat %s, %s",
+      (mode, repeat, where, expected) => {
+        const state = tableState(mode, repeat, where);
+
+        expect(nextIndex(state, () => 0)).toEqual(expected);
+
+        const after = scenePlayerReducer(state, { type: "NEXT_SCENE" });
+        expect(after === state).toBe(expected === null);
+        expect(after.currentIndex).toBe(expected?.index ?? state.currentIndex);
+        expect(after.shuffleHistory).toEqual(
+          expected?.history ?? state.shuffleHistory
+        );
+      }
+    );
+
+    it.each(PREV_TABLE)(
+      "the reducer exports nextIndex and prevIndex, which NEXT_SCENE and PREV_SCENE use: prev, %s, repeat %s, %s",
+      (mode, repeat, where, expected) => {
+        const state = tableState(mode, repeat, where);
+
+        expect(prevIndex(state, () => 0)).toEqual(expected);
+
+        const after = scenePlayerReducer(state, { type: "PREV_SCENE" });
+        expect(after === state).toBe(expected === null);
+        expect(after.currentIndex).toBe(expected?.index ?? state.currentIndex);
+        expect(after.shuffleHistory).toEqual(
+          expected?.history ?? state.shuffleHistory
+        );
+      }
+    );
+
+    it("nextIndex in shuffle with every scene played: null without repeat all, a restart with it", () => {
+      const played = {
+        ...tableState("shuffle", "none", "first"),
+        shuffleHistory: [1, 2, 3, 4],
+      };
+
+      expect(nextIndex(played, () => 0)).toBeNull();
+      expect(nextIndex({ ...played, repeat: "one" }, () => 0)).toBeNull();
+      expect(nextIndex({ ...played, repeat: "all" }, () => 0)).toEqual({
+        index: 1,
+        history: [0],
+      });
+    });
+
+    it("prevIndex in shuffle goes back through the history", () => {
+      const state = {
+        ...tableState("shuffle", "none", "middle"),
+        shuffleHistory: [4, 1],
+      };
+
+      expect(prevIndex(state, () => 0.99)).toEqual({ index: 1, history: [4] });
+    });
+
+    it("repeat-all shuffle after every scene played restarts the history with the current index and resets oCounter like every other branch", () => {
+      const state = {
+        ...initialState,
+        playlist: makePlaylist(3),
+        currentIndex: 0,
+        shuffle: true,
+        repeat: "all",
+        shuffleHistory: [1, 2],
+        oCounter: 4,
+        ready: true,
+      };
+
+      const result = scenePlayerReducer(state, { type: "NEXT_SCENE" });
+
+      expect(result.currentIndex).toBe(1);
+      expect(result.shuffleHistory).toEqual([0]);
+      expect(result.oCounter).toBe(0);
+      expect(result.ready).toBe(false);
+      expect(result.playlist).toBe(state.playlist);
+    });
+
+    it("NEXT_SCENE with autoplay sets shouldAutoplay", () => {
+      const state = {
+        ...initialState,
+        playlist: makePlaylist(3),
+        shouldAutoplay: false,
+      };
+
+      const result = scenePlayerReducer(state, {
+        type: "NEXT_SCENE",
+        payload: { autoplay: true },
+      });
+
+      expect(result.currentIndex).toBe(1);
+      expect(result.shouldAutoplay).toBe(true);
+      // Without the payload, the flag is left as it is
+      expect(
+        scenePlayerReducer(state, { type: "NEXT_SCENE" }).shouldAutoplay
+      ).toBe(false);
+      expect(
+        scenePlayerReducer(
+          { ...state, currentIndex: 1 },
+          { type: "PREV_SCENE", payload: { autoplay: true } }
+        ).shouldAutoplay
+      ).toBe(true);
+    });
+
+    it("nextIndex skips unavailable entries, including in shuffle and repeat all", () => {
+      const at = (
+        mode: Mode,
+        repeat: Repeat,
+        where: Where,
+        unavailable: number[],
+        shuffleHistory: number[] = []
+      ) => ({
+        ...tableState(mode, repeat, where),
+        unavailable,
+        shuffleHistory,
+      });
+
+      // Sequential: past the unavailable ones, and none past the last
+      expect(nextIndex(at("sequential", "none", "first", [1, 2]))).toEqual({
+        index: 3,
+        history: [],
+      });
+      expect(nextIndex(at("sequential", "none", "middle", [3, 4]))).toBeNull();
+      // Repeat all wraps past an unavailable first entry
+      expect(nextIndex(at("sequential", "all", "middle", [3, 4, 0]))).toEqual({
+        index: 1,
+        history: [],
+      });
+      // Nothing available at all: no step, even with repeat all
+      const none = [0, 1, 2, 3, 4];
+      expect(nextIndex(at("sequential", "all", "first", none))).toBeNull();
+
+      // Shuffle picks only available entries not yet played
+      expect(
+        nextIndex(at("shuffle", "none", "first", [1, 2]), () => 0)
+      ).toEqual({ index: 3, history: [0] });
+      // Every available one played: repeat all starts again among them
+      expect(
+        nextIndex(at("shuffle", "all", "first", [1, 2], [3, 4]), () => 0)
+      ).toEqual({ index: 3, history: [0] });
+      expect(
+        nextIndex(at("shuffle", "all", "first", none), () => 0)
+      ).toBeNull();
+
+      // prevIndex the same way
+      expect(prevIndex(at("sequential", "none", "last", [2, 3]))).toEqual({
+        index: 1,
+        history: [],
+      });
+      expect(prevIndex(at("sequential", "all", "first", [4]))).toEqual({
+        index: 3,
+        history: [],
+      });
+      expect(prevIndex(at("sequential", "all", "first", none))).toBeNull();
+      // Shuffle goes back past an unavailable entry in its history
+      expect(
+        prevIndex(at("shuffle", "none", "middle", [4], [1, 4]), () => 0)
+      ).toEqual({ index: 1, history: [] });
+
+      // NEXT_SCENE and PREV_SCENE step through them
+      const next = scenePlayerReducer(at("sequential", "none", "first", [1]), {
+        type: "NEXT_SCENE",
+      });
+      expect(next.currentIndex).toBe(2);
+      expect(next.direction).toBe("next");
+      const prev = scenePlayerReducer(at("sequential", "none", "last", [3]), {
+        type: "PREV_SCENE",
+      });
+      expect(prev.currentIndex).toBe(2);
+      expect(prev.direction).toBe("prev");
+    });
+
+    it("toggles change only the control fields; state.playlist keeps its identity", () => {
+      const prev: ScenePlayerReducerState = {
+        ...initialState,
+        playlist: makePlaylist(3),
+        currentIndex: 1,
+        shuffleHistory: [0],
+      };
+
+      for (const type of [
+        "TOGGLE_AUTOPLAY_NEXT",
+        "TOGGLE_SHUFFLE",
+        "TOGGLE_REPEAT",
+      ]) {
+        const next = scenePlayerReducer(prev, { type });
+        expect(next.playlist).toBe(prev.playlist);
+        expect(withoutControls(next)).toEqual(withoutControls(prev));
+      }
     });
   });
 
@@ -80,7 +404,7 @@ describe("scenePlayerReducer", () => {
     });
 
     it("LOAD_SCENE_SUCCESS sets scene, oCounter, clears loading", () => {
-      const scene = { id: "1", isStreamable: true, files: [] };
+      const scene = { id: "1", files: [] };
       const state = { ...initialState, sceneLoading: true };
       const result = scenePlayerReducer(state, {
         type: "LOAD_SCENE_SUCCESS",
@@ -94,7 +418,7 @@ describe("scenePlayerReducer", () => {
     });
 
     it("LOAD_SCENE_SUCCESS defaults oCounter to 0 if not provided", () => {
-      const scene = { id: "1", isStreamable: true, files: [] };
+      const scene = { id: "1", files: [] };
       const result = scenePlayerReducer(initialState, {
         type: "LOAD_SCENE_SUCCESS",
         payload: { scene },
@@ -107,7 +431,7 @@ describe("scenePlayerReducer", () => {
       const state = { ...initialState, sceneLoading: true };
       const result = scenePlayerReducer(state, {
         type: "LOAD_SCENE_ERROR",
-        payload: "Something went wrong",
+        payload: { error: "Something went wrong" },
       });
 
       expect(result.sceneLoading).toBe(false);
@@ -116,211 +440,177 @@ describe("scenePlayerReducer", () => {
   });
 
   // -------------------------------------------------------------------------
-  // LOAD_SCENE_SUCCESS quality auto-selection
+  // Stale answers, unknown scenes and unavailable queue entries
   // -------------------------------------------------------------------------
-  describe("LOAD_SCENE_SUCCESS quality auto-selection", () => {
-    it("keeps 'direct' when scene.isStreamable is true", () => {
-      const scene = { id: "1", isStreamable: true, files: [{ height: 1080 }] };
-      const result = scenePlayerReducer(
-        { ...initialState, quality: "direct" },
-        { type: "LOAD_SCENE_SUCCESS", payload: { scene } },
-      );
+  describe("Stale answers and unavailable entries", () => {
+    const request = (sceneId: string) => ({ sceneId, instanceId: "inst-a" });
+    const sceneOf = (id: string) =>
+      untrusted<WithStashUrl<NormalizedScene>>({
+        id,
+        instanceId: "inst-a",
+        files: [],
+      });
+    const failure = new Error("Scene not found");
 
-      expect(result.quality).toBe("direct");
-    });
-
-    it("selects '1080p' when isStreamable=false and height=1080", () => {
-      const scene = {
-        id: "1",
-        isStreamable: false,
-        files: [{ height: 1080 }],
-      };
-      const result = scenePlayerReducer(
-        { ...initialState, quality: "direct" },
-        { type: "LOAD_SCENE_SUCCESS", payload: { scene } },
-      );
-
-      expect(result.quality).toBe("1080p");
-    });
-
-    it("selects '2160p' when isStreamable=false and height=2160", () => {
-      const scene = {
-        id: "1",
-        isStreamable: false,
-        files: [{ height: 2160 }],
-      };
-      const result = scenePlayerReducer(
-        { ...initialState, quality: "direct" },
-        { type: "LOAD_SCENE_SUCCESS", payload: { scene } },
-      );
-
-      expect(result.quality).toBe("2160p");
-    });
-
-    it("selects '720p' when isStreamable=false and height=720", () => {
-      const scene = {
-        id: "1",
-        isStreamable: false,
-        files: [{ height: 720 }],
-      };
-      const result = scenePlayerReducer(
-        { ...initialState, quality: "direct" },
-        { type: "LOAD_SCENE_SUCCESS", payload: { scene } },
-      );
-
-      expect(result.quality).toBe("720p");
-    });
-
-    it("selects '360p' when isStreamable=false and height=400 (between 480 and 360)", () => {
-      const scene = {
-        id: "1",
-        isStreamable: false,
-        files: [{ height: 400 }],
-      };
-      const result = scenePlayerReducer(
-        { ...initialState, quality: "direct" },
-        { type: "LOAD_SCENE_SUCCESS", payload: { scene } },
-      );
-
-      expect(result.quality).toBe("360p");
-    });
-
-    it("selects '480p' when isStreamable=false and height=480", () => {
-      const scene = {
-        id: "1",
-        isStreamable: false,
-        files: [{ height: 480 }],
-      };
-      const result = scenePlayerReducer(
-        { ...initialState, quality: "direct" },
-        { type: "LOAD_SCENE_SUCCESS", payload: { scene } },
-      );
-
-      expect(result.quality).toBe("480p");
-    });
-
-    it("selects '360p' as fallback when height is very small", () => {
-      const scene = {
-        id: "1",
-        isStreamable: false,
-        files: [{ height: 240 }],
-      };
-      const result = scenePlayerReducer(
-        { ...initialState, quality: "direct" },
-        { type: "LOAD_SCENE_SUCCESS", payload: { scene } },
-      );
-
-      expect(result.quality).toBe("360p");
-    });
-
-    it("defaults to 1080p source height when files array is missing", () => {
-      const scene = { id: "1", isStreamable: false };
-      const result = scenePlayerReducer(
-        { ...initialState, quality: "direct" },
-        { type: "LOAD_SCENE_SUCCESS", payload: { scene } },
-      );
-
-      expect(result.quality).toBe("1080p");
-    });
-
-    it("defaults to 1080p source height when files array is empty", () => {
-      const scene = { id: "1", isStreamable: false, files: [] };
-      const result = scenePlayerReducer(
-        { ...initialState, quality: "direct" },
-        { type: "LOAD_SCENE_SUCCESS", payload: { scene } },
-      );
-
-      expect(result.quality).toBe("1080p");
-    });
-
-    it("does NOT auto-select when isStreamable is undefined", () => {
-      const scene = { id: "1", files: [{ height: 720 }] };
-      const result = scenePlayerReducer(
-        { ...initialState, quality: "direct" },
-        { type: "LOAD_SCENE_SUCCESS", payload: { scene } },
-      );
-
-      // isStreamable is undefined so the condition `scene.isStreamable !== undefined`
-      // is false, quality stays at the current state value
-      expect(result.quality).toBe("direct");
-    });
-
-    it("does NOT auto-select when quality has already been changed from 'direct'", () => {
-      const scene = {
-        id: "1",
-        isStreamable: false,
-        files: [{ height: 1080 }],
-      };
-      const result = scenePlayerReducer(
-        { ...initialState, quality: "720p" },
-        { type: "LOAD_SCENE_SUCCESS", payload: { scene } },
-      );
-
-      // Quality is already "720p" (not "direct"), so no auto-selection
-      expect(result.quality).toBe("720p");
-    });
-
-    it("selects best quality for heights between presets (1440p -> 1080p)", () => {
-      const scene = {
-        id: "1",
-        isStreamable: false,
-        files: [{ height: 1440 }],
-      };
-      const result = scenePlayerReducer(
-        { ...initialState, quality: "direct" },
-        { type: "LOAD_SCENE_SUCCESS", payload: { scene } },
-      );
-
-      // 1440 is less than 2160 but >= 1080, so 1080p is the best <= sourceHeight
-      expect(result.quality).toBe("1080p");
-    });
-  });
-
-  // -------------------------------------------------------------------------
-  // Video loading lifecycle
-  // -------------------------------------------------------------------------
-  describe("Video loading lifecycle", () => {
-    it("LOAD_VIDEO_START sets videoLoading true and clears error", () => {
-      const state = { ...initialState, videoError: "old error" };
-      const result = scenePlayerReducer(state, { type: "LOAD_VIDEO_START" });
-
-      expect(result.videoLoading).toBe(true);
-      expect(result.videoError).toBeNull();
-    });
-
-    it("LOAD_VIDEO_SUCCESS sets video, sessionId, clears loading/error/isInitializing", () => {
-      const state = {
+    /** A queue of these scenes on inst-a, the first loaded */
+    function queueState(sceneIds: string[]): ScenePlayerReducerState {
+      return {
         ...initialState,
-        videoLoading: true,
-        videoError: "stale",
-        isInitializing: true,
+        playlist: {
+          scenes: sceneIds.map((sceneId) => ({
+            sceneId,
+            instanceId: "inst-a",
+            scene: { title: `Scene ${sceneId}` },
+          })),
+        },
+        scene: sceneOf(must(sceneIds[0], "the first scene")),
+        requested: request(must(sceneIds[0], "the first scene")),
       };
-      const result = scenePlayerReducer(state, {
-        type: "LOAD_VIDEO_SUCCESS",
-        payload: { video: { url: "test.m3u8" }, sessionId: "sess-123" },
+    }
+
+    it("an answer for any request but the latest is ignored", () => {
+      let state = scenePlayerReducer(initialState, {
+        type: "LOAD_SCENE_START",
+        payload: request("1"),
+      });
+      state = scenePlayerReducer(state, {
+        type: "LOAD_SCENE_START",
+        payload: request("2"),
+      });
+      expect(state.requested).toEqual(request("2"));
+
+      expect(
+        scenePlayerReducer(state, {
+          type: "LOAD_SCENE_SUCCESS",
+          payload: { request: request("1"), scene: sceneOf("1") },
+        })
+      ).toBe(state);
+      expect(
+        scenePlayerReducer(state, {
+          type: "LOAD_SCENE_ERROR",
+          payload: { request: request("1"), error: failure },
+        })
+      ).toBe(state);
+      expect(
+        scenePlayerReducer(state, {
+          type: "ENTRY_UNAVAILABLE",
+          payload: { index: 0, request: request("1"), error: failure },
+        })
+      ).toBe(state);
+
+      const loaded = scenePlayerReducer(state, {
+        type: "LOAD_SCENE_SUCCESS",
+        payload: { request: request("2"), scene: sceneOf("2") },
+      });
+      expect(loaded.scene?.id).toBe("2");
+      expect(loaded.sceneLoading).toBe(false);
+    });
+
+    it("a failed load of another scene leaves no scene; a failed retry of the shown scene keeps it", () => {
+      const shown = { ...initialState, scene: sceneOf("1") };
+
+      const other = scenePlayerReducer(
+        scenePlayerReducer(shown, {
+          type: "LOAD_SCENE_START",
+          payload: request("2"),
+        }),
+        {
+          type: "LOAD_SCENE_ERROR",
+          payload: { request: request("2"), error: failure },
+        }
+      );
+      expect(other.scene).toBeNull();
+      expect(other.sceneError).toBe(failure);
+      expect(other.sceneLoading).toBe(false);
+
+      const retry = scenePlayerReducer(
+        scenePlayerReducer(shown, {
+          type: "LOAD_SCENE_START",
+          payload: request("1"),
+        }),
+        {
+          type: "LOAD_SCENE_ERROR",
+          payload: { request: request("1"), error: failure },
+        }
+      );
+      expect(retry.scene?.id).toBe("1");
+      expect(retry.sceneError).toBe(failure);
+    });
+
+    it("ENTRY_UNAVAILABLE marks every entry of the scene and steps on in the last step's direction, keeping autoplay", () => {
+      let state = scenePlayerReducer(queueState(["1", "2", "3", "2", "4"]), {
+        type: "NEXT_SCENE",
+        payload: { autoplay: true },
+      });
+      state = scenePlayerReducer(state, {
+        type: "LOAD_SCENE_START",
+        payload: request("2"),
       });
 
-      expect(result.video).toEqual({ url: "test.m3u8" });
-      expect(result.sessionId).toBe("sess-123");
-      expect(result.videoLoading).toBe(false);
-      expect(result.videoError).toBeNull();
-      expect(result.isInitializing).toBe(false);
-    });
-
-    it("LOAD_VIDEO_ERROR sets error, clears loading and isInitializing", () => {
-      const state = {
-        ...initialState,
-        videoLoading: true,
-        isInitializing: true,
-      };
-      const result = scenePlayerReducer(state, {
-        type: "LOAD_VIDEO_ERROR",
-        payload: "Failed to load",
+      state = scenePlayerReducer(state, {
+        type: "ENTRY_UNAVAILABLE",
+        payload: { index: 1, request: request("2"), error: failure },
       });
 
-      expect(result.videoLoading).toBe(false);
-      expect(result.videoError).toBe("Failed to load");
-      expect(result.isInitializing).toBe(false);
+      expect(state.unavailable).toEqual([1, 3]);
+      expect(state.currentIndex).toBe(2);
+      expect(state.shouldAutoplay).toBe(true);
+      expect(state.sceneError).toBeNull();
+      // The shown scene stays until the next entry's loads
+      expect(state.scene?.id).toBe("1");
+      // The duplicate of the unavailable scene is skipped too
+      expect(
+        scenePlayerReducer(state, { type: "NEXT_SCENE" }).currentIndex
+      ).toBe(4);
+
+      // Backwards after Prev
+      let back = scenePlayerReducer(
+        { ...queueState(["1", "2", "3"]), currentIndex: 2 },
+        { type: "PREV_SCENE" }
+      );
+      back = scenePlayerReducer(back, {
+        type: "LOAD_SCENE_START",
+        payload: request("2"),
+      });
+      back = scenePlayerReducer(back, {
+        type: "ENTRY_UNAVAILABLE",
+        payload: { index: 1, request: request("2"), error: failure },
+      });
+      expect(back.currentIndex).toBe(0);
+    });
+
+    it("ENTRY_UNAVAILABLE with nothing left to step to stops on the error with no scene", () => {
+      let state = scenePlayerReducer(queueState(["1", "2"]), {
+        type: "NEXT_SCENE",
+      });
+      state = scenePlayerReducer(state, {
+        type: "LOAD_SCENE_START",
+        payload: request("2"),
+      });
+
+      state = scenePlayerReducer(state, {
+        type: "ENTRY_UNAVAILABLE",
+        payload: { index: 1, request: request("2"), error: failure },
+      });
+
+      expect(state.currentIndex).toBe(1);
+      expect(state.unavailable).toEqual([1]);
+      expect(state.scene).toBeNull();
+      expect(state.sceneError).toBe(failure);
+      expect(state.sceneLoading).toBe(false);
+    });
+
+    it("a new queue or leaving the queue forgets the unavailable entries", () => {
+      const state = { ...queueState(["1", "2"]), unavailable: [1] };
+      expect(
+        scenePlayerReducer(state, { type: "LEAVE_QUEUE" }).unavailable
+      ).toEqual([]);
+      expect(
+        scenePlayerReducer(state, {
+          type: "INITIALIZE",
+          payload: { playlist: makePlaylist(2) },
+        }).unavailable
+      ).toEqual([]);
     });
   });
 
@@ -328,79 +618,6 @@ describe("scenePlayerReducer", () => {
   // Simple setters
   // -------------------------------------------------------------------------
   describe("Simple setters", () => {
-    it("SET_QUALITY updates quality", () => {
-      const result = scenePlayerReducer(initialState, {
-        type: "SET_QUALITY",
-        payload: "720p",
-      });
-      expect(result.quality).toBe("720p");
-    });
-
-    it("SET_VIDEO updates video", () => {
-      const video = { url: "test.m3u8" };
-      const result = scenePlayerReducer(initialState, {
-        type: "SET_VIDEO",
-        payload: video,
-      });
-      expect(result.video).toBe(video);
-    });
-
-    it("SET_SESSION_ID updates sessionId", () => {
-      const result = scenePlayerReducer(initialState, {
-        type: "SET_SESSION_ID",
-        payload: "sess-abc",
-      });
-      expect(result.sessionId).toBe("sess-abc");
-    });
-
-    it("CLEAR_VIDEO nulls video and sessionId, clears loading/error", () => {
-      const state = {
-        ...initialState,
-        video: { url: "test" },
-        sessionId: "sess-1",
-        videoLoading: true,
-        videoError: "err",
-      };
-      const result = scenePlayerReducer(state, { type: "CLEAR_VIDEO" });
-
-      expect(result.video).toBeNull();
-      expect(result.sessionId).toBeNull();
-      expect(result.videoLoading).toBe(false);
-      expect(result.videoError).toBeNull();
-    });
-
-    it("SET_CURRENT_INDEX updates currentIndex", () => {
-      const result = scenePlayerReducer(initialState, {
-        type: "SET_CURRENT_INDEX",
-        payload: 5,
-      });
-      expect(result.currentIndex).toBe(5);
-    });
-
-    it("SET_INITIALIZING updates isInitializing", () => {
-      const result = scenePlayerReducer(initialState, {
-        type: "SET_INITIALIZING",
-        payload: true,
-      });
-      expect(result.isInitializing).toBe(true);
-    });
-
-    it("SET_AUTO_FALLBACK updates isAutoFallback", () => {
-      const result = scenePlayerReducer(initialState, {
-        type: "SET_AUTO_FALLBACK",
-        payload: true,
-      });
-      expect(result.isAutoFallback).toBe(true);
-    });
-
-    it("SET_SWITCHING_MODE updates isSwitchingMode", () => {
-      const result = scenePlayerReducer(initialState, {
-        type: "SET_SWITCHING_MODE",
-        payload: true,
-      });
-      expect(result.isSwitchingMode).toBe(true);
-    });
-
     it("SET_READY updates ready", () => {
       const result = scenePlayerReducer(initialState, {
         type: "SET_READY",
@@ -455,7 +672,7 @@ describe("scenePlayerReducer", () => {
         });
 
         expect(result.autoplayNext).toBe(false);
-        expect(result.playlist!.autoplayNext).toBe(false);
+        expect(result.playlist).toBe(state.playlist);
       });
 
       it("toggles autoplayNext from false to true", () => {
@@ -469,7 +686,7 @@ describe("scenePlayerReducer", () => {
         });
 
         expect(result.autoplayNext).toBe(true);
-        expect(result.playlist!.autoplayNext).toBe(true);
+        expect(result.playlist).toBe(state.playlist);
       });
 
       it("sets playlist to null when playlist is null", () => {
@@ -495,8 +712,7 @@ describe("scenePlayerReducer", () => {
 
         expect(result.shuffle).toBe(true);
         expect(result.shuffleHistory).toEqual([]);
-        expect(result.playlist!.shuffle).toBe(true);
-        expect(result.playlist!.shuffleHistory).toEqual([]);
+        expect(result.playlist).toBe(state.playlist);
       });
 
       it("disables shuffle and preserves shuffleHistory", () => {
@@ -511,7 +727,7 @@ describe("scenePlayerReducer", () => {
         expect(result.shuffle).toBe(false);
         // When disabling, shuffleHistory is kept from state (not reset)
         expect(result.shuffleHistory).toEqual([1, 2]);
-        expect(result.playlist!.shuffle).toBe(false);
+        expect(result.playlist).toBe(state.playlist);
       });
 
       it("handles null playlist gracefully", () => {
@@ -533,7 +749,7 @@ describe("scenePlayerReducer", () => {
         const result = scenePlayerReducer(state, { type: "TOGGLE_REPEAT" });
 
         expect(result.repeat).toBe("all");
-        expect(result.playlist!.repeat).toBe("all");
+        expect(result.playlist).toBe(state.playlist);
       });
 
       it("cycles all -> one", () => {
@@ -545,7 +761,7 @@ describe("scenePlayerReducer", () => {
         const result = scenePlayerReducer(state, { type: "TOGGLE_REPEAT" });
 
         expect(result.repeat).toBe("one");
-        expect(result.playlist!.repeat).toBe("one");
+        expect(result.playlist).toBe(state.playlist);
       });
 
       it("cycles one -> none", () => {
@@ -557,11 +773,11 @@ describe("scenePlayerReducer", () => {
         const result = scenePlayerReducer(state, { type: "TOGGLE_REPEAT" });
 
         expect(result.repeat).toBe("none");
-        expect(result.playlist!.repeat).toBe("none");
+        expect(result.playlist).toBe(state.playlist);
       });
 
       it("full cycle: none -> all -> one -> none", () => {
-        let state: any = {
+        let state: ScenePlayerReducerState = {
           ...initialState,
           repeat: "none",
           playlist: makePlaylist(3),
@@ -586,74 +802,20 @@ describe("scenePlayerReducer", () => {
       });
     });
 
-    describe("SET_SHUFFLE_HISTORY", () => {
-      it("sets shuffleHistory and updates playlist", () => {
-        const state = {
-          ...initialState,
-          shuffleHistory: [],
-          playlist: makePlaylist(5),
-        };
-        const result = scenePlayerReducer(state, {
-          type: "SET_SHUFFLE_HISTORY",
-          payload: [0, 2, 4],
-        });
-
-        expect(result.shuffleHistory).toEqual([0, 2, 4]);
-        expect(result.playlist!.shuffleHistory).toEqual([0, 2, 4]);
-      });
-
-      it("handles null playlist", () => {
-        const state = { ...initialState, playlist: null };
-        const result = scenePlayerReducer(state, {
-          type: "SET_SHUFFLE_HISTORY",
-          payload: [1, 3],
-        });
-
-        expect(result.shuffleHistory).toEqual([1, 3]);
-        expect(result.playlist).toBeNull();
-      });
-    });
-  });
-
-  // -------------------------------------------------------------------------
-  // NEXT_SCENE
-  // -------------------------------------------------------------------------
-  describe("NEXT_SCENE", () => {
-    describe("without playlist", () => {
-      it("returns state unchanged when playlist is null", () => {
-        const state = { ...initialState, playlist: null };
-        const result = scenePlayerReducer(state, { type: "NEXT_SCENE" });
-        expect(result).toBe(state);
-      });
-
-      it("returns state unchanged when playlist.scenes is missing", () => {
-        const state = { ...initialState, playlist: {} };
-        const result = scenePlayerReducer(state, { type: "NEXT_SCENE" });
-        expect(result).toBe(state);
-      });
-    });
-
     describe("sequential mode", () => {
       it("advances to next scene", () => {
         const state = {
           ...initialState,
           playlist: makePlaylist(5),
           currentIndex: 1,
-          video: { url: "old" },
-          sessionId: "old-sess",
-          quality: "720p",
           oCounter: 5,
           ready: true,
         };
         const result = scenePlayerReducer(state, { type: "NEXT_SCENE" });
 
         expect(result.currentIndex).toBe(2);
-        expect(result.video).toBeNull();
-        expect(result.sessionId).toBeNull();
-        expect(result.quality).toBe("direct");
         expect(result.oCounter).toBe(0);
         expect(result.ready).toBe(false);
-        expect(result.isInitializing).toBe(false);
       });
 
       it("stays on last scene when repeat is 'none'", () => {
@@ -677,7 +839,6 @@ describe("scenePlayerReducer", () => {
         const result = scenePlayerReducer(state, { type: "NEXT_SCENE" });
 
         expect(result.currentIndex).toBe(0);
-        expect(result.quality).toBe("direct");
         expect(result.oCounter).toBe(0);
       });
 
@@ -722,10 +883,10 @@ describe("scenePlayerReducer", () => {
         const result = scenePlayerReducer(state, { type: "NEXT_SCENE" });
 
         // shuffleHistory should end with the previous currentIndex (2)
-        expect((result.shuffleHistory as number[])[(result.shuffleHistory as number[]).length - 1]).toBe(2);
+        expect(result.shuffleHistory[result.shuffleHistory.length - 1]).toBe(2);
       });
 
-      it("updates playlist.shuffleHistory as well", () => {
+      it("leaves the queue itself unchanged", () => {
         const state = {
           ...initialState,
           playlist: makePlaylist(5),
@@ -735,7 +896,8 @@ describe("scenePlayerReducer", () => {
         };
         const result = scenePlayerReducer(state, { type: "NEXT_SCENE" });
 
-        expect(result.playlist!.shuffleHistory).toEqual(result.shuffleHistory);
+        expect(result.playlist).toBe(state.playlist);
+        expect(result.shuffleHistory).toEqual([0]);
       });
 
       it("stays when no unplayed scenes remain and repeat is not 'all'", () => {
@@ -766,11 +928,9 @@ describe("scenePlayerReducer", () => {
 
         // Should reset history to [currentIndex] (the previous scene)
         expect(result.shuffleHistory).toEqual([0]);
-        expect(result.playlist!.shuffleHistory).toEqual([0]);
         // New index should not be current
         expect(result.currentIndex).not.toBe(0);
         // State resets
-        expect(result.video).toBeNull();
         expect(result.ready).toBe(false);
       });
 
@@ -830,18 +990,12 @@ describe("scenePlayerReducer", () => {
           ...initialState,
           playlist: makePlaylist(5),
           currentIndex: 3,
-          video: { url: "old" },
-          sessionId: "old-sess",
-          quality: "720p",
           oCounter: 5,
           ready: true,
         };
         const result = scenePlayerReducer(state, { type: "PREV_SCENE" });
 
         expect(result.currentIndex).toBe(2);
-        expect(result.video).toBeNull();
-        expect(result.sessionId).toBeNull();
-        expect(result.quality).toBe("direct");
         expect(result.oCounter).toBe(0);
         expect(result.ready).toBe(false);
       });
@@ -867,7 +1021,6 @@ describe("scenePlayerReducer", () => {
         const result = scenePlayerReducer(state, { type: "PREV_SCENE" });
 
         expect(result.currentIndex).toBe(4);
-        expect(result.quality).toBe("direct");
         expect(result.oCounter).toBe(0);
       });
     });
@@ -887,10 +1040,8 @@ describe("scenePlayerReducer", () => {
         expect(result.currentIndex).toBe(1);
         // History should have last item removed
         expect(result.shuffleHistory).toEqual([0, 2]);
-        expect(result.playlist!.shuffleHistory).toEqual([0, 2]);
+        expect(result.playlist).toBe(state.playlist);
         // State resets
-        expect(result.video).toBeNull();
-        expect(result.quality).toBe("direct");
         expect(result.oCounter).toBe(0);
         expect(result.ready).toBe(false);
       });
@@ -964,9 +1115,6 @@ describe("scenePlayerReducer", () => {
         ...initialState,
         playlist: makePlaylist(5),
         currentIndex: 0,
-        video: { url: "old" },
-        sessionId: "old",
-        quality: "720p",
         oCounter: 3,
         ready: true,
       };
@@ -976,12 +1124,8 @@ describe("scenePlayerReducer", () => {
       });
 
       expect(result.currentIndex).toBe(3);
-      expect(result.video).toBeNull();
-      expect(result.sessionId).toBeNull();
-      expect(result.quality).toBe("direct");
       expect(result.oCounter).toBe(0);
       expect(result.ready).toBe(false);
-      expect(result.isInitializing).toBe(false);
       expect(result.shouldAutoplay).toBe(false);
     });
 
@@ -1093,50 +1237,65 @@ describe("scenePlayerReducer", () => {
   // INITIALIZE
   // -------------------------------------------------------------------------
   describe("INITIALIZE", () => {
-    it("sets playlist, currentIndex, compatibility, quality, shouldAutoplay", () => {
-      const playlist = makePlaylist(3, {
-        autoplayNext: false,
-        shuffle: true,
-        repeat: "one",
-        shuffleHistory: [0, 1],
-      });
-      const compatibility = { hevc: false, av1: true };
+    it("sets playlist, currentIndex, shouldAutoplay", () => {
+      const playlist = makePlaylist(3, { shuffle: true, repeat: "one" });
 
       const result = scenePlayerReducer(initialState, {
         type: "INITIALIZE",
         payload: {
           playlist,
           currentIndex: 1,
-          compatibility,
-          initialQuality: "720p",
           initialShouldAutoplay: true,
         },
       });
 
       expect(result.playlist).toBe(playlist);
       expect(result.currentIndex).toBe(1);
-      expect(result.compatibility).toBe(compatibility);
-      expect(result.quality).toBe("720p");
       expect(result.shouldAutoplay).toBe(true);
     });
 
-    it("inherits playlist controls from playlist object", () => {
-      const playlist = makePlaylist(3, {
-        autoplayNext: false,
-        shuffle: true,
-        repeat: "all",
-        shuffleHistory: [2],
-      });
+    it("INITIALIZE takes the controls a reload hands back over the queue's own", () => {
+      const playlist = {
+        ...rowQueue({ shuffle: false, repeat: "none" }),
+        controls: {
+          autoplayNext: false,
+          shuffle: true,
+          repeat: "all" as const,
+          shuffleHistory: [0, 2],
+        },
+      };
 
       const result = scenePlayerReducer(initialState, {
         type: "INITIALIZE",
-        payload: { playlist },
+        payload: { playlist, currentIndex: 1 },
       });
 
       expect(result.autoplayNext).toBe(false);
       expect(result.shuffle).toBe(true);
       expect(result.repeat).toBe("all");
-      expect(result.shuffleHistory).toEqual([2]);
+      expect(result.shuffleHistory).toEqual([0, 2]);
+    });
+
+    it("INITIALIZE takes autoplayNext true when the queue names none", () => {
+      const state = { ...initialState, autoplayNext: false };
+
+      const result = scenePlayerReducer(state, {
+        type: "INITIALIZE",
+        payload: { playlist: rowQueue({}) },
+      });
+
+      expect(result.autoplayNext).toBe(true);
+    });
+
+    it("INITIALIZE takes the queue's shuffle and repeat", () => {
+      const result = scenePlayerReducer(initialState, {
+        type: "INITIALIZE",
+        payload: { playlist: rowQueue({ shuffle: true, repeat: "all" }) },
+      });
+
+      expect(result.shuffle).toBe(true);
+      expect(result.repeat).toBe("all");
+      expect(result.shuffleHistory).toEqual([]);
     });
 
     it("uses defaults when playlist is null", () => {
@@ -1147,8 +1306,6 @@ describe("scenePlayerReducer", () => {
 
       expect(result.playlist).toBeNull();
       expect(result.currentIndex).toBe(0);
-      expect(result.compatibility).toBeNull();
-      expect(result.quality).toBe("direct");
       expect(result.autoplayNext).toBe(true);
       expect(result.shuffle).toBe(false);
       expect(result.repeat).toBe("none");
@@ -1177,15 +1334,6 @@ describe("scenePlayerReducer", () => {
       expect(result.currentIndex).toBe(0);
     });
 
-    it("defaults quality to 'direct' when initialQuality is not provided", () => {
-      const result = scenePlayerReducer(initialState, {
-        type: "INITIALIZE",
-        payload: { playlist: makePlaylist(3) },
-      });
-
-      expect(result.quality).toBe("direct");
-    });
-
     it("preserves existing shouldAutoplay if already set and no initialShouldAutoplay", () => {
       const state = { ...initialState, shouldAutoplay: true };
       const result = scenePlayerReducer(state, {
@@ -1209,10 +1357,11 @@ describe("scenePlayerReducer", () => {
     it("preserves other state fields not set by INITIALIZE", () => {
       const state = {
         ...initialState,
-        scene: { id: "existing" },
-        video: { url: "existing" },
-        sessionId: "existing-sess",
+        scene: {
+          id: "existing",
+        } as unknown as ScenePlayerReducerState["scene"],
         oCounter: 5,
+        ready: true,
       };
       const result = scenePlayerReducer(state, {
         type: "INITIALIZE",
@@ -1220,9 +1369,8 @@ describe("scenePlayerReducer", () => {
       });
 
       expect(result.scene).toEqual({ id: "existing" });
-      expect(result.video).toEqual({ url: "existing" });
-      expect(result.sessionId).toBe("existing-sess");
       expect(result.oCounter).toBe(5);
+      expect(result.ready).toBe(true);
     });
   });
 
@@ -1231,14 +1379,14 @@ describe("scenePlayerReducer", () => {
   // -------------------------------------------------------------------------
   describe("Default case", () => {
     it("returns state unchanged for an unknown action type", () => {
-      const state = { ...initialState, quality: "720p" };
+      const state = { ...initialState, oCounter: 7 };
       const result = scenePlayerReducer(state, { type: "UNKNOWN_ACTION" });
       expect(result).toBe(state);
     });
 
     it("returns state unchanged for an action with no type", () => {
       const state = { ...initialState };
-      const result = scenePlayerReducer(state, {} as any);
+      const result = scenePlayerReducer(state, untrusted({}));
       expect(result).toBe(state);
     });
   });
@@ -1255,12 +1403,12 @@ describe("scenePlayerReducer", () => {
     });
 
     it("does not mutate state on LOAD_SCENE_SUCCESS", () => {
-      const state = { ...initialState, quality: "direct" };
+      const state = { ...initialState };
       const frozen = snapshot(state);
       scenePlayerReducer(state, {
         type: "LOAD_SCENE_SUCCESS",
         payload: {
-          scene: { id: "1", isStreamable: false, files: [{ height: 720 }] },
+          scene: { id: "1", files: [{ height: 720 }] },
           oCounter: 3,
         },
       });
@@ -1361,22 +1509,7 @@ describe("scenePlayerReducer", () => {
           playlist: makePlaylist(3),
           currentIndex: 1,
           compatibility: { hevc: false },
-          initialQuality: "1080p",
         },
-      });
-      expect(snapshot(state)).toEqual(frozen);
-    });
-
-    it("does not mutate state on SET_SHUFFLE_HISTORY", () => {
-      const state = {
-        ...initialState,
-        shuffleHistory: [0, 1],
-        playlist: makePlaylist(5),
-      };
-      const frozen = snapshot(state);
-      scenePlayerReducer(state, {
-        type: "SET_SHUFFLE_HISTORY",
-        payload: [0, 1, 2, 3],
       });
       expect(snapshot(state)).toEqual(frozen);
     });
@@ -1463,32 +1596,8 @@ describe("scenePlayerReducer", () => {
       expect(result.shuffleHistory).toEqual([0]);
     });
 
-    it("LOAD_SCENE_SUCCESS with isStreamable=false and height exactly at preset boundary", () => {
-      // Height exactly at 2160 should match 2160p
-      const scene = {
-        id: "1",
-        isStreamable: false,
-        files: [{ height: 2160 }],
-      };
-      const result = scenePlayerReducer(
-        { ...initialState, quality: "direct" },
-        { type: "LOAD_SCENE_SUCCESS", payload: { scene } },
-      );
-      expect(result.quality).toBe("2160p");
-    });
-
-    it("LOAD_SCENE_SUCCESS with isStreamable=false and height 0 falls back to default 1080", () => {
-      const scene = { id: "1", isStreamable: false, files: [{ height: 0 }] };
-      const result = scenePlayerReducer(
-        { ...initialState, quality: "direct" },
-        { type: "LOAD_SCENE_SUCCESS", payload: { scene } },
-      );
-      // height 0 is falsy, so `|| 1080` kicks in -> sourceHeight=1080 -> "1080p"
-      expect(result.quality).toBe("1080p");
-    });
-
     it("multiple rapid scene loads maintain correct state", () => {
-      let state: any = { ...initialState };
+      let state: ScenePlayerReducerState = { ...initialState };
 
       // Start loading scene 1
       state = scenePlayerReducer(state, { type: "LOAD_SCENE_START" });
@@ -1498,11 +1607,11 @@ describe("scenePlayerReducer", () => {
       state = scenePlayerReducer(state, {
         type: "LOAD_SCENE_SUCCESS",
         payload: {
-          scene: { id: "1", isStreamable: true },
+          scene: { id: "1" },
           oCounter: 2,
         },
       });
-      expect(state.scene!.id).toBe("1");
+      expect(must(state.scene).id).toBe("1");
       expect(state.oCounter).toBe(2);
       expect(state.sceneLoading).toBe(false);
 
@@ -1510,20 +1619,18 @@ describe("scenePlayerReducer", () => {
       state = scenePlayerReducer(state, { type: "LOAD_SCENE_START" });
       expect(state.sceneLoading).toBe(true);
       // Old scene is still there during loading
-      expect(state.scene!.id).toBe("1");
+      expect(must(state.scene).id).toBe("1");
 
       // Scene 2 succeeds
       state = scenePlayerReducer(state, {
         type: "LOAD_SCENE_SUCCESS",
         payload: {
-          scene: { id: "2", isStreamable: false, files: [{ height: 480 }] },
+          scene: { id: "2", files: [{ height: 480 }] },
           oCounter: 0,
         },
       });
-      expect(state.scene!.id).toBe("2");
+      expect(must(state.scene).id).toBe("2");
       expect(state.oCounter).toBe(0);
-      // Quality was reset to "direct" by default, so auto-selection kicks in
-      expect(state.quality).toBe("480p");
     });
 
     it("GOTO_SCENE_INDEX with payload.index of 0 when currentIndex is also 0", () => {
@@ -1531,7 +1638,7 @@ describe("scenePlayerReducer", () => {
         ...initialState,
         playlist: makePlaylist(3),
         currentIndex: 0,
-        video: { url: "something" },
+        oCounter: 2,
         ready: true,
       };
       const result = scenePlayerReducer(state, {
@@ -1539,10 +1646,99 @@ describe("scenePlayerReducer", () => {
         payload: { index: 0 },
       });
 
-      // Should still reset video state even though index didn't change
+      // Should still reset the step's state even though index didn't change
       expect(result.currentIndex).toBe(0);
-      expect(result.video).toBeNull();
+      expect(result.oCounter).toBe(0);
       expect(result.ready).toBe(false);
+    });
+  });
+  // -------------------------------------------------------------------------
+  // LEAVE_QUEUE and a step to the same scene
+  // -------------------------------------------------------------------------
+  describe("LEAVE_QUEUE", () => {
+    it("drops the queue and its controls, and takes the navigation's autoplay", () => {
+      const state: ScenePlayerReducerState = {
+        ...initialState,
+        playlist: makePlaylist(3),
+        currentIndex: 2,
+        autoplayNext: false,
+        shuffle: true,
+        repeat: "all",
+        shuffleHistory: [0, 1],
+      };
+
+      const result = scenePlayerReducer(state, {
+        type: "LEAVE_QUEUE",
+        payload: { shouldAutoplay: true },
+      });
+
+      expect(result.playlist).toBeNull();
+      expect(result.currentIndex).toBe(0);
+      expect(result.autoplayNext).toBe(true);
+      expect(result.shuffle).toBe(false);
+      expect(result.repeat).toBe("none");
+      expect(result.shuffleHistory).toEqual([]);
+      expect(result.shouldAutoplay).toBe(true);
+    });
+  });
+
+  describe("a step to an entry of the same scene", () => {
+    const sameScene = {
+      scenes: [
+        { sceneId: "7", instanceId: "a" },
+        { sceneId: "7", instanceId: "a" },
+        { sceneId: "7", instanceId: "b" },
+      ],
+    };
+
+    it("keeps the loaded scene ready and asks the player to restart it", () => {
+      const state: ScenePlayerReducerState = {
+        ...initialState,
+        playlist: sameScene,
+        ready: true,
+        oCounter: 3,
+      };
+
+      const result = scenePlayerReducer(state, {
+        type: "NEXT_SCENE",
+        payload: { autoplay: true },
+      });
+
+      expect(result.currentIndex).toBe(1);
+      expect(result.ready).toBe(true);
+      expect(result.oCounter).toBe(3);
+      expect(result.shouldAutoplay).toBe(true);
+      expect(result.restartCount).toBe(1);
+    });
+
+    it("a one-scene queue on repeat all restarts at its end", () => {
+      const state: ScenePlayerReducerState = {
+        ...initialState,
+        playlist: { scenes: [{ sceneId: "7", instanceId: "a" }] },
+        repeat: "all",
+        ready: true,
+      };
+
+      const result = scenePlayerReducer(state, { type: "NEXT_SCENE" });
+
+      expect(result.currentIndex).toBe(0);
+      expect(result.ready).toBe(true);
+      expect(result.restartCount).toBe(1);
+    });
+
+    it("the same id on another server is another scene: it waits for its load", () => {
+      const state: ScenePlayerReducerState = {
+        ...initialState,
+        playlist: sameScene,
+        currentIndex: 1,
+        ready: true,
+      };
+
+      const result = scenePlayerReducer(state, { type: "NEXT_SCENE" });
+
+      expect(result.currentIndex).toBe(2);
+      expect(result.ready).toBe(false);
+      expect(result.restartCount).toBe(0);
     });
   });
 });

@@ -1,14 +1,14 @@
 import { useState } from "react";
 import {
-  LucideChevronUp,
   LucideChevronDown,
-  LucideChevronsUp,
+  LucideChevronUp,
   LucideChevronsDown,
+  LucideChevronsUp,
 } from "lucide-react";
 import {
   getColumnsForEntity,
-  getDefaultVisibleColumns,
   getDefaultColumnOrder,
+  getDefaultVisibleColumns,
 } from "../../config/tableColumns";
 import Button from "../ui/Button";
 
@@ -20,6 +20,7 @@ const ENTITY_TYPES = [
   { id: "gallery", label: "Galleries" },
   { id: "image", label: "Images" },
   { id: "group", label: "Groups" },
+  { id: "clip", label: "Clips" },
 ];
 
 interface ColumnConfig {
@@ -27,45 +28,59 @@ interface ColumnConfig {
   order: string[];
 }
 
+const NO_COLUMNS: Record<string, ColumnConfig> = {};
+
 interface Props {
   tableColumnDefaults: Record<string, ColumnConfig> | null;
-  onSave: (defaults: Record<string, ColumnConfig>) => Promise<void>;
+  /**
+   * Saves the edited types' columns over the saved map; rejects when the
+   * save failed, after reporting it.
+   */
+  onSave: (edited: Record<string, ColumnConfig>) => Promise<void>;
 }
 
 /**
- * Settings component for configuring default table columns per entity type.
+ * The table columns of each list type: the same saved value a table's own
+ * column controls change.
  */
 const TableColumnSettings = ({ tableColumnDefaults, onSave }: Props) => {
   const [activeEntity, setActiveEntity] = useState("scene");
-  const [localDefaults, setLocalDefaults] = useState(tableColumnDefaults || {});
-  const [hasChanges, setHasChanges] = useState(false);
+  // Unsaved edits by type: every other type shows its saved columns as they
+  // are now, so a change a table saves shows here at once, and Save sends
+  // only the edited types
+  const [edits, setEdits] = useState<Record<string, ColumnConfig>>(NO_COLUMNS);
+  const saved = tableColumnDefaults ?? NO_COLUMNS;
+  const localDefaults = { ...saved, ...edits };
+  const hasChanges = Object.keys(edits).length > 0;
+
+  /** Change the active type's columns */
+  const editActive = (config: ColumnConfig) =>
+    setEdits((prev) => ({ ...prev, [activeEntity]: config }));
 
   // Get current entity's columns config
   const allColumns = getColumnsForEntity(activeEntity);
-  const currentConfig = localDefaults[activeEntity] || {
+  const currentConfig = localDefaults[activeEntity] ?? {
     visible: getDefaultVisibleColumns(activeEntity),
     order: getDefaultColumnOrder(activeEntity),
   };
 
   const handleToggleColumn = (columnId: string) => {
-    const column = allColumns.find((c: { id: string; mandatory?: boolean }) => c.id === columnId);
+    const column = allColumns.find(
+      (c: { id: string; mandatory?: boolean }) => c.id === columnId
+    );
     if (column?.mandatory) return;
 
     const newVisible = currentConfig.visible.includes(columnId)
       ? currentConfig.visible.filter((id) => id !== columnId)
       : [...currentConfig.visible, columnId];
 
-    setLocalDefaults((prev) => ({
-      ...prev,
-      [activeEntity]: {
-        ...currentConfig,
-        visible: newVisible,
-      },
-    }));
-    setHasChanges(true);
+    editActive({ ...currentConfig, visible: newVisible });
   };
 
-  const handleMoveColumn = (columnId: string, direction: "top" | "up" | "down" | "bottom") => {
+  const handleMoveColumn = (
+    columnId: string,
+    direction: "top" | "up" | "down" | "bottom"
+  ) => {
     const currentIndex = currentConfig.order.indexOf(columnId);
     if (currentIndex === -1) return;
 
@@ -93,30 +108,23 @@ const TableColumnSettings = ({ tableColumnDefaults, onSave }: Props) => {
     newOrder.splice(currentIndex, 1);
     newOrder.splice(newIndex, 0, columnId);
 
-    setLocalDefaults((prev) => ({
-      ...prev,
-      [activeEntity]: {
-        ...currentConfig,
-        order: newOrder,
-      },
-    }));
-    setHasChanges(true);
+    editActive({ ...currentConfig, order: newOrder });
   };
 
   const handleSave = async () => {
-    await onSave(localDefaults);
-    setHasChanges(false);
+    try {
+      await onSave(edits);
+      setEdits(NO_COLUMNS);
+    } catch {
+      // onSave reported the failure; the changes stay marked unsaved
+    }
   };
 
   const handleReset = () => {
-    setLocalDefaults((prev) => ({
-      ...prev,
-      [activeEntity]: {
-        visible: getDefaultVisibleColumns(activeEntity),
-        order: getDefaultColumnOrder(activeEntity),
-      },
-    }));
-    setHasChanges(true);
+    editActive({
+      visible: getDefaultVisibleColumns(activeEntity),
+      order: getDefaultColumnOrder(activeEntity),
+    });
   };
 
   interface TableColumn {
@@ -136,7 +144,10 @@ const TableColumnSettings = ({ tableColumnDefaults, onSave }: Props) => {
   const missingColumns = typedAllColumns.filter(
     (col) => !currentConfig.order.includes(col.id)
   );
-  const allOrderedColumns: TableColumn[] = [...orderedColumns, ...missingColumns];
+  const allOrderedColumns: TableColumn[] = [
+    ...orderedColumns,
+    ...missingColumns,
+  ];
 
   return (
     <div>
@@ -144,11 +155,11 @@ const TableColumnSettings = ({ tableColumnDefaults, onSave }: Props) => {
         className="text-lg font-semibold mb-4"
         style={{ color: "var(--text-primary)" }}
       >
-        Table View Default Columns
+        Table Columns
       </h3>
       <p className="text-sm mb-4" style={{ color: "var(--text-muted)" }}>
-        Configure which columns are shown by default when switching to table
-        view.
+        The columns each list shows in table view. Changing a table&apos;s
+        columns on its page saves them here too.
       </p>
 
       {/* Entity type tabs */}
@@ -271,7 +282,7 @@ const TableColumnSettings = ({ tableColumnDefaults, onSave }: Props) => {
         <Button
           variant="primary"
           size="sm"
-          onClick={handleSave}
+          onClick={() => void handleSave()}
           disabled={!hasChanges}
         >
           Save Changes

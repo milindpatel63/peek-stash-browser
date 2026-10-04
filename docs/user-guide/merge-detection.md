@@ -29,14 +29,17 @@ Without merge detection, when Peek syncs with Stash:
 
 Peek uses PHASH (perceptual hash) fingerprints to detect merges:
 
-1. When a scene is about to be soft-deleted during sync, Peek checks its PHASH
-2. If another scene has the same PHASH, it's likely a merge target
-3. Peek automatically transfers all user activity data to the target scene
-4. The source scene is then soft-deleted as normal
+1. During sync, Peek soft-deletes every scene that is gone from Stash
+2. For each of those scenes with a PHASH and some user activity, Peek looks for live scenes with the same PHASH **on the same Stash instance**. With several Stash servers, a scene is never merged into a scene of another server, even when both hold the same file
+3. When exactly one such scene exists, Peek transfers all user activity to it
+4. When several exist, Peek does not guess: the scene waits in the Merge Recovery tab for an admin to pick the target
+5. Scenes deleted in the same sync are never targets: they are already soft-deleted when Peek looks for matches, so two duplicates removed together cannot swap your activity back and forth
+
+If a sync stops between the soft-delete and the transfer, the next sync picks up the scenes soft-deleted in the last 24 hours that still have activity and no merge record.
 
 ### What Gets Transferred
 
-For each user with activity on the merged scene:
+For each user with activity on the merged scene (watch history, a rating or favorite, or the scene in one of their playlists):
 
 | Data Type | Transfer Logic |
 |-----------|---------------|
@@ -47,47 +50,48 @@ For each user with activity on the merged scene:
 | Last played | Most recent timestamp kept |
 | Rating | Target scene's rating kept (if set) |
 | Favorite | OR logic - if either was favorited, result is favorited |
+| Playlist entries | Point to the target scene (dropped where the playlist already has it) |
 
 !!! tip "Automatic and Seamless"
     You don't need to do anything - merge detection happens automatically during normal syncs.
 
 ## Admin Recovery Tool
 
-For scenes that were merged before this feature was implemented, or where automatic detection couldn't find a match, admins can manually recover orphaned data.
+For scenes that were merged before this feature was implemented, or where automatic detection found no match or several, admins can manually recover orphaned data. The tool also lists deleted scenes that are only in someone's playlist (no history, no rating), so those entries can be merged into the re-scanned file too.
 
 ### Accessing the Tool
 
 1. Go to **Settings** (gear icon)
-2. Click the **Server** tab
-3. Select **Merge Recovery**
+2. Switch to **Server Settings**
+3. Open the **Merge Recovery** tab
 
 ### Understanding the Interface
 
 The Merge Recovery tab shows:
 
-- **Total orphaned scenes** with user activity
+- **Total orphaned scenes** that someone's play history, rating or playlist still points at
 - For each orphan:
-    - Scene title and when it was deleted
+    - Scene title, the Stash instance it was on, and when it was deleted
     - PHASH value (if available)
-    - Activity summary: total plays, ratings, favorites
-    - Potential PHASH matches
+    - Activity summary: total plays, ratings, favorites, and how many playlist entries hold the scene
+    - Potential PHASH matches, all on the orphan's instance
 
 ### Recovering Orphaned Data
 
 **For a single scene:**
 
 1. Click on an orphaned scene to expand it
-2. Review the potential matches (sorted by likelihood)
+2. Review the potential matches. Every match has the same PHASH as the orphan. The one most recently updated in Stash comes first and is marked **Recommended**
 3. Either:
     - Click **Transfer** next to a match to transfer activity to that scene
-    - Enter a scene ID manually if you know the correct target
+    - Enter a scene ID manually if you know the correct target. The ID is a scene on the orphan's instance (the field says which); a scene that is deleted or unknown there is refused
 4. The activity data is transferred and an audit record is created
 
 **For all scenes at once:**
 
 1. Click **Auto-Reconcile All**
-2. Peek transfers activity for all orphans with exact PHASH matches
-3. Orphans without matches are skipped (handle manually later)
+2. Peek transfers activity for every orphan with exactly one PHASH match on its instance
+3. Orphans with no match or with several are skipped (handle them one by one)
 
 ### Discarding Orphaned Data
 
@@ -97,8 +101,10 @@ If an orphaned scene's data is no longer relevant (e.g., you deleted the scene i
 2. Click **Discard Activity**
 3. Confirm the action
 
+This also removes the scene from every playlist that holds it. Only that scene's activity on its own instance is deleted; a scene with the same ID on another Stash instance keeps its data.
+
 !!! warning "Permanent Action"
-    Discarding orphaned data permanently deletes the watch history and ratings. This cannot be undone.
+    Discarding orphaned data permanently deletes the watch history, the ratings and the playlist entries. This cannot be undone.
 
 ## Limitations
 
@@ -124,7 +130,7 @@ If a scene shows "No PHASH" in the recovery tool:
 
 Every merge reconciliation (automatic or manual) creates an audit record containing:
 
-- Source and target scene IDs
+- Source and target scene IDs, and the Stash instance of each
 - Which PHASH matched them (if automatic)
 - All transferred data values
 - When the reconciliation happened
@@ -151,8 +157,8 @@ After a sync where merges occurred:
 ### For Admins
 
 - Periodically check the Merge Recovery tab for orphaned scenes
-- Use Auto-Reconcile All to quickly process exact matches
-- Manually review and reconcile scenes without PHASH matches
+- Use Auto-Reconcile All to quickly process orphans with one match
+- Manually review and reconcile scenes with several matches or none
 
 ## Troubleshooting
 
@@ -161,7 +167,7 @@ After a sync where merges occurred:
 **Possible causes:**
 
 - PHASH wasn't available at sync time
-- Multiple potential matches exist (check admin tool)
+- Multiple potential matches exist on the scene's instance (check admin tool)
 - Scene was deleted, not merged
 
 **Solution:** Use the admin recovery tool to manually reconcile.

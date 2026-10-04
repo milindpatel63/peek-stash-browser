@@ -5,18 +5,40 @@
 /**
  * Format a date string for display
  * For date-only strings (YYYY-MM-DD), formats directly without timezone conversion
- * since these are publication dates, not moments in time.
+ * since these are publication dates, not moments in time. Anything else is a
+ * moment, shown in the viewer's zone. Nothing gives `empty`.
  */
-export function formatDate(dateString: string, options: Intl.DateTimeFormatOptions = {}) {
-  if (!dateString) return "Unknown";
+export function formatDate(
+  dateString: string | null | undefined,
+  {
+    empty = "Unknown",
+    ...options
+  }: Intl.DateTimeFormatOptions & {
+    empty?: string;
+  } = {}
+) {
+  if (!dateString) return empty;
 
   try {
     // For date-only strings (YYYY-MM-DD), format directly without Date object
     // to avoid timezone issues - publication dates don't have timezones
     if (/^\d{4}-\d{2}-\d{2}$/.test(dateString)) {
-      const [year, month, day] = dateString.split("-").map(Number);
-      const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
-                          "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+      // The pattern guarantees all three parts, so the defaults never apply
+      const [year = 0, month = 0, day = 0] = dateString.split("-").map(Number);
+      const monthNames = [
+        "Jan",
+        "Feb",
+        "Mar",
+        "Apr",
+        "May",
+        "Jun",
+        "Jul",
+        "Aug",
+        "Sep",
+        "Oct",
+        "Nov",
+        "Dec",
+      ];
       return `${monthNames[month - 1]} ${day}, ${year}`;
     }
 
@@ -34,6 +56,19 @@ export function formatDate(dateString: string, options: Intl.DateTimeFormatOptio
 }
 
 /**
+ * Format a moment as the viewer's locale date and time. Nothing gives `empty`.
+ * For a date with no time (a scene's date, a birthdate) use formatDate.
+ */
+export function formatDateTime(
+  value: string | Date | null | undefined,
+  { empty = "Unknown" }: { empty?: string } = {}
+) {
+  if (!value) return empty;
+  const date = new Date(value);
+  return isNaN(date.getTime()) ? "Invalid Date" : date.toLocaleString();
+}
+
+/**
  * Format a timestamp as relative time (e.g., "2 hours ago")
  * For publication dates (YYYY-MM-DD), calculates days difference without timezone issues.
  */
@@ -43,7 +78,8 @@ export function formatRelativeTime(dateString: string) {
   try {
     // For date-only strings, calculate days difference directly
     if (/^\d{4}-\d{2}-\d{2}$/.test(dateString)) {
-      const [year, month, day] = dateString.split("-").map(Number);
+      // The pattern guarantees all three parts, so the defaults never apply
+      const [year = 0, month = 0, day = 0] = dateString.split("-").map(Number);
       const now = new Date();
       // Create "today" as just the date components to compare apples to apples
       const todayYear = now.getFullYear();
@@ -51,8 +87,12 @@ export function formatRelativeTime(dateString: string) {
       const todayDay = now.getDate();
 
       // Calculate days since epoch for both dates (simple day count comparison)
-      const dateEpochDays = Math.floor(Date.UTC(year, month - 1, day) / 86400000);
-      const todayEpochDays = Math.floor(Date.UTC(todayYear, todayMonth - 1, todayDay) / 86400000);
+      const dateEpochDays = Math.floor(
+        Date.UTC(year, month - 1, day) / 86400000
+      );
+      const todayEpochDays = Math.floor(
+        Date.UTC(todayYear, todayMonth - 1, todayDay) / 86400000
+      );
       const diffDays = todayEpochDays - dateEpochDays;
 
       if (diffDays > 7 || diffDays < 0) {

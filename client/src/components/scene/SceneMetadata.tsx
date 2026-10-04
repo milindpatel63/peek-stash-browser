@@ -1,15 +1,22 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import type { NormalizedScene, TagRef } from "@peek/shared-types";
-import { CardCountIndicators, MediaImage } from "../ui/index";
 import { useConfig } from "../../contexts/ConfigContext";
 import { getEntityPath } from "../../utils/entityLinks";
+import { CardCountIndicators, MediaImage } from "../ui/index";
+
+/**
+ * A direct tag, or an inherited one: the server can send an inherited tag as
+ * just its id and name, so the other fields may be missing.
+ */
+type SceneTag = Pick<TagRef, "id" | "name"> &
+  Partial<Omit<TagRef, "id" | "name">>;
 
 /**
  * Combine direct tags with inherited tags from server
  */
-const getAllTags = (scene: NormalizedScene): TagRef[] => {
-  const tagMap = new Map();
+const getAllTags = (scene: NormalizedScene): SceneTag[] => {
+  const tagMap = new Map<string, SceneTag>();
   // Direct scene tags
   if (scene.tags) {
     scene.tags.forEach((tag) => tagMap.set(tag.id, tag));
@@ -22,19 +29,22 @@ const getAllTags = (scene: NormalizedScene): TagRef[] => {
 };
 
 interface TagThumbnailLinkProps {
-  tag: TagRef;
+  tag: SceneTag;
   hasMultipleInstances: boolean;
 }
 
 /**
  * Tag thumbnail link component that handles video tag images
  */
-const TagThumbnailLink = ({ tag, hasMultipleInstances }: TagThumbnailLinkProps) => {
+const TagThumbnailLink = ({
+  tag,
+  hasMultipleInstances,
+}: TagThumbnailLinkProps) => {
   const [showPlaceholder, setShowPlaceholder] = useState(false);
 
   return (
     <Link
-      to={getEntityPath('tag', tag, hasMultipleInstances)}
+      to={getEntityPath("tag", tag, hasMultipleInstances)}
       className="flex items-center gap-3 p-2 rounded hover:bg-white/10 transition-colors"
       onClick={(e) => e.stopPropagation()}
     >
@@ -50,7 +60,12 @@ const TagThumbnailLink = ({ tag, hasMultipleInstances }: TagThumbnailLinkProps) 
           className="w-16 h-16 rounded flex items-center justify-center flex-shrink-0"
           style={{ backgroundColor: "var(--bg-secondary)" }}
         >
-          <span className="text-2xl font-bold" style={{ color: "var(--text-muted)" }}>T</span>
+          <span
+            className="text-2xl font-bold"
+            style={{ color: "var(--text-muted)" }}
+          >
+            T
+          </span>
         </div>
       )}
       <span className="text-sm truncate flex-1">{tag.name}</span>
@@ -78,7 +93,7 @@ const SceneMetadata = ({ scene }: Props) => {
         {scene.performers.map((performer) => (
           <Link
             key={performer.id}
-            to={getEntityPath('performer', performer, hasMultipleInstances)}
+            to={getEntityPath("performer", performer, hasMultipleInstances)}
             className="flex items-center gap-3 p-2 rounded hover:bg-white/10 transition-colors"
             onClick={(e) => e.stopPropagation()}
           >
@@ -109,7 +124,11 @@ const SceneMetadata = ({ scene }: Props) => {
       <div className="font-semibold mb-3 text-base">Tags</div>
       <div className="grid grid-cols-1 gap-3 max-h-[60vh] overflow-y-auto pr-2">
         {allTags.map((tag) => (
-          <TagThumbnailLink key={tag.id} tag={tag} hasMultipleInstances={hasMultipleInstances} />
+          <TagThumbnailLink
+            key={tag.id}
+            tag={tag}
+            hasMultipleInstances={hasMultipleInstances}
+          />
         ))}
       </div>
     </div>
@@ -123,13 +142,15 @@ const SceneMetadata = ({ scene }: Props) => {
         {scene.groups.map((group) => (
           <Link
             key={group.id}
-            to={getEntityPath('group', group, hasMultipleInstances)}
+            to={getEntityPath("group", group, hasMultipleInstances)}
             className="flex items-center gap-3 p-2 rounded hover:bg-white/10 transition-colors"
             onClick={(e) => e.stopPropagation()}
           >
             {group.front_image_path || group.back_image_path ? (
               <img
-                src={(group.front_image_path || group.back_image_path) ?? undefined}
+                src={
+                  (group.front_image_path || group.back_image_path) ?? undefined
+                }
                 alt={group.name}
                 className="w-16 h-16 rounded object-cover flex-shrink-0"
               />

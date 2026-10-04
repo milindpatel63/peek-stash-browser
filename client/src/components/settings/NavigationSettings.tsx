@@ -1,9 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ChevronDown, ChevronUp, Eye, EyeOff } from "lucide-react";
-import {
-  NAV_DEFINITIONS,
-  getNavDefinition,
-} from "../../constants/navigation";
+import { NAV_DEFINITIONS, getNavDefinition } from "../../constants/navigation";
 import { ThemedIcon } from "../icons/index";
 import { Button } from "../ui/index";
 
@@ -15,7 +12,8 @@ interface NavPreference {
 
 interface Props {
   navPreferences: NavPreference[] | null;
-  onSave: (preferences: NavPreference[]) => void;
+  /** Rejects when the save failed, after reporting it. */
+  onSave: (preferences: NavPreference[]) => Promise<void>;
 }
 
 /**
@@ -26,9 +24,14 @@ const NavigationSettings = ({ navPreferences, onSave }: Props) => {
   const [preferences, setPreferences] = useState<NavPreference[]>([]);
   const [hasChanges, setHasChanges] = useState(false);
 
+  // Sync from the prop unless the user has edits: a save that fails puts
+  // the stored order back in the prop, and the edits stay marked unsaved
+  const hasChangesRef = useRef(hasChanges);
+  hasChangesRef.current = hasChanges;
   useEffect(() => {
+    if (hasChangesRef.current) return;
     // Sort by order on initial load
-    const sorted = [...(navPreferences || [])].sort(
+    const sorted = [...(navPreferences ?? [])].sort(
       (a, b) => a.order - b.order
     );
     setPreferences(sorted);
@@ -39,10 +42,11 @@ const NavigationSettings = ({ navPreferences, onSave }: Props) => {
     if (index === 0) return;
 
     const newPreferences = [...preferences];
-    [newPreferences[index - 1], newPreferences[index]] = [
-      newPreferences[index],
-      newPreferences[index - 1],
-    ];
+    const current = newPreferences[index];
+    const previous = newPreferences[index - 1];
+    if (!current || !previous) return;
+    newPreferences[index - 1] = current;
+    newPreferences[index] = previous;
 
     // Re-normalize order values
     const reordered = newPreferences.map((pref, idx) => ({
@@ -58,10 +62,11 @@ const NavigationSettings = ({ navPreferences, onSave }: Props) => {
     if (index === preferences.length - 1) return;
 
     const newPreferences = [...preferences];
-    [newPreferences[index], newPreferences[index + 1]] = [
-      newPreferences[index + 1],
-      newPreferences[index],
-    ];
+    const current = newPreferences[index];
+    const next = newPreferences[index + 1];
+    if (!current || !next) return;
+    newPreferences[index] = next;
+    newPreferences[index + 1] = current;
 
     // Re-normalize order values
     const reordered = newPreferences.map((pref, idx) => ({
@@ -81,13 +86,19 @@ const NavigationSettings = ({ navPreferences, onSave }: Props) => {
     setHasChanges(true);
   };
 
-  const handleSave = () => {
-    onSave(preferences);
-    setHasChanges(false);
+  const handleSave = async () => {
+    try {
+      await onSave(preferences);
+      setHasChanges(false);
+    } catch {
+      // onSave reported the failure; the changes stay marked unsaved
+    }
   };
 
   const handleReset = () => {
-    const sorted = [...(navPreferences || [])].sort((a, b) => a.order - b.order);
+    const sorted = [...(navPreferences ?? [])].sort(
+      (a, b) => a.order - b.order
+    );
     setPreferences(sorted);
     setHasChanges(false);
   };
@@ -202,7 +213,11 @@ const NavigationSettings = ({ navPreferences, onSave }: Props) => {
         >
           Cancel
         </Button>
-        <Button disabled={!hasChanges} onClick={handleSave} variant="primary">
+        <Button
+          disabled={!hasChanges}
+          onClick={() => void handleSave()}
+          variant="primary"
+        >
           Save Changes
         </Button>
       </div>

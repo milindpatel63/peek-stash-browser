@@ -1,19 +1,29 @@
-import { useQuery } from "@tanstack/react-query";
+import { keepPreviousData, skipToken, useQuery } from "@tanstack/react-query";
+import { fetchListPage, libraryListTotal } from "../../utils/listQuery";
+import { type LibrarySearchParams, libraryApi } from "../library";
 import { queryKeys } from "../queryKeys";
-import { libraryApi, type LibrarySearchParams } from "../library";
 
-export function usePerformerList(params: LibrarySearchParams | null, instanceId?: string) {
+export function usePerformerList(
+  params: LibrarySearchParams<"performer"> | null,
+  instanceId?: string
+) {
   return useQuery({
-    queryKey: queryKeys.performers.list(instanceId, (params ?? {}) as Record<string, unknown>),
-    queryFn: ({ signal }) => libraryApi.findPerformers(params!, signal),
-    enabled: params !== null,
-  });
-}
-
-export function usePerformerDetail(id: string | undefined, instanceId?: string) {
-  return useQuery({
-    queryKey: queryKeys.performers.detail(instanceId, id!),
-    queryFn: () => libraryApi.findPerformerById(id!, instanceId ?? null),
-    enabled: !!id,
+    queryKey: queryKeys.performers.list(
+      instanceId,
+      (params ?? {}) as Record<string, unknown>
+    ),
+    queryFn:
+      params === null
+        ? skipToken
+        : (context) =>
+            fetchListPage(
+              context,
+              params,
+              libraryListTotal("findPerformers"),
+              (request) => libraryApi.findPerformers(request, context.signal)
+            ),
+    // Keep the current results on screen while the next page loads; a page
+    // change reuses the list's count (`fetchListPage`)
+    placeholderData: keepPreviousData,
   });
 }

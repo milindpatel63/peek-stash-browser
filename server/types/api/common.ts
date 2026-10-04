@@ -2,8 +2,10 @@
 export type {
   PaginationFilter,
   MinimalCountFilter,
+  ApiErrorIssue,
   ApiErrorResponse,
   AmbiguousLookupResponse,
   ApiSuccessResponse,
   CacheNotReadyResponse,
+  LibraryReadyResponse,
 } from "@peek/shared-types/api/common.js";

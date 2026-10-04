@@ -2,6 +2,7 @@
  * Reusable search input component with debouncing
  */
 import { useEffect, useRef, useState } from "react";
+import { Q_MAX_LENGTH } from "@peek/shared-types";
 import { useDebouncedValue } from "../../hooks/useDebounce";
 import Button from "./Button";
 
@@ -26,51 +27,53 @@ const SearchInput = ({
 }: Props) => {
   const [query, setQuery] = useState(value || "");
   const debouncedQuery = useDebouncedValue(query, debounceMs);
-  // Track if user explicitly cleared - ignore stale callbacks until debounce catches up
-  const userClearedRef = useRef(false);
-  // Track last value we sent to onSearch to avoid duplicate calls
+  // Last value we sent to onSearch, to avoid duplicate calls
   const lastSearchedRef = useRef(value || "");
+  // Values sent whose echo through `value` has not come back yet, oldest
+  // first. An echo of our own write is not a change from outside: it must
+  // not overwrite what has been typed since.
+  const pendingEchoesRef = useRef<string[]>([]);
   // Store onSearch in ref to avoid effect re-running when callback changes
   const onSearchRef = useRef(onSearch);
   onSearchRef.current = onSearch;
 
+  const send = (text: string) => {
+    lastSearchedRef.current = text;
+    // The parent may never echo (clearOnSearch): keep the list short
+    pendingEchoesRef.current = [...pendingEchoesRef.current, text].slice(-8);
+    onSearchRef.current?.(text);
+  };
+
   // Sync internal state when external value changes
   useEffect(() => {
-    // If user cleared and incoming value is not empty, it's a stale update - ignore it
-    if (userClearedRef.current && value !== "") {
+    if (value === undefined) return;
+    const echoed = pendingEchoesRef.current.indexOf(value);
+    if (echoed >= 0) {
+      // Our own write coming back (and any older one it overtook)
+      pendingEchoesRef.current = pendingEchoesRef.current.slice(echoed + 1);
       return;
     }
-    // Reset the flag when value syncs to empty (debounce caught up)
-    if (value === "") {
-      userClearedRef.current = false;
-    }
-    if (value !== undefined && value !== query) {
-      setQuery(value);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // A value from outside (Back across a search, a cleared chip) is already
+    // searched: the debounce must not send it back
+    pendingEchoesRef.current = [];
+    lastSearchedRef.current = value;
+    setQuery(value);
   }, [value]); // Only sync when external value changes, not when query changes (would cause loop)
 
   useEffect(() => {
-    // Skip if user cleared and debounce hasn't caught up yet
-    if (userClearedRef.current && debouncedQuery !== "") {
-      return;
-    }
     // Skip if we already sent this value (prevents duplicate calls when onSearch changes)
     if (debouncedQuery === lastSearchedRef.current) {
       return;
     }
-    lastSearchedRef.current = debouncedQuery;
-    onSearchRef.current?.(debouncedQuery);
+    send(debouncedQuery);
     if (clearOnSearch && debouncedQuery) {
       setQuery("");
     }
   }, [debouncedQuery, clearOnSearch]);
 
   const handleClear = () => {
-    userClearedRef.current = true;
-    lastSearchedRef.current = "";
     setQuery("");
-    onSearchRef.current?.("");
+    send("");
   };
 
   return (
@@ -97,6 +100,7 @@ const SearchInput = ({
         value={query}
         onChange={(e) => setQuery(e.target.value)}
         placeholder={placeholder}
+        maxLength={Q_MAX_LENGTH}
         autoFocus={autoFocus}
         className={`
           block w-full pl-10 pr-10 py-1 border rounded-md

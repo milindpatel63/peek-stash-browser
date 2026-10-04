@@ -1,12 +1,17 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
+import type { NormalizedScene } from "@peek/shared-types";
+import { fireEvent, render, screen } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import BulkActionBar from "../../../src/components/ui/BulkActionBar";
 
+/** BulkActionBar reads only a scene's id and title; the rest is left out */
+const partialScene = (fields: Pick<NormalizedScene, "id" | "title">) =>
+  fields as NormalizedScene;
+
 const mockScenes = [
-  { id: "scene-1", title: "Scene 1" },
-  { id: "scene-2", title: "Scene 2" },
-] as any[];
+  partialScene({ id: "scene-1", title: "Scene 1" }),
+  partialScene({ id: "scene-2", title: "Scene 2" }),
+];
 
 describe("BulkActionBar", () => {
   const defaultProps = {
@@ -35,7 +40,7 @@ describe("BulkActionBar", () => {
       <MemoryRouter>
         <BulkActionBar
           {...defaultProps}
-          selectedScenes={[{ id: "scene-1", title: "Scene 1" }] as any}
+          selectedScenes={[partialScene({ id: "scene-1", title: "Scene 1" })]}
         />
       </MemoryRouter>
     );
@@ -78,10 +83,7 @@ describe("BulkActionBar", () => {
   it("does not render actions when no scenes selected", () => {
     render(
       <MemoryRouter>
-        <BulkActionBar
-          {...defaultProps}
-          selectedScenes={[]}
-        />
+        <BulkActionBar {...defaultProps} selectedScenes={[]} />
       </MemoryRouter>
     );
 
@@ -106,5 +108,42 @@ describe("BulkActionBar", () => {
 
     expect(screen.getByTestId("action-1")).toBeInTheDocument();
     expect(screen.getByTestId("action-2")).toBeInTheDocument();
+  });
+
+  describe("spacer", () => {
+    // The bar is fixed to the screen bottom: the spacer holds its height in
+    // the page so the last row (the pagination) can scroll above it
+    const withBarHeight = (height: number) =>
+      vi
+        .spyOn(HTMLElement.prototype, "offsetHeight", "get")
+        .mockReturnValue(height);
+
+    it("the bulk bar's spacer keeps the last pagination row above it", () => {
+      const heightSpy = withBarHeight(72);
+      render(
+        <MemoryRouter>
+          <BulkActionBar {...defaultProps} />
+        </MemoryRouter>
+      );
+
+      const spacer = screen.getByTestId("bulk-action-bar-spacer");
+
+      expect(spacer.style.height).toBe("72px");
+      expect(spacer).toHaveAttribute("aria-hidden", "true");
+      heightSpy.mockRestore();
+    });
+
+    it("the spacer leaves with the bar", () => {
+      const heightSpy = withBarHeight(72);
+      const { unmount } = render(
+        <MemoryRouter>
+          <BulkActionBar {...defaultProps} />
+        </MemoryRouter>
+      );
+      unmount();
+
+      expect(screen.queryByTestId("bulk-action-bar-spacer")).toBeNull();
+      heightSpy.mockRestore();
+    });
   });
 });

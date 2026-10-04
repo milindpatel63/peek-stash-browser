@@ -4,13 +4,21 @@ import { fileURLToPath } from "url";
 import { setupAPI, startServer } from "./initializers/api.js";
 import { initializeCache } from "./initializers/cache.js";
 import { initializeDatabase } from "./initializers/database.js";
+import { resumeDownloadsAtStartup } from "./initializers/downloads.js";
+import {
+  closeResources,
+  installProcessHandlers,
+  isShuttingDown,
+  registerHttpServer,
+} from "./initializers/processHandlers.js";
+import { hashLegacyRecoveryKeys } from "./initializers/recoveryKeys.js";
 import { initializeStashInstances } from "./initializers/stashInstance.js";
 import { validateStartup } from "./initializers/validate.js";
 import { scheduleDownloadCleanup } from "./jobs/downloadCleanup.js";
-import prisma, { configureSQLite } from "./prisma/singleton.js";
+import { configureSQLite } from "./prisma/singleton.js";
 import { dataMigrationService } from "./services/DataMigrationService.js";
 import { stashInstanceManager } from "./services/StashInstanceManager.js";
-import { stashSyncService } from "./services/StashSyncService.js";
+import { getJwtSecret } from "./utils/jwtSecret.js";
 import { logger } from "./utils/logger.js";
 
 // ES module equivalent of __dirname
@@ -27,17 +35,29 @@ const envPath =
 
 dotenv.config({ path: envPath });
 
+// Shut down cleanly on SIGTERM and SIGINT; log (and, for an uncaught
+// exception, exit on) errors nothing else caught
+installProcessHandlers();
+
 const main = async () => {
   logger.info("Starting Peek server");
 
   validateStartup();
 
+  // Resolve the session secret now: a missing or unwritable one stops the
+  // server here rather than on the first login
+  getJwtSecret();
+
   // Run database migrations and seeding
   await initializeDatabase();
+  // A stop signal during the migrations: the shutdown takes it from here
+  if (isShuttingDown()) return;
 
-  // Configure SQLite for production performance (WAL mode, busy_timeout, etc.)
+  // WAL mode and the performance PRAGMAs; logs what SQLite reports
   await configureSQLite();
-  logger.info("SQLite PRAGMAs configured (WAL mode, busy_timeout, etc.)");
+
+  // Recovery keys from before 3.3.7 were stored in plaintext
+  await hashLegacyRecoveryKeys();
 
   // Initialize Stash instances (migrate from env vars if needed)
   const stashConfig = await initializeStashInstances();
@@ -47,7 +67,11 @@ const main = async () => {
 
   // Start API server (needed for setup wizard if no Stash configured)
   const app = setupAPI();
-  startServer(app);
+  // PEEK_SERVER_PORT is for development and tests (E2E runs beside the dev
+  // stack); the Docker image's nginx forwards to 8000
+  registerHttpServer(
+    startServer(app, Number(process.env.PEEK_SERVER_PORT) || 8000)
+  );
 
   // Schedule background jobs
   scheduleDownloadCleanup();
@@ -61,27 +85,24 @@ const main = async () => {
   } else {
     // Initialize cache FIRST (needed for data migrations that access scene data)
     await initializeCache();
+    // A stop signal during the startup sync: no data migration starts
+    if (isShuttingDown()) return;
+
+    // Playlist zips a restart interrupted are built again, once the
+    // instances' scenes are loaded (with none configured they wait for the
+    // next start that has one), then stray zip files are removed; a failure
+    // is logged and startup goes on
+    await resumeDownloadsAtStartup();
 
     // Run one-time data migrations AFTER cache is ready (e.g., backfill stats for v1.4.x)
     await dataMigrationService.runPendingMigrations();
   }
 };
 
-main().catch(async (e) => {
-  logger.error("Fatal error", {
-    error: e instanceof Error ? e.message : String(e),
-  });
-  await prisma.$disconnect();
+main().catch(async (e: unknown) => {
+  // The message as it is, not escaped into JSON: a refusal such as
+  // LegacyDatabaseError's tells the admin what to do
+  logger.error(`Fatal error: ${e instanceof Error ? e.message : String(e)}`);
+  await closeResources();
   process.exit(1);
-});
-
-// Cleanup on exit
-process.on("SIGTERM", () => {
-  stashSyncService.abort();
-  void prisma.$disconnect();
-});
-
-process.on("SIGINT", () => {
-  stashSyncService.abort();
-  void prisma.$disconnect();
 });

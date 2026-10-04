@@ -1,28 +1,18 @@
 // client/src/components/timeline/TimelineView.tsx
-import { memo, useEffect, useMemo, useState, useCallback, useRef, type ReactNode } from "react";
-import TimelineControls from "./TimelineControls";
-import TimelineStrip from "./TimelineStrip";
-import TimelineMobileSheet from "./TimelineMobileSheet";
-import { useTimelineState, parsePeriodToDateRange } from "./useTimelineState";
-import { useMediaQuery } from "../../hooks/useMediaQuery";
+import { type ReactNode, memo, useCallback, useMemo, useState } from "react";
 import { getGridClasses } from "../../constants/grids";
+import { useMediaQuery } from "../../hooks/useMediaQuery";
 import LoadingSpinner from "../ui/LoadingSpinner";
-
-interface DateFilterRange {
-  start: string;
-  end: string;
-}
+import TimelineControls from "./TimelineControls";
+import TimelineMobileSheet from "./TimelineMobileSheet";
+import TimelineStrip from "./TimelineStrip";
+import { useTimelineState } from "./useTimelineState";
 
 interface RenderItemOptions {
   onItemClick?: (item: Record<string, unknown>) => void;
-  dateFilter: { date: { value: string; value2: string; modifier: string } } | null;
-}
-
-interface TimelineFilters {
-  performerId?: string;
-  tagId?: string;
-  studioId?: string;
-  groupId?: string;
+  dateFilter: {
+    date: { value: string; value2: string; modifier: string };
+  } | null;
 }
 
 interface VisibleRange {
@@ -35,16 +25,31 @@ interface VisibleRange {
 interface Props {
   entityType: string;
   items?: Record<string, unknown>[];
-  renderItem: (item: Record<string, unknown>, index: number, options: RenderItemOptions) => ReactNode;
+  renderItem: (
+    item: Record<string, unknown>,
+    index: number,
+    options: RenderItemOptions
+  ) => ReactNode;
   onItemClick?: (item: Record<string, unknown>) => void;
-  onDateFilterChange?: (range: DateFilterRange | null) => void;
-  onPeriodChange?: (period: string | null) => void;
-  initialPeriod?: string | null;
+  /**
+   * The selected period, held by the owner (the list's URL); the view shows
+   * it and reports every change of the selection through `onPeriodChange`
+   */
+  period: string | null;
+  /**
+   * A choice, a deselection, a zoom change and the latest period, chosen
+   * once the timeline loads when none was selected
+   */
+  onPeriodChange: (period: string | null) => void;
   loading?: boolean;
   emptyMessage?: string;
   gridDensity?: string;
   className?: string;
-  filters?: TimelineFilters | null;
+  /**
+   * The list's own request without its page, sort and period (`null` before
+   * it has one): the bars count what the list shows
+   */
+  request?: Record<string, unknown> | null;
 }
 
 function TimelineView({
@@ -52,15 +57,17 @@ function TimelineView({
   items = [],
   renderItem,
   onItemClick,
-  onDateFilterChange,
   onPeriodChange,
-  initialPeriod = null,
+  period,
   loading = false,
   emptyMessage = "No items found",
   gridDensity = "medium",
   className = "",
-  filters = null,
+  request,
 }: Props) {
+  // Mounted without a period, the latest one is chosen once the timeline
+  // loads; read once, so the chosen period does not refetch the timeline
+  const [autoSelectRecent] = useState(() => !period);
   const {
     zoomLevel,
     setZoomLevel,
@@ -70,16 +77,16 @@ function TimelineView({
     maxCount,
     isLoading: distributionLoading,
     ZOOM_LEVELS,
-  } = useTimelineState({ entityType, autoSelectRecent: !initialPeriod, initialPeriod, filters });
+  } = useTimelineState({
+    entityType,
+    autoSelectRecent,
+    request,
+    period,
+    onPeriodChange,
+  });
 
   // Detect mobile devices for responsive layout
   const isMobile = useMediaQuery("(max-width: 768px)");
-
-  // Track last synced period to avoid unnecessary URL updates
-  const lastSyncedPeriodRef = useRef(initialPeriod);
-  // Use refs for callbacks to avoid re-triggering effects when they change identity
-  const onPeriodChangeRef = useRef(onPeriodChange);
-  onPeriodChangeRef.current = onPeriodChange;
 
   // Build date filter from selected period
   const dateFilter = useMemo(() => {
@@ -91,44 +98,6 @@ function TimelineView({
         modifier: "BETWEEN",
       },
     };
-  }, [selectedPeriod]);
-
-  // Track whether auto-selection has been notified to parent
-  const hasNotifiedAutoSelectRef = useRef(false);
-
-  // Notify parent of auto-selected period (initial load only)
-  useEffect(() => {
-    if (!hasNotifiedAutoSelectRef.current && selectedPeriod && onDateFilterChange) {
-      hasNotifiedAutoSelectRef.current = true;
-      onDateFilterChange({ start: selectedPeriod.start, end: selectedPeriod.end });
-    }
-  }, [selectedPeriod, onDateFilterChange]);
-
-  // Wrap selectPeriod to notify parent directly on user interaction
-  const handleSelectPeriod = useCallback((period: string) => {
-    selectPeriod(period);
-    hasNotifiedAutoSelectRef.current = true; // Mark as handled
-    // selectPeriod toggles: clicking same period deselects
-    const willDeselect = selectedPeriod?.period === period;
-    if (onDateFilterChange) {
-      if (willDeselect) {
-        onDateFilterChange(null);
-      } else {
-        const range = parsePeriodToDateRange(period, zoomLevel);
-        onDateFilterChange(range ? { start: range.start, end: range.end } : null);
-      }
-    }
-  }, [selectPeriod, selectedPeriod, zoomLevel, onDateFilterChange]);
-
-  // Sync period to URL separately - only when period actually changes from user action
-  // Uses ref for callback to avoid infinite loop from callback identity changes
-  useEffect(() => {
-    const currentPeriod = selectedPeriod?.period || null;
-    // Only sync to URL if the period has changed from what we last synced
-    if (currentPeriod !== lastSyncedPeriodRef.current) {
-      lastSyncedPeriodRef.current = currentPeriod;
-      onPeriodChangeRef.current?.(currentPeriod);
-    }
   }, [selectedPeriod]);
 
   const gridClasses = getGridClasses("standard", gridDensity);
@@ -173,7 +142,12 @@ function TimelineView({
             <>
               <span style={{ color: "var(--text-tertiary)" }}>|</span>
               <span>
-                <span className="font-medium" style={{ color: "var(--accent-primary)" }}>Selected:</span>{" "}
+                <span
+                  className="font-medium"
+                  style={{ color: "var(--accent-primary)" }}
+                >
+                  Selected:
+                </span>{" "}
                 {selectedPeriod.label}
               </span>
             </>
@@ -194,8 +168,10 @@ function TimelineView({
         distribution={distribution}
         maxCount={maxCount}
         zoomLevel={zoomLevel}
-        selectedPeriod={selectedPeriod as { period: string; count: number } | null}
-        onSelectPeriod={handleSelectPeriod}
+        selectedPeriod={
+          selectedPeriod as { period: string; count: number } | null
+        }
+        onSelectPeriod={selectPeriod}
         onVisibleRangeChange={handleVisibleRangeChange}
       />
     </>

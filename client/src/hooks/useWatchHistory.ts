@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { GetWatchedScenesResponse } from "@peek/shared-types";
+import { useQuery } from "@tanstack/react-query";
 import { apiGet } from "../api";
+import { useLibraryReady } from "../api/hooks/useLibraryReady";
+import { type WatchedScenesKeyParams, queryKeys } from "../api/queryKeys";
+import { makeCompositeKey } from "../utils/compositeKey";
 import { useAuth } from "./useAuth";
 
 /**
@@ -8,10 +13,9 @@ import { useAuth } from "./useAuth";
  * Note: Playback tracking (play duration, play count) is now handled by the
  * track-activity Video.js plugin in useVideoPlayer.js. This hook only provides:
  * - Watch history state (for resume time display)
- * - Quality tracking
  *
  * @param {string} sceneId - Stash scene ID
- * @param {Object} playerRef - React ref to Video.js player instance (unused, kept for API compat)
+ * @param {string} instanceId - The scene's Stash instance (the server needs it: ids repeat across servers)
  * @returns {Object} Watch history state and methods
  */
 interface WatchHistoryData {
@@ -19,47 +23,70 @@ interface WatchHistoryData {
   [key: string]: unknown;
 }
 
-export function useWatchHistory(sceneId: string, _playerRef = { current: null }) {
+export function useWatchHistory(sceneId: string, instanceId: string) {
   const { isAuthenticated } = useAuth();
-  const [watchHistory, setWatchHistory] = useState<WatchHistoryData | null>(null);
+  const [watchHistory, setWatchHistory] = useState<WatchHistoryData | null>(
+    null
+  );
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // Track current quality for logging/debugging
-  const currentQualityRef = useRef("auto");
+  // The scene the history is for, and the request in flight: a new scene
+  // aborts the last request, and an answer for another scene is dropped
+  const sceneKey = makeCompositeKey(sceneId, instanceId);
+  const sceneKeyRef = useRef(sceneKey);
+  sceneKeyRef.current = sceneKey;
+  const controllerRef = useRef<AbortController | null>(null);
+
+  // A new scene starts with no history: the last scene's resume point must
+  // never show (or seek) for it
+  const [historyKey, setHistoryKey] = useState(sceneKey);
+  if (historyKey !== sceneKey) {
+    setHistoryKey(sceneKey);
+    setWatchHistory(null);
+    setLoading(true);
+    setError(null);
+  }
 
   /**
    * Fetch watch history for this scene
    */
   const fetchWatchHistory = useCallback(async () => {
-    if (!sceneId || !isAuthenticated) {
+    controllerRef.current?.abort();
+    controllerRef.current = null;
+    if (!sceneId || !instanceId || !isAuthenticated) {
       setLoading(false);
       return;
     }
 
+    const controller = new AbortController();
+    controllerRef.current = controller;
+    const requestKey = makeCompositeKey(sceneId, instanceId);
+    const isCurrent = () =>
+      !controller.signal.aborted && sceneKeyRef.current === requestKey;
     try {
       setLoading(true);
       setError(null);
-      const data = await apiGet<WatchHistoryData>(`/watch-history/${sceneId}`);
-      setWatchHistory(data);
+      const data = await apiGet<WatchHistoryData>(
+        `/watch-history/${sceneId}?instanceId=${encodeURIComponent(instanceId)}`,
+        controller.signal
+      );
+      if (isCurrent()) setWatchHistory(data);
     } catch (err) {
+      if (!isCurrent()) return;
       console.error("Error fetching watch history:", err);
-      setError(err instanceof Error ? err.message : "Failed to fetch watch history");
+      setError(
+        err instanceof Error ? err.message : "Failed to fetch watch history"
+      );
     } finally {
-      setLoading(false);
+      if (isCurrent()) setLoading(false);
     }
-  }, [sceneId, isAuthenticated]);
+  }, [sceneId, instanceId, isAuthenticated]);
 
-  /**
-   * Update current quality setting
-   */
-  const updateQuality = useCallback((quality: string) => {
-    currentQualityRef.current = quality;
-  }, []);
-
-  // Fetch watch history on mount
+  // Fetch watch history on mount and for each scene; leaving aborts it
   useEffect(() => {
-    fetchWatchHistory();
+    void fetchWatchHistory();
+    return () => controllerRef.current?.abort();
   }, [fetchWatchHistory]);
 
   return {
@@ -69,58 +96,37 @@ export function useWatchHistory(sceneId: string, _playerRef = { current: null })
     error,
 
     // Methods
-    updateQuality,
     refresh: fetchWatchHistory,
   };
 }
 
 /**
- * Hook for fetching all watch history (for Continue Watching carousel)
+ * One page of the viewer's watched scenes (`GET /watch-history/scenes`), in
+ * the view and order asked for: Continue Watching and the Watch History page.
+ * The scenes carry the viewer's own `resume_time`, `play_count`,
+ * `play_duration`, `last_played_at`, `o_counter` and `last_o_at`.
  *
- * @param {Object} options - Fetch options
- * @param {boolean} options.inProgress - Only fetch scenes in progress
- * @param {number} options.limit - Number of items to fetch
- * @returns {Object} Watch history list and loading state
+ * The query sits under the `watchHistory` root, which the library predicate
+ * matches: a hide, a restore or an instance change refetches it, and it
+ * waits while the library is initializing.
  */
-export function useAllWatchHistory({ inProgress = false, limit = 20 } = {}) {
-  const { isAuthenticated } = useAuth();
-  const [data, setData] = useState<WatchHistoryData[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  const fetchAll = useCallback(async () => {
-    if (!isAuthenticated) {
-      setLoading(false);
-      return;
-    }
-
-    try {
-      setLoading(true);
-      setError(null);
-
-      const queryParams = new URLSearchParams({
-        limit: limit.toString(),
-        inProgress: inProgress.toString(),
+export function useWatchedScenes(params: WatchedScenesKeyParams) {
+  const { ready } = useLibraryReady();
+  return useQuery({
+    queryKey: queryKeys.watchHistory.scenes(params),
+    queryFn: ({ signal }) => {
+      const query = new URLSearchParams({
+        view: params.view,
+        sort: params.sort,
+        page: String(params.page),
+        per_page: String(params.perPage),
       });
-
-      const response = await apiGet<{ watchHistory?: WatchHistoryData[] }>(`/watch-history?${queryParams}`);
-      setData(response.watchHistory || []);
-    } catch (err) {
-      console.error("Error fetching all watch history:", err);
-      setError(err instanceof Error ? err.message : "Failed to fetch watch history");
-    } finally {
-      setLoading(false);
-    }
-  }, [isAuthenticated, inProgress, limit]);
-
-  useEffect(() => {
-    fetchAll();
-  }, [fetchAll]);
-
-  return {
-    data,
-    loading,
-    error,
-    refresh: fetchAll,
-  };
+      if (params.count === false) query.set("count", "false");
+      return apiGet<GetWatchedScenesResponse>(
+        `/watch-history/scenes?${query}`,
+        signal
+      );
+    },
+    enabled: ready,
+  });
 }

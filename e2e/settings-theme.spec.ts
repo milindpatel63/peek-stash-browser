@@ -1,10 +1,18 @@
-import { test, expect } from "@playwright/test";
+import { type Page, expect, test } from "@playwright/test";
+import {
+  type TestUser,
+  completeSetup,
+  createUser,
+  deleteUser,
+  signIn,
+} from "./support/users";
 
 /**
  * E2E tests for Settings page and theme switching.
  *
  * Covers settings navigation, tab switching, section selection,
- * and theme application.
+ * and theme application. Choosing a theme saves it to the account, so those
+ * tests run as a throwaway user, never the run admin every test shares.
  */
 
 test.describe("Settings Page", () => {
@@ -83,8 +91,11 @@ test.describe("Settings Page", () => {
       page.getByRole("radio", { name: "User Preferences" })
     ).toBeVisible({ timeout: 10_000 });
 
-    // The playback tab should be active
-    await expect(page).toHaveURL(/tab=playback/);
+    // The Playback tab is the selected one
+    await expect(page.getByRole("tab", { name: "Playback" })).toHaveAttribute(
+      "aria-selected",
+      "true"
+    );
   });
 });
 
@@ -112,91 +123,124 @@ test.describe("Theme Switching", () => {
     await expect(page.getByRole("button", { name: "The Hub" })).toBeVisible();
   });
 
-  test("switching theme updates CSS variables", async ({ page }) => {
+  test("UI Examples expands and collapses", async ({ page }) => {
     await page.goto("/settings?section=user&tab=theme");
     await expect(page.getByText("Built-in Themes")).toBeVisible({
       timeout: 10_000,
     });
-
-    // Get the initial accent color
-    const initialAccent = await page.evaluate(() =>
-      getComputedStyle(document.documentElement)
-        .getPropertyValue("--accent-primary")
-        .trim()
+    const uiExamples = page.getByRole("button", { name: "UI Examples" });
+    const content = page.getByText(
+      "UI examples from original Settings page will be added here"
     );
+    await expect(content).toHaveCount(0);
 
-    // Switch to a different theme
-    // Try switching to "Light" which should have a different accent color
-    await page.getByRole("button", { name: "Light" }).click();
+    await uiExamples.click();
+    await expect(content).toBeVisible();
 
-    // Wait a moment for theme to apply
-    await page.waitForTimeout(300);
+    await uiExamples.click();
+    await expect(content).toHaveCount(0);
+  });
+});
 
-    // Check that the background variable changed (Light theme has a light bg)
-    const bgPrimary = await page.evaluate(() =>
+/** The root's value of a theme variable */
+const rootVariable = (page: Page, name: string) =>
+  page.evaluate(
+    (variable) =>
       getComputedStyle(document.documentElement)
-        .getPropertyValue("--bg-primary")
-        .trim()
-    );
+        .getPropertyValue(variable)
+        .trim(),
+    name
+  );
 
-    // Light theme should have a light background (contains high RGB values)
-    // This is a soft check — we just verify the variable exists and has a value
-    expect(bgPrimary.length).toBeGreaterThan(0);
+/** Opens the Theme tab and waits for its built-in themes */
+async function openThemeTab(page: Page) {
+  await page.goto("/settings?section=user&tab=theme");
+  await expect(page.getByText("Built-in Themes")).toBeVisible({
+    timeout: 10_000,
+  });
+}
 
-    // Switch to another theme to verify it updates again
-    await page.getByRole("button", { name: "Midnight Blue" }).click();
-    await page.waitForTimeout(300);
+/** Chooses a built-in theme and waits for the account to save it */
+async function chooseTheme(page: Page, name: string) {
+  const saved = page.waitForResponse(
+    (response) =>
+      response.url().endsWith("/api/user/settings") &&
+      response.request().method() === "PUT"
+  );
+  await page.getByRole("button", { name }).click();
+  expect((await saved).ok()).toBe(true);
+}
 
-    const midnightBg = await page.evaluate(() =>
-      getComputedStyle(document.documentElement)
-        .getPropertyValue("--bg-primary")
-        .trim()
-    );
+test.describe("Theme follows the account", () => {
+  let viewer: TestUser;
 
-    // The background should be different from Light theme
-    expect(midnightBg).not.toEqual(bgPrimary);
+  test.beforeAll(async ({ request, browser, baseURL }) => {
+    viewer = await createUser(request, "theme");
+    const context = await signIn(browser, baseURL, viewer);
+    try {
+      await completeSetup(context);
+    } finally {
+      await context.close();
+    }
   });
 
-  test("theme persists in localStorage", async ({ page }) => {
-    await page.goto("/settings?section=user&tab=theme");
-    await expect(page.getByText("Built-in Themes")).toBeVisible({
-      timeout: 10_000,
-    });
-
-    // Switch to Deep Purple
-    await page.getByRole("button", { name: "Deep Purple" }).click();
-    await page.waitForTimeout(300);
-
-    // Check localStorage
-    const storedTheme = await page.evaluate(() =>
-      localStorage.getItem("app-theme")
-    );
-    expect(storedTheme).toBeTruthy();
-
-    // Reload the page
-    await page.reload();
-    await expect(page.getByText("Built-in Themes")).toBeVisible({
-      timeout: 10_000,
-    });
-
-    // The theme should still be applied (localStorage persists)
-    const themeAfterReload = await page.evaluate(() =>
-      localStorage.getItem("app-theme")
-    );
-    expect(themeAfterReload).toEqual(storedTheme);
+  test.afterAll(async ({ request }) => {
+    await deleteUser(request, viewer.id);
   });
 
-  test("UI Examples section is collapsible", async ({ page }) => {
-    await page.goto("/settings?section=user&tab=theme");
-    await expect(page.getByText("Built-in Themes")).toBeVisible({
-      timeout: 10_000,
-    });
+  test("switching theme updates CSS variables", async ({
+    browser,
+    baseURL,
+  }) => {
+    const context = await signIn(browser, baseURL, viewer);
+    try {
+      const page = await context.newPage();
+      await openThemeTab(page);
 
-    // UI Examples heading should be visible
-    const uiExamplesHeading = page.getByText("UI Examples");
-    if (await uiExamplesHeading.isVisible().catch(() => false)) {
-      // Click to expand/collapse
-      await uiExamplesHeading.click();
+      await chooseTheme(page, "Light");
+      const lightBackground = await rootVariable(page, "--bg-primary");
+      expect(lightBackground.length).toBeGreaterThan(0);
+
+      await chooseTheme(page, "Midnight Blue");
+      await expect
+        .poll(() => rootVariable(page, "--bg-primary"))
+        .not.toEqual(lightBackground);
+    } finally {
+      await context.close();
+    }
+  });
+
+  test("theme follows the account", async ({ browser, baseURL }) => {
+    const first = await signIn(browser, baseURL, viewer);
+    let chosenBackground = "";
+    try {
+      const page = await first.newPage();
+      await openThemeTab(page);
+      await chooseTheme(page, "Deep Purple");
+      chosenBackground = await rootVariable(page, "--bg-primary");
+
+      // The same browser paints it again after a reload
+      await page.reload();
+      await expect
+        .poll(() => rootVariable(page, "--bg-primary"))
+        .toBe(chosenBackground);
+    } finally {
+      await first.close();
+    }
+
+    // Another browser, with nothing in its storage, paints the account's theme
+    const second = await signIn(browser, baseURL, viewer);
+    try {
+      const page = await second.newPage();
+      await page.goto("/");
+      await expect
+        .poll(() => rootVariable(page, "--bg-primary"), { timeout: 10_000 })
+        .toBe(chosenBackground);
+      expect(await page.evaluate(() => localStorage.getItem("app-theme"))).toBe(
+        "deepPurple"
+      );
+    } finally {
+      await second.close();
     }
   });
 });

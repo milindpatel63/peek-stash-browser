@@ -1,12 +1,28 @@
-import { describe, it, expect, beforeAll } from "vitest";
-import { adminClient, guestClient } from "../helpers/testClient.js";
-import { TEST_ENTITIES, TEST_ADMIN } from "../fixtures/testEntities.js";
+import { MINIMAL_PER_PAGE_MAX } from "@peek/shared-types/filters/index.js";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import prisma from "../../prisma/singleton.js";
+import { must } from "../../tests/helpers/must.js";
+import { TEST_ADMIN, TEST_ENTITIES } from "../fixtures/testEntities.js";
+import { createApiUser } from "../helpers/accessFixture.js";
+import { expectRefused } from "../helpers/refused.js";
+import {
+  type TestClient,
+  adminClient,
+  guestClient,
+} from "../helpers/testClient.js";
 
 /**
  * Integration tests for minimal endpoint count_filter functionality.
  *
  * Tests that the count_filter parameter correctly filters entities
  * based on their content counts (scene_count, gallery_count, etc.)
+ *
+ * The requests go through the one parser (item 38) with the server in
+ * reject mode: an unknown count_filter key answers 400, and the page size is
+ * 50 unless the request names one, held to 1..100. The page-size cases seed
+ * 260 rows of each type on a made-up instance (the replay's library is
+ * smaller than a page) for a user who sees every instance, and delete them
+ * before the file ends.
  */
 
 interface MinimalPerformerResponse {
@@ -22,7 +38,7 @@ interface MinimalTagResponse {
 }
 
 interface MinimalGalleryResponse {
-  galleries: Array<{ id: string; title: string }>;
+  galleries: Array<{ id: string; name: string }>;
 }
 
 interface MinimalGroupResponse {
@@ -52,7 +68,9 @@ describe("Minimal Endpoint Count Filters", () => {
         }
       );
       expect(filteredResponse.ok).toBe(true);
-      expect(filteredResponse.data.performers.length).toBeLessThanOrEqual(totalCount);
+      expect(filteredResponse.data.performers.length).toBeLessThanOrEqual(
+        totalCount
+      );
 
       // Known performer with scenes should be in filtered results
       const hasPerformerWithScenes = filteredResponse.data.performers.some(
@@ -102,7 +120,9 @@ describe("Minimal Endpoint Count Filters", () => {
         }
       );
       expect(filteredResponse.ok).toBe(true);
-      expect(filteredResponse.data.studios.length).toBeLessThanOrEqual(totalCount);
+      expect(filteredResponse.data.studios.length).toBeLessThanOrEqual(
+        totalCount
+      );
 
       // Known studio with scenes should be in filtered results
       const hasStudioWithScenes = filteredResponse.data.studios.some(
@@ -179,7 +199,9 @@ describe("Minimal Endpoint Count Filters", () => {
       );
       expect(filteredResponse.ok).toBe(true);
       // Filtered count should be <= total (some galleries may have 0 images)
-      expect(filteredResponse.data.galleries.length).toBeLessThanOrEqual(totalCount);
+      expect(filteredResponse.data.galleries.length).toBeLessThanOrEqual(
+        totalCount
+      );
     });
   });
 
@@ -201,7 +223,9 @@ describe("Minimal Endpoint Count Filters", () => {
         }
       );
       expect(filteredResponse.ok).toBe(true);
-      expect(filteredResponse.data.groups.length).toBeLessThanOrEqual(totalCount);
+      expect(filteredResponse.data.groups.length).toBeLessThanOrEqual(
+        totalCount
+      );
     });
 
     it("supports min_performer_count filter", async () => {
@@ -255,15 +279,20 @@ describe("Minimal Endpoint Count Filters", () => {
       const bothCount = bothFiltersResponse.data.tags.length;
 
       // Combined should be at least as big as the larger individual result
-      expect(bothCount).toBeGreaterThanOrEqual(Math.max(scenesOnlyCount, performersOnlyCount));
+      expect(bothCount).toBeGreaterThanOrEqual(
+        Math.max(scenesOnlyCount, performersOnlyCount)
+      );
     });
   });
 
   describe("Authentication", () => {
     it("rejects unauthenticated requests", async () => {
-      const response = await guestClient.post("/api/library/performers/minimal", {
-        count_filter: { min_scene_count: 1 },
-      });
+      const response = await guestClient.post(
+        "/api/library/performers/minimal",
+        {
+          count_filter: { min_scene_count: 1 },
+        }
+      );
       expect(response.status).toBe(401);
     });
   });
@@ -290,6 +319,195 @@ describe("Minimal Endpoint Count Filters", () => {
       );
       expect(response.ok).toBe(true);
       // Should only return performers matching search AND having scenes
+    });
+  });
+
+  describe("page size", () => {
+    const INSTANCE = "minimal-it";
+    const USERNAME = "minimal_it_user";
+    const SEEDED = 260;
+    let viewer: { id: number; client: TestClient } | undefined;
+
+    const seededIds = Array.from({ length: SEEDED }, (_, i) =>
+      String(7780001 + i)
+    );
+    const named = seededIds.map((id, i) => ({
+      id,
+      stashInstanceId: INSTANCE,
+      name: `Mx ${String(i + 1).padStart(3, "0")}`,
+    }));
+
+    async function clearPageSizeFixture(): Promise<void> {
+      await prisma.user.deleteMany({ where: { username: USERNAME } });
+      const onInstance = { where: { stashInstanceId: INSTANCE } };
+      await prisma.stashScene.deleteMany(onInstance);
+      await prisma.stashPerformer.deleteMany(onInstance);
+      await prisma.stashStudio.deleteMany(onInstance);
+      await prisma.stashTag.deleteMany(onInstance);
+      await prisma.stashGroup.deleteMany(onInstance);
+      await prisma.stashGallery.deleteMany(onInstance);
+      await prisma.stashInstance.deleteMany({ where: { id: INSTANCE } });
+    }
+
+    beforeAll(async () => {
+      await clearPageSizeFixture();
+      await prisma.stashInstance.create({
+        data: {
+          id: INSTANCE,
+          name: INSTANCE,
+          url: "http://127.0.0.1:9/graphql",
+          apiKey: "fixture-key",
+          enabled: true,
+          priority: 940,
+          // Synced: its content shows (a first-syncing instance does not)
+          firstSyncedAt: new Date(),
+        },
+      });
+      await prisma.stashPerformer.createMany({ data: named });
+      await prisma.stashStudio.createMany({ data: named });
+      await prisma.stashTag.createMany({ data: named });
+      await prisma.stashGroup.createMany({ data: named });
+      await prisma.stashGallery.createMany({
+        data: named.map(({ name, ...row }) => ({ ...row, title: name })),
+      });
+      // Scenes as the sync stores them: titleSort is the displayed title
+      // (the title, else the file name without its extension), lower-cased
+      await prisma.stashScene.createMany({
+        data: [
+          {
+            id: "7780901",
+            stashInstanceId: INSTANCE,
+            title: "Beach Day",
+            titleSort: "beach day",
+            filePath: "/media/a.mp4",
+          },
+          {
+            id: "7780902",
+            stashInstanceId: INSTANCE,
+            title: null,
+            titleSort: "beach walk",
+            filePath: "/media/Beach Walk.mp4",
+          },
+          {
+            id: "7780903",
+            stashInstanceId: INSTANCE,
+            title: "Beach Hidden",
+            titleSort: "beach hidden",
+            filePath: "/media/c.mp4",
+          },
+          {
+            id: "7780904",
+            stashInstanceId: INSTANCE,
+            title: "Mountain",
+            titleSort: "mountain",
+            filePath: "/media/d.mp4",
+          },
+          {
+            id: "7780905",
+            stashInstanceId: INSTANCE,
+            title: "Beach Gone",
+            titleSort: "beach gone",
+            filePath: "/media/e.mp4",
+            deletedAt: new Date(),
+          },
+        ],
+      });
+      // No instance selection: every enabled instance, this one included
+      viewer = await createApiUser(USERNAME, "minimal_it_pass_1");
+      await prisma.userExcludedEntity.create({
+        data: {
+          userId: viewer.id,
+          entityType: "scene",
+          entityId: "7780903",
+          instanceId: INSTANCE,
+          reason: "hidden",
+        },
+      });
+    }, 60000);
+
+    afterAll(async () => {
+      await clearPageSizeFixture();
+    });
+
+    const ENDPOINTS = [
+      {
+        type: "performers",
+        rows: (d: unknown) => (d as MinimalPerformerResponse).performers,
+      },
+      {
+        type: "studios",
+        rows: (d: unknown) => (d as MinimalStudioResponse).studios,
+      },
+      { type: "tags", rows: (d: unknown) => (d as MinimalTagResponse).tags },
+      {
+        type: "groups",
+        rows: (d: unknown) => (d as MinimalGroupResponse).groups,
+      },
+      {
+        type: "galleries",
+        rows: (d: unknown) => (d as MinimalGalleryResponse).galleries,
+      },
+    ];
+
+    it.each(ENDPOINTS)(
+      "minimal: per_page 1000 returns at most 100 ($type)",
+      async ({ type, rows }) => {
+        const { client } = must(viewer, "the viewer");
+
+        const response = await client.post(`/api/library/${type}/minimal`, {
+          filter: { per_page: 1000 },
+        });
+
+        expect(response.status).toBe(200);
+        expect(rows(response.data)).toHaveLength(MINIMAL_PER_PAGE_MAX);
+      }
+    );
+
+    it.each(ENDPOINTS)(
+      "minimal: without per_page returns 50 ($type)",
+      async ({ type, rows }) => {
+        const { client } = must(viewer, "the viewer");
+
+        const response = await client.post(`/api/library/${type}/minimal`, {});
+
+        expect(response.status).toBe(200);
+        expect(rows(response.data)).toHaveLength(50);
+      }
+    );
+
+    it("scenes: lists the visible live scenes by displayed title, never a hidden one", async () => {
+      const { client } = must(viewer, "the viewer");
+
+      const response = await client.post<{
+        scenes: Array<{ id: string; instanceId: string; name: string }>;
+      }>("/api/library/scenes/minimal", { filter: { q: "beach" } });
+
+      expect(response.status).toBe(200);
+      const mine = response.data.scenes.filter(
+        (scene) => scene.instanceId === INSTANCE
+      );
+      expect(mine.map((scene) => [scene.id, scene.name])).toEqual([
+        ["7780901", "Beach Day"],
+        ["7780902", "Beach Walk"],
+      ]);
+    });
+
+    it("scenes: scope allEnabled answers 400 (the Content Restrictions editor restricts no scenes)", async () => {
+      const response = await adminClient.post("/api/library/scenes/minimal", {
+        scope: "allEnabled",
+      });
+
+      expectRefused(response, ["scope"]);
+    });
+
+    it("minimal: an unknown count_filter key answers 400", async () => {
+      const { client } = must(viewer, "the viewer");
+
+      const response = await client.post("/api/library/performers/minimal", {
+        count_filter: { min_scene_count: 1, min_bogus_count: 1 },
+      });
+
+      expectRefused(response, ["count_filter.min_bogus_count"]);
     });
   });
 });

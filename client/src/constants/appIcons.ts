@@ -13,77 +13,70 @@
  *   const HistoryIcon = APP_ICON_COMPONENTS.watchHistory;
  */
 import {
-  // Feature/Page icons
-  BarChart3,
-  CircleHelp,
-  CircleUserRound,
-  History,
-  Home,
-  LogOut,
-  Settings,
-  Sparkles,
-  Tv,
-
-  // Action icons
-  Check,
-  Copy,
-  Droplets,
-  Edit,
-  ExternalLink,
-  Eye,
-  EyeOff,
-  Heart,
-  Pencil,
-  Play,
-  Pause,
-  Plus,
-  RefreshCw,
-  RotateCcw,
-  Star,
-  Trash2,
-  X,
-
+  // UI icons
+  AlertCircle,
   // Navigation/Arrow icons
   ArrowDown,
   ArrowLeft,
   ArrowUp,
   ArrowUpDown,
+  // Feature/Page icons
+  BarChart3,
+  // View mode icons
+  Calendar,
+  // Action icons
+  Check,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
   ChevronUp,
-
-  // View mode icons
-  Calendar,
+  CircleHelp,
+  CircleUserRound,
+  // Server stats icons
+  Clock,
+  Copy,
+  Cpu,
+  Database,
+  Droplets,
+  Edit,
+  ExternalLink,
+  Eye,
+  // Brand icons
+  Eye as EyeLogo,
+  EyeOff,
+  Filter,
   Folder,
   FolderOpen,
   Grid2x2,
-  List,
-  Network,
-  Square,
-
-  // UI icons
-  AlertCircle,
-  Filter,
+  HardDrive,
+  Heart,
+  History,
+  Home,
   ImageOff,
   Info,
+  List,
   Loader2,
-  Menu,
-  MoreVertical,
-  Search,
-
-  // Server stats icons
-  Clock,
-  Cpu,
-  Database,
-  HardDrive,
-
+  LogOut,
   // Gender icons
   Mars,
+  Menu,
+  MoreVertical,
+  Network,
+  Pause,
+  Pencil,
+  Play,
+  Plus,
+  RefreshCw,
+  RotateCcw,
+  Search,
+  Settings,
+  Sparkles,
+  Square,
+  Star,
+  Trash2,
+  Tv,
   Venus,
-
-  // Brand icons
-  Eye as EyeLogo,
+  X,
 } from "lucide-react";
 
 /**
@@ -275,28 +268,4 @@ export const APP_ICON_COMPONENTS = {
 
   // Brand
   logo: EyeLogo,
-};
-
-/**
- * Get icon name by key
- */
-export const getAppIconName = (key: string): string => {
-  return (
-    (FEATURE_ICONS as Record<string, string>)[key] ||
-    (ACTION_ICONS as Record<string, string>)[key] ||
-    (NAV_ICONS as Record<string, string>)[key] ||
-    (VIEW_MODE_ICONS as Record<string, string>)[key] ||
-    (UI_ICONS as Record<string, string>)[key] ||
-    (SERVER_ICONS as Record<string, string>)[key] ||
-    (GENDER_ICONS as Record<string, string>)[key] ||
-    (BRAND_ICONS as Record<string, string>)[key] ||
-    key
-  );
-};
-
-/**
- * Get icon component by key
- */
-export const getAppIconComponent = (key: string) => {
-  return (APP_ICON_COMPONENTS as Record<string, typeof APP_ICON_COMPONENTS[keyof typeof APP_ICON_COMPONENTS]>)[key] || null;
 };

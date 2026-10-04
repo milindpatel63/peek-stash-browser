@@ -1,11 +1,14 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import { useLocation } from "react-router-dom";
 import "video.js/dist/video-js.css";
+import { useSceneClips } from "../../api/hooks/useSceneClips";
+import { useUserSettings } from "../../api/hooks/useUserSettings";
 import { useScenePlayer } from "../../contexts/ScenePlayerContext";
 import { usePlaylistMediaKeys } from "../../hooks/useMediaKeys";
+import { useQueueNavigation } from "../../hooks/useQueueNavigation";
 import { useWatchHistory } from "../../hooks/useWatchHistory";
-import { apiGet, getClipsForScene } from "../../api";
 import "./VideoPlayer.css";
+import type { ClipMarkerInput } from "./plugins/markers";
 import { useOrientationFullscreen } from "./useOrientationFullscreen";
 import { useVideoPlayer } from "./useVideoPlayer";
 
@@ -24,11 +27,11 @@ import { useVideoPlayer } from "./useVideoPlayer";
  *
  * RESPONSIBILITIES:
  * - Manage refs (videoRef, playerRef, hasResumedRef, initialResumeTimeRef)
- * - Fetch user settings (enableCast preference)
+ * - Read the play threshold from the user-settings query
  * - Render video element and loading overlay
  *
  * DATA FLOW:
- * - ScenePlayerContext provides scene, video, quality, playlist state
+ * - ScenePlayerContext provides scene, playlist and control state
  * - Hooks manage side effects and player lifecycle
  * - Watch history tracks playback progress
  */
@@ -40,47 +43,26 @@ const VideoPlayer = () => {
   const hasResumedRef = useRef(false); // Prevent double-resume
   const initialResumeTimeRef = useRef<number | null>(null); // Capture resume time once
 
-  const [enableCast, setEnableCast] = useState(true); // Default to true
-  const [minimumPlayPercent, setMinimumPlayPercent] = useState(20); // Default to 20%
-  const [clips, setClips] = useState<any[]>([]);
-
-  // Fetch user settings for cast preference and playback thresholds
-  useEffect(() => {
-    const fetchSettings = async () => {
-      try {
-        const data: any = await apiGet("/user/settings");
-        setEnableCast(data.settings.enableCast !== false);
-        setMinimumPlayPercent(data.settings.minimumPlayPercent ?? 20);
-      } catch (error) {
-        // If error, keep defaults
-        console.error("Failed to fetch user settings:", error);
-      }
-    };
-    fetchSettings();
-  }, []);
+  // The shared user-settings query: one request per session, not one per scene
+  const { data: userSettings } = useUserSettings();
+  const minimumPlayPercent = userSettings?.settings.minimumPlayPercent ?? 20;
 
   // ============================================================================
   // CONTEXT
   // ============================================================================
   const {
     scene: rawScene,
-    video: _video,
-    videoLoading,
-    sessionId: _sessionId,
-    quality,
-    isInitializing,
-    isAutoFallback,
     ready,
     shouldAutoplay,
     playlist,
     currentIndex,
-    shuffle: _shuffle,
-    repeat: _repeat,
-    shuffleHistory: _shuffleHistory,
+    autoplayNext,
+    repeat,
+    restartCount,
     dispatch,
-    nextScene,
-    prevScene,
+    registerPlayer,
   } = useScenePlayer();
+  const { next, prev } = useQueueNavigation();
 
   const scene = rawScene;
 
@@ -91,23 +73,14 @@ const VideoPlayer = () => {
   const videoHeight = firstFile?.height || 1080;
   const aspectRatio = `${videoWidth} / ${videoHeight}`;
 
-  // Fetch clips when scene changes
-  useEffect(() => {
-    async function fetchClips() {
-      if (!scene?.id) {
-        setClips([]);
-        return;
-      }
-      try {
-        const response: any = await getClipsForScene(scene.id as string, scene.instanceId as string, true);
-        setClips(response.clips || []);
-      } catch (err) {
-        console.error("Failed to fetch clips for timeline", err);
-        setClips([]);
-      }
-    }
-    fetchClips();
-  }, [scene?.id, scene?.instanceId]);
+  // The scene's clips, shared with the details panel. The query is keyed by
+  // the scene and its instance, so an answer for a scene the user has left
+  // never reaches this one's timeline.
+  const { data: clipsAnswer } = useSceneClips(
+    scene?.id ?? "",
+    scene?.instanceId ?? ""
+  );
+  const clips: ClipMarkerInput[] | undefined = clipsAnswer?.clips;
 
   // Add clip markers to timeline using the markers plugin
   useEffect(() => {
@@ -120,47 +93,45 @@ const VideoPlayer = () => {
     // Clear existing markers before adding new ones
     markersPlugin.clearMarkers();
 
-    // Filter to only generated clips and add to timeline
-    const generatedClips = clips.filter((c: any) => c.isGenerated);
-    if (generatedClips.length > 0) {
-      markersPlugin.addClipMarkers(generatedClips);
+    // Every clip gets a dot; one with no generated preview is drawn hollow
+    if (clips && clips.length > 0) {
+      markersPlugin.addClipMarkers(clips);
     }
   }, [clips]);
 
   // ============================================================================
   // WATCH HISTORY TRACKING
   // ============================================================================
-  const {
-    watchHistory,
-    loading: loadingWatchHistory,
-    updateQuality,
-  } = useWatchHistory(scene?.id ?? "", playerRef);
+  const { watchHistory, loading: loadingWatchHistory } = useWatchHistory(
+    scene?.id ?? "",
+    scene?.instanceId ?? ""
+  );
 
   // ============================================================================
   // CUSTOM HOOKS: VIDEO PLAYER LOGIC
   // ============================================================================
 
   // Consolidated hook: Manages all Video.js player operations
-  const { playNextInPlaylist, playPreviousInPlaylist } = useVideoPlayer({
+  useVideoPlayer({
     videoRef,
     playerRef,
     scene,
-    quality,
-    isAutoFallback,
     ready,
     shouldAutoplay,
     playlist,
     currentIndex,
+    autoplayNext,
+    repeat,
+    restartCount,
     dispatch,
-    nextScene,
-    prevScene,
-    updateQuality,
+    nextScene: next,
+    prevScene: prev,
+    registerPlayer,
     location,
     hasResumedRef,
     initialResumeTimeRef,
     watchHistory,
     loadingWatchHistory,
-    enableCast,
     minimumPlayPercent,
   });
 
@@ -169,9 +140,12 @@ const VideoPlayer = () => {
   usePlaylistMediaKeys({
     playerRef,
     playlist,
-    playNext: playNextInPlaylist,
-    playPrevious: playPreviousInPlaylist,
+    playNext: next,
+    playPrevious: prev,
     enabled: true,
+    // Keys act only while focus is in the player's element or on nothing
+    root: () =>
+      (playerRef.current as { el(): Element | null } | null)?.el() ?? null,
   });
 
   // Auto-fullscreen on mobile orientation change
@@ -222,8 +196,8 @@ const VideoPlayer = () => {
           }}
         />
 
-        {/* Loading overlay for scene or video data */}
-        {(!scene || videoLoading || isInitializing || isAutoFallback) && (
+        {/* Loading overlay until the scene's data arrives */}
+        {!scene && (
           <div
             style={{
               position: "absolute",
@@ -241,16 +215,11 @@ const VideoPlayer = () => {
             <div className="flex flex-col items-center gap-2">
               <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-white"></div>
               <span style={{ color: "white", fontSize: "14px" }}>
-                {!scene
-                  ? "Loading scene..."
-                  : isAutoFallback
-                    ? "Switching to transcoded playback..."
-                    : "Loading video..."}
+                Loading scene...
               </span>
             </div>
           </div>
         )}
-
       </div>
     </section>
   );

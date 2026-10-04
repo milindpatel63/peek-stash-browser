@@ -18,9 +18,11 @@
 export type {
   PaginationFilter,
   MinimalCountFilter,
+  ApiErrorIssue,
   ApiErrorResponse,
   ApiSuccessResponse,
   CacheNotReadyResponse,
+  LibraryReadyResponse,
   AmbiguousLookupResponse,
 } from "@peek/shared-types/api/common.js";
 
@@ -29,9 +31,15 @@ export type {
   CarouselPreference,
   TableColumnsConfig,
   FilterPreset,
+  SavedView,
+  OverwriteViewBody,
+  RenameViewBody,
+  GetFilterPinsResponse,
+  FilterPinsParams,
+  FilterPinsListResponse,
+  PutFilterPinsBody,
   FilterPresets,
   DefaultFilterPresets,
-  SyncUpdates,
   UserRestriction,
   NavPreference,
   LandingPagePreference,
@@ -43,6 +51,7 @@ export type {
   ChangePasswordBody,
   ChangePasswordResponse,
   GetRecoveryKeyResponse,
+  RegenerateRecoveryKeyBody,
   RegenerateRecoveryKeyResponse,
   GetAllUsersResponse,
   CreateUserBody,
@@ -63,6 +72,9 @@ export type {
   SyncFromStashParams,
   SyncFromStashBody,
   SyncFromStashResponse,
+  SyncFromStashOptions,
+  SyncStats,
+  SyncTypeStats,
   GetUserRestrictionsParams,
   UpdateUserRestrictionsBody,
   UpdateUserRestrictionsResponse,
@@ -76,7 +88,10 @@ export type {
   UnhideAllEntitiesQuery,
   UnhideAllEntitiesResponse,
   GetHiddenEntitiesQuery,
-  GetHiddenEntityIdsResponse,
+  GetHiddenEntitiesResponse,
+  HiddenEntityItem,
+  HiddenEntitySummary,
+  HiddenEntityType,
   HideEntitiesBody,
   HideEntitiesResponse,
   UpdateHideConfirmationBody,
@@ -91,6 +106,7 @@ export type {
   AdminRegenerateRecoveryKeyResponse,
   UpdateUserStashInstancesBody,
   CompleteSetupBody,
+  CompleteSetupResponse,
 } from "@peek/shared-types/api/user.js";
 
 // Ratings endpoint types
@@ -109,17 +125,18 @@ export type {
 // Watch History endpoint types
 export type {
   WatchHistoryData,
-  FullWatchHistoryRecord,
-  PingWatchHistoryRequest,
-  PingWatchHistoryResponse,
   SaveActivityRequest,
   SaveActivityResponse,
   IncrementPlayCountRequest,
   IncrementPlayCountResponse,
   IncrementOCounterRequest,
   IncrementOCounterResponse,
-  GetAllWatchHistoryQuery,
-  GetAllWatchHistoryResponse,
+  DecrementOCounterRequest,
+  DecrementOCounterResponse,
+  GetWatchedScenesQuery,
+  GetWatchedScenesResponse,
+  WatchedScenesSort,
+  WatchedScenesView,
   GetWatchHistoryParams,
   GetWatchHistoryResponse,
   ClearAllWatchHistoryResponse,
@@ -129,6 +146,8 @@ export type {
 export type {
   IncrementImageOCounterRequest,
   IncrementImageOCounterResponse,
+  DecrementImageOCounterRequest,
+  DecrementImageOCounterResponse,
   RecordImageViewRequest,
   RecordImageViewResponse,
   GetImageViewHistoryParams,
@@ -145,8 +164,6 @@ export type {
   CreateFirstStashInstanceRequest,
   CreateFirstStashInstanceResponse,
   GetStashInstanceResponse,
-  ResetSetupRequest,
-  ResetSetupResponse,
   // Multi-instance management (admin)
   StashInstanceData,
   GetAllStashInstancesResponse,
@@ -157,6 +174,8 @@ export type {
   UpdateStashInstanceResponse,
   DeleteStashInstanceParams,
   DeleteStashInstanceResponse,
+  TestSavedStashInstanceParams,
+  TestSavedStashInstanceRequest,
   // User instance selection
   GetUserStashInstancesResponse,
   UpdateUserStashInstancesRequest,
@@ -186,6 +205,7 @@ export type {
   StartImageDownloadResponse,
   StartPlaylistDownloadParams,
   StartPlaylistDownloadResponse,
+  PlaylistTooLargeResponse,
   GetUserDownloadsResponse,
   GetDownloadStatusParams,
   GetDownloadStatusResponse,
@@ -217,10 +237,14 @@ export type {
   RemoveMemberParams,
   RemoveMemberResponse,
   GetCurrentUserGroupsResponse,
+  GetUserGroupMembershipsResponse,
+  UserGroupSummary,
 } from "@peek/shared-types/api/groups.js";
 
 // Clips endpoint types
 export type {
+  FindClipsRequest,
+  FindClipsResponse,
   GetClipsQuery,
   GetClipsResponse,
   GetClipByIdParams,
@@ -247,67 +271,67 @@ export type {
   RefreshCacheResponse,
 } from "@peek/shared-types/api/stats.js";
 
-// ---------------------------------------------------------------------------
-// Server-local API types (dependencies on Express, Prisma, GraphQL)
-// ---------------------------------------------------------------------------
-
-// Express typed helpers
+// Database backup endpoint types
 export type {
-  TypedRequest,
-  TypedAuthRequest,
-  TypedResponse,
-} from "./express.js";
+  DatabaseBackupKind,
+  DatabaseBackup,
+  ListDatabaseBackupsResponse,
+  CreateDatabaseBackupResponse,
+  DeleteDatabaseBackupResponse,
+} from "@peek/shared-types/api/databaseBackup.js";
 
-// Proxy controller types
-export type { ProxyOptions } from "./proxy.js";
+// Sync endpoint types
+export type {
+  SyncJob,
+  SyncEntityState,
+  SyncInstanceStatus,
+  SyncStatusResponse,
+} from "@peek/shared-types/api/sync.js";
 
 // Library endpoint types
 export type {
+  WithStashUrl,
+  // A list's total, null when the request asked for none
+  ListCount,
+  ListCountResponse,
+  // Entity pickers
+  MinimalRequest,
+  MinimalScope,
+  MinimalEntity,
   // Scenes
   FindScenesRequest,
+  FindRecommendedScenesRequest,
   FindScenesResponse,
+  FindScenesMinimalRequest,
+  FindScenesMinimalResponse,
   FindSimilarScenesParams,
   FindSimilarScenesQuery,
   FindSimilarScenesResponse,
   GetRecommendedScenesQuery,
   GetRecommendedScenesResponse,
-  UpdateSceneParams,
-  UpdateSceneRequest,
-  UpdateSceneResponse,
-  ScoredSceneId,
   // Performers
   FindPerformersRequest,
   FindPerformersResponse,
   FindPerformersMinimalRequest,
   FindPerformersMinimalResponse,
-  UpdatePerformerParams,
-  UpdatePerformerRequest,
-  UpdatePerformerResponse,
   // Studios
   FindStudiosRequest,
   FindStudiosResponse,
   FindStudiosMinimalRequest,
   FindStudiosMinimalResponse,
-  UpdateStudioParams,
-  UpdateStudioRequest,
-  UpdateStudioResponse,
   // Tags
   FindTagsRequest,
   FindTagsResponse,
   FindTagsMinimalRequest,
   FindTagsMinimalResponse,
-  UpdateTagParams,
-  UpdateTagRequest,
-  UpdateTagResponse,
+  TagTreeScope,
+  FindTagTreeRequest,
+  TagTreeRow,
+  UntaggedKind,
+  FindTagTreeResponse,
   // Galleries
   FindGalleriesRequest,
   FindGalleriesResponse,
-  GetGalleryParams,
-  GetGalleryResponse,
-  GetGalleryImagesParams,
-  GetGalleryImagesQuery,
-  GetGalleryImagesResponse,
-  GalleryImageWithContext,
   FindGalleriesMinimalRequest,
   FindGalleriesMinimalResponse,
   // Groups
@@ -318,16 +342,42 @@ export type {
   // Images
   FindImagesRequest,
   FindImagesResponse,
-  GetImageParams,
-  GetImageResponse,
-} from "./library.js";
+  // Detail page counts
+  RelationCountsByType,
+  RelationCountsType,
+  RelationCountsParams,
+  RelationCountsQuery,
+  RelationCountsResponse,
+} from "@peek/shared-types/api/library.js";
+
+// ---------------------------------------------------------------------------
+// Server-local API types (dependencies on Express, Prisma, GraphQL)
+// ---------------------------------------------------------------------------
+
+// Express typed helpers
+export type {
+  TypedRequest,
+  TypedAuthRequest,
+  TypedLibraryRequest,
+  TypedResponse,
+} from "./express.js";
+
+// Proxy controller types
+export type { ProxyOptions } from "./proxy.js";
+
+// Recommendation scoring (server-internal)
+export type { ScoredSceneId } from "./library.js";
 
 // Playlist endpoint types
 export type {
   PlaylistItemWithScene,
+  PlaylistPreviewItem,
+  PlaylistPreviewScene,
   PlaylistData,
+  PlaylistSummary,
   GetUserPlaylistsResponse,
   GetPlaylistParams,
+  GetPlaylistQuery,
   GetPlaylistResponse,
   CreatePlaylistRequest,
   CreatePlaylistResponse,
@@ -340,10 +390,8 @@ export type {
   AddSceneToPlaylistRequest,
   AddSceneToPlaylistResponse,
   RemoveSceneFromPlaylistParams,
+  RemoveSceneFromPlaylistQuery,
   RemoveSceneFromPlaylistResponse,
-  ReorderPlaylistParams,
-  ReorderPlaylistRequest,
-  ReorderPlaylistResponse,
   SharedPlaylistData,
   GetSharedPlaylistsResponse,
   PlaylistShareInfo,
@@ -351,7 +399,21 @@ export type {
   UpdatePlaylistSharesRequest,
   UpdatePlaylistSharesResponse,
   DuplicatePlaylistResponse,
-} from "./playlist.js";
+  GetUserPlaylistsQuery,
+  PlaylistQueueEntry,
+  GetPlaylistQueueQuery,
+  GetPlaylistQueueResponse,
+  AddScenesToPlaylistRequest,
+  AddScenesToPlaylistResponse,
+  MovePlaylistItemParams,
+  MovePlaylistItemRequest,
+  MovePlaylistItemResponse,
+  RemovePlaylistItemsRequest,
+  RemovePlaylistItemsResponse,
+  SortPlaylistRequest,
+  SortPlaylistResponse,
+  RemoveUnavailableItemsResponse,
+} from "@peek/shared-types/api/playlist.js";
 
 // Carousel endpoint types
 export type {
@@ -370,7 +432,7 @@ export type {
   PreviewCarouselResponse,
   ExecuteCarouselByIdParams,
   ExecuteCarouselByIdResponse,
-} from "./carousel.js";
+} from "@peek/shared-types/api/carousel.js";
 
 // Custom Theme endpoint types
 export type {

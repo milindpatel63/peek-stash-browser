@@ -1,22 +1,24 @@
 import toast from "react-hot-toast";
-import {
-  ErrorMessage,
-  InfoMessage,
-  SuccessMessage,
-  WarningMessage,
-} from "../components/ui/index";
+import StatusMessage from "../components/ui/StatusMessage";
 
 /**
  * Toast utility functions for showing notifications
  * Uses react-hot-toast with custom components
  */
 
-type ToastPosition = "top-left" | "top-center" | "top-right" | "bottom-left" | "bottom-center" | "bottom-right";
+type ToastPosition =
+  | "top-left"
+  | "top-center"
+  | "top-right"
+  | "bottom-left"
+  | "bottom-center"
+  | "bottom-right";
 
 interface ToastOptions {
   duration?: number;
+  /** Calls with one id show one toast: a repeating failure does not stack */
+  id?: string;
   position?: ToastPosition;
-  onRetry?: () => void;
   [key: string]: unknown;
 }
 
@@ -29,7 +31,8 @@ interface PromiseMessages {
 export const showSuccess = (message: string, options: ToastOptions = {}) => {
   return toast.custom(
     (t) => (
-      <SuccessMessage
+      <StatusMessage
+        variant="success"
         message={message}
         mode="toast"
         onClose={() => toast.dismiss(t.id)}
@@ -43,14 +46,17 @@ export const showSuccess = (message: string, options: ToastOptions = {}) => {
   );
 };
 
-export const showError = (error: any, options: ToastOptions = {}) => {
+export const showError = (
+  error: string | Error | null | undefined,
+  options: ToastOptions = {}
+) => {
   return toast.custom(
-    () => (
-      <ErrorMessage
-        error={error}
+    (t) => (
+      <StatusMessage
+        variant="error"
+        message={error}
         mode="toast"
-        showRetry={false}
-        onRetry={options.onRetry}
+        onClose={() => toast.dismiss(t.id)}
       />
     ),
     {
@@ -64,7 +70,8 @@ export const showError = (error: any, options: ToastOptions = {}) => {
 export const showWarning = (message: string, options: ToastOptions = {}) => {
   return toast.custom(
     (t) => (
-      <WarningMessage
+      <StatusMessage
+        variant="warning"
         message={message}
         mode="toast"
         onClose={() => toast.dismiss(t.id)}
@@ -78,10 +85,11 @@ export const showWarning = (message: string, options: ToastOptions = {}) => {
   );
 };
 
-const showInfo = (message: string, options: ToastOptions = {}) => {
+export const showInfo = (message: string, options: ToastOptions = {}) => {
   return toast.custom(
     (t) => (
-      <InfoMessage
+      <StatusMessage
+        variant="info"
         message={message}
         mode="toast"
         onClose={() => toast.dismiss(t.id)}
@@ -99,7 +107,11 @@ const showInfo = (message: string, options: ToastOptions = {}) => {
  * Promise-based toast for async operations
  * Example: showPromise(fetchData(), { loading: 'Saving...', success: 'Saved!', error: 'Failed' })
  */
-const showPromise = (promise: Promise<any>, messages: PromiseMessages, options: ToastOptions = {}) => {
+const showPromise = (
+  promise: Promise<unknown>,
+  messages: PromiseMessages,
+  options: ToastOptions = {}
+) => {
   return toast.promise(
     promise,
     {

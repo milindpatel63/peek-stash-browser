@@ -1,8 +1,11 @@
 import { useState } from "react";
+import { customThemeKey } from "@peek/shared-types/themes.js";
 import { Copy, Pencil, Plus, Trash2, X } from "lucide-react";
-import { apiPost, apiPut, apiDelete } from "../../api";
-import { useTheme } from "../../themes/useTheme";
+import { apiDelete, apiPost, apiPut } from "../../api";
 import type { CustomTheme } from "../../themes/ThemeContext";
+import type { ThemeConfig } from "../../themes/themes";
+import { useTheme } from "../../themes/useTheme";
+import { formatDate } from "../../utils/date";
 import { showError, showSuccess } from "../../utils/toast";
 import { Button, ConfirmDialog, Paper } from "../ui/index";
 import CustomThemeEditor from "./CustomThemeEditor";
@@ -11,15 +14,28 @@ interface CustomThemeWithDates extends CustomTheme {
   createdAt?: string;
 }
 
+interface ThemeSaveData {
+  name: string;
+  config: ThemeConfig;
+}
+
+/** The body of a create or duplicate response (the fields read here) */
+interface CustomThemeResponse {
+  theme: CustomTheme;
+}
+
 /**
  * Custom theme management component
  */
 const CustomThemeManager = () => {
   const { customThemes, refreshCustomThemes, currentTheme, changeTheme } =
     useTheme();
-  const [editingTheme, setEditingTheme] = useState<CustomThemeWithDates | null>(null);
+  const [editingTheme, setEditingTheme] = useState<CustomThemeWithDates | null>(
+    null
+  );
   const [isCreating, setIsCreating] = useState(false);
-  const [deleteConfirm, setDeleteConfirm] = useState<CustomThemeWithDates | null>(null);
+  const [deleteConfirm, setDeleteConfirm] =
+    useState<CustomThemeWithDates | null>(null);
   const [loading, setLoading] = useState(false);
 
   const handleCreate = () => {
@@ -32,16 +48,19 @@ const CustomThemeManager = () => {
     setIsCreating(false);
   };
 
-  const handleSaveNew = async (themeData: { name: string; config: Record<string, any> }) => {
+  const handleSaveNew = async (themeData: ThemeSaveData) => {
     try {
       setLoading(true);
-      const data = await apiPost("/themes/custom", themeData) as Record<string, any>;
+      const data = await apiPost<CustomThemeResponse>(
+        "/themes/custom",
+        themeData
+      );
       await refreshCustomThemes();
       showSuccess(`Theme "${themeData.name}" created successfully!`);
       setIsCreating(false);
 
       // Auto-select the new theme
-      changeTheme(`custom-${data.theme.id}`);
+      changeTheme(customThemeKey(data.theme.id));
     } catch (error) {
       showError((error as Error).message || "Failed to create theme");
     } finally {
@@ -49,10 +68,12 @@ const CustomThemeManager = () => {
     }
   };
 
-  const handleSaveEdit = async (themeData: { name: string; config: Record<string, any> }) => {
+  const handleSaveEdit = async (themeData: ThemeSaveData) => {
+    // The editor saves an edit only while a theme is being edited
+    if (!editingTheme) return;
     try {
       setLoading(true);
-      await apiPut(`/themes/custom/${editingTheme!.id}`, themeData);
+      await apiPut(`/themes/custom/${editingTheme.id}`, themeData);
       await refreshCustomThemes();
       showSuccess(`Theme "${themeData.name}" updated successfully!`);
       setEditingTheme(null);
@@ -72,7 +93,7 @@ const CustomThemeManager = () => {
       setDeleteConfirm(null);
 
       // If deleted theme was active, switch to default
-      if (currentTheme === `custom-${theme.id}`) {
+      if (currentTheme === customThemeKey(theme.id)) {
         changeTheme("peek");
       }
     } catch (error) {
@@ -85,7 +106,9 @@ const CustomThemeManager = () => {
   const handleDuplicate = async (theme: CustomThemeWithDates) => {
     try {
       setLoading(true);
-      const data = await apiPost(`/themes/custom/${theme.id}/duplicate`) as Record<string, any>;
+      const data = await apiPost<CustomThemeResponse>(
+        `/themes/custom/${theme.id}/duplicate`
+      );
       await refreshCustomThemes();
       showSuccess(`Theme duplicated as "${data.theme.name}"!`);
     } catch (error) {
@@ -109,7 +132,9 @@ const CustomThemeManager = () => {
             className="text-xl font-semibold"
             style={{ color: "var(--text-primary)" }}
           >
-            {isCreating ? "Create Custom Theme" : `Edit "${editingTheme!.name}"`}
+            {isCreating || !editingTheme
+              ? "Create Custom Theme"
+              : `Edit "${editingTheme.name}"`}
           </h3>
           <Button variant="secondary" onClick={handleCancel} disabled={loading}>
             <X size={16} className="mr-2" />
@@ -117,8 +142,14 @@ const CustomThemeManager = () => {
           </Button>
         </div>
         <CustomThemeEditor
-          theme={editingTheme as unknown as React.ComponentProps<typeof CustomThemeEditor>["theme"]}
-          onSave={isCreating ? handleSaveNew : handleSaveEdit}
+          theme={
+            editingTheme as unknown as React.ComponentProps<
+              typeof CustomThemeEditor
+            >["theme"]
+          }
+          onSave={(themeData) =>
+            void (isCreating ? handleSaveNew : handleSaveEdit)(themeData)
+          }
           onCancel={handleCancel}
           isNew={isCreating}
         />
@@ -179,7 +210,7 @@ const CustomThemeManager = () => {
         <div className="space-y-3">
           {customThemes.map((theme) => {
             const themeWithDates = theme as CustomThemeWithDates;
-            const isActive = currentTheme === `custom-${theme.id}`;
+            const isActive = currentTheme === customThemeKey(theme.id);
             return (
               <Paper key={theme.id}>
                 <Paper.Body>
@@ -190,14 +221,16 @@ const CustomThemeManager = () => {
                         <div
                           className="w-8 h-8 rounded"
                           style={{
-                            backgroundColor: themeWithDates.config.accents?.primary,
+                            backgroundColor:
+                              themeWithDates.config.accents?.primary,
                           }}
                           title="Primary Accent"
                         />
                         <div
                           className="w-8 h-8 rounded"
                           style={{
-                            backgroundColor: themeWithDates.config.accents?.secondary,
+                            backgroundColor:
+                              themeWithDates.config.accents?.secondary,
                           }}
                           title="Secondary Accent"
                         />
@@ -233,7 +266,9 @@ const CustomThemeManager = () => {
                           {theme.config.mode === "dark" ? "Dark" : "Light"} mode
                           {" • "}
                           Created{" "}
-                          {new Date((theme as CustomThemeWithDates).createdAt || "").toLocaleDateString()}
+                          {formatDate(
+                            (theme as CustomThemeWithDates).createdAt
+                          )}
                         </p>
                       </div>
                     </div>
@@ -243,7 +278,7 @@ const CustomThemeManager = () => {
                       {!isActive && (
                         <Button
                           variant="secondary"
-                          onClick={() => changeTheme(`custom-${theme.id}`)}
+                          onClick={() => changeTheme(customThemeKey(theme.id))}
                           className="text-sm"
                         >
                           Use Theme
@@ -260,7 +295,7 @@ const CustomThemeManager = () => {
                       </Button>
                       <Button
                         variant="secondary"
-                        onClick={() => handleDuplicate(theme)}
+                        onClick={() => void handleDuplicate(theme)}
                         disabled={loading}
                         className="p-2"
                         title="Duplicate"
@@ -293,7 +328,7 @@ const CustomThemeManager = () => {
           message={`Are you sure you want to delete "${deleteConfirm.name}"? This action cannot be undone.`}
           confirmText="Delete"
           cancelText="Cancel"
-          onConfirm={() => handleDelete(deleteConfirm)}
+          onConfirm={() => void handleDelete(deleteConfirm)}
           onClose={() => setDeleteConfirm(null)}
           confirmStyle="danger"
         />

@@ -1,111 +1,146 @@
-// client/src/components/folder/FolderView.jsx
-import { useState, useMemo, useCallback, useEffect, useRef, type ReactNode } from "react";
+import {
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
 import { useSearchParams } from "react-router-dom";
 import { getGridClasses } from "../../constants/grids";
-import { buildFolderTree } from "../../utils/buildFolderTree";
-import FolderCard from "./FolderCard";
+import { useIncrementalList } from "../../hooks/useIncrementalList";
+import {
+  type FolderCountField,
+  UNTAGGED_FOLDER_ID,
+  buildFolderTree,
+  resolveFolderPath,
+} from "../../utils/buildFolderTree";
+import { EmptyState } from "../ui/index";
 import FolderBreadcrumb from "./FolderBreadcrumb";
+import FolderCard from "./FolderCard";
 import FolderTreeSidebar from "./FolderTreeSidebar";
 
-interface TagItem {
+/** A tag tree row, as the folders and the sidebar read it */
+interface FolderViewTag {
   id: string;
+  instanceId?: string | null;
   name: string;
   parents?: Array<{ id: string }>;
   image_path?: string | null;
+  scene_count?: number | null;
+  gallery_count?: number | null;
+  image_count?: number | null;
 }
 
 interface Props {
+  /** The list's page: inside a folder, the folder's own items */
   items: Array<Record<string, unknown>>;
-  tags: TagItem[];
+  /** The list's total, the folder's own items */
+  itemCount: number;
+  tags: FolderViewTag[];
+  /** The tree's count of the page's type, the folders' badges */
+  countField: FolderCountField;
+  /**
+   * The tree's count of the page's untagged items: the root shows Untagged
+   * while it is above 0
+   */
+  untaggedCount?: number;
+  /** The page's item, lower case: one and many ("gallery", "galleries") */
+  entityLabel: { one: string; many: string };
   renderItem: (item: Record<string, unknown>) => ReactNode;
   gridDensity?: string;
+  /** The tag tree is loading */
   loading?: boolean;
-  emptyMessage?: string;
-  onFolderPathChange?: (tagId: string | null) => void;
-  filters?: Record<string, unknown> | null;
+  /** The folder's page is loading */
+  itemsLoading?: boolean;
+  /**
+   * The open folders' tag keys ("id:instanceId"), held by the owner (the
+   * list's URL state); a folder or breadcrumb click is reported through
+   * `onPathChange`, which writes it
+   */
+  path: readonly string[];
+  onPathChange: (path: string[]) => void;
 }
 
 /**
- * Folder view for browsing content by tag hierarchy.
+ * Folder view for browsing content by tag hierarchy: the open folder's
+ * sub-folders, unpaged, above its own items, the list's page as it is (the
+ * owner asks for the folder's tag at depth 0 and pages it). At the root,
+ * folders only, Untagged last while the page's type has untagged items.
+ * Each folder shows how many items of the page's type carry its tag
+ * directly.
  * Desktop: Split-pane with tree sidebar + content grid
  * Mobile: Stacked with breadcrumb + content grid
+ * The path lists tag keys ("id:instanceId"); a path bookmarked with bare ids
+ * is rewritten to them in the URL's `folderPath` in place.
  */
 const FolderView = ({
   items,
+  itemCount,
   tags,
+  countField,
+  untaggedCount = 0,
+  entityLabel,
   renderItem,
   gridDensity = "medium",
   loading = false,
-  emptyMessage = "No items found",
-  onFolderPathChange,
-  filters: _filters = null,  
+  itemsLoading = false,
+  path,
+  onPathChange,
 }: Props) => {
   const [searchParams, setSearchParams] = useSearchParams();
+  const urlPath = useMemo(() => [...path], [path]);
+  const pageInstanceId = searchParams.get("instance");
 
-  // Parse path from URL
-  const currentPath = useMemo(() => {
-    const pathParam = searchParams.get("folderPath");
-    return pathParam ? pathParam.split(",").filter(Boolean) : [];
-  }, [searchParams]);
+  // A path bookmarked with bare ids resolves to the tags' keys once they load
+  const currentPath = useMemo(
+    () => [...resolveFolderPath(urlPath, tags, pageInstanceId)],
+    [urlPath, tags, pageInstanceId]
+  );
 
-  // Track last notified tag to avoid duplicate notifications
-  const lastNotifiedTagRef = useRef<string | null | undefined>(undefined);
-
-  // Sync parent when path changes from any source (handler, browser back/forward, URL edit)
+  // ...and is stored in the URL the new way from then on
   useEffect(() => {
-    const currentTagId = currentPath.length > 0 ? currentPath[currentPath.length - 1] : null;
-    if (currentTagId !== lastNotifiedTagRef.current) {
-      lastNotifiedTagRef.current = currentTagId;
-      onFolderPathChange?.(currentTagId);
-    }
-  }, [currentPath, onFolderPathChange]);
-
-  // Update URL when path changes - also reset page to 1
-  const setCurrentPath = useCallback(
-    (newPath: string[]) => {
-      setSearchParams((prev) => {
+    const resolved = currentPath.join(",");
+    if (resolved === urlPath.join(",")) return;
+    setSearchParams(
+      (prev) => {
         const next = new URLSearchParams(prev);
-        if (newPath.length > 0) {
-          next.set("folderPath", newPath.join(","));
-        } else {
-          next.delete("folderPath");
-        }
-        // Reset to page 1 when navigating folders to avoid stale pagination state
-        next.delete("page");
+        next.set("folderPath", resolved);
         return next;
-      });
-      // Eagerly notify parent (effect will deduplicate via ref)
-      const currentTagId = newPath.length > 0 ? newPath[newPath.length - 1] : null;
-      lastNotifiedTagRef.current = currentTagId;
-      onFolderPathChange?.(currentTagId);
-    },
-    [setSearchParams, onFolderPathChange]
-  );
+      },
+      { replace: true }
+    );
+  }, [currentPath, urlPath, setSearchParams]);
 
-  // Build folder tree from items and tags
-  const { folders, items: leafItems, breadcrumbs } = useMemo(
-    () => buildFolderTree(items, tags, currentPath),
-    [items, tags, currentPath]
+  const { folders, breadcrumbs } = useMemo(
+    () => buildFolderTree(tags, currentPath, countField, untaggedCount),
+    [tags, currentPath, countField, untaggedCount]
   );
+  // Folders mount in chunks; the sentinel after the last loads the next
+  const {
+    visible: visibleFolders,
+    sentinelRef: folderSentinelRef,
+    hasMore: hasMoreFolders,
+  } = useIncrementalList(folders);
+  const atRoot = currentPath.length === 0;
+  const { many } = entityLabel;
+  const counted = (n: number) =>
+    `${n} ${n === 1 ? entityLabel.one : entityLabel.many}`;
+  const folderName = breadcrumbs.at(-1)?.name ?? "";
 
   // Handle folder click - navigate into folder
   const handleFolderClick = useCallback(
     (folder: { id: string }) => {
-      if (folder.id === "__untagged__") {
-        // Can't navigate into untagged
-        return;
-      }
-      setCurrentPath([...currentPath, folder.id]);
+      onPathChange([...currentPath, folder.id]);
     },
-    [currentPath, setCurrentPath]
+    [currentPath, onPathChange]
   );
 
   // Handle breadcrumb navigation
   const handleBreadcrumbNavigate = useCallback(
     (path: string[]) => {
-      setCurrentPath(path);
+      onPathChange(path);
     },
-    [setCurrentPath]
+    [onPathChange]
   );
 
   // Sidebar collapsed state (desktop only)
@@ -122,10 +157,9 @@ const FolderView = ({
 
   const gridClasses = getGridClasses("standard", gridDensity);
 
-  // Loading skeleton for content area
-  const loadingSkeleton = (
+  const skeleton = (count: number) => (
     <div className={gridClasses}>
-      {[...Array(12)].map((_, i) => (
+      {Array.from({ length: count }).map((_, i) => (
         <div
           key={i}
           className="rounded-lg animate-pulse"
@@ -135,6 +169,69 @@ const FolderView = ({
           }}
         />
       ))}
+    </div>
+  );
+
+  const renderItems = () => {
+    if (itemsLoading) return skeleton(12);
+    if (items.length === 0) {
+      return (
+        <EmptyState
+          title={
+            currentPath.at(-1) === UNTAGGED_FOLDER_ID
+              ? `No untagged ${many}`
+              : `No ${many} directly in ${folderName}`
+          }
+          {...(folders.length > 0 && {
+            description: `Open a folder above for its ${many}`,
+          })}
+        />
+      );
+    }
+    return (
+      <>
+        <p className="text-sm mb-3" style={{ color: "var(--text-muted)" }}>
+          {counted(itemCount)} in this folder
+        </p>
+        <div className={gridClasses}>
+          {items.map((item) => renderItem(item))}
+        </div>
+      </>
+    );
+  };
+
+  const content = loading ? (
+    skeleton(12)
+  ) : (
+    <div className="space-y-6">
+      {folders.length > 0 && (
+        <div className={gridClasses}>
+          {visibleFolders.map((folder) => (
+            <FolderCard
+              key={folder.id}
+              folder={folder}
+              countLabel={counted}
+              onClick={handleFolderClick}
+            />
+          ))}
+        </div>
+      )}
+      {hasMoreFolders && (
+        <div
+          ref={folderSentinelRef}
+          data-testid="folder-sentinel"
+          aria-hidden="true"
+          className="h-px"
+        />
+      )}
+      {atRoot
+        ? folders.length === 0 && (
+            <EmptyState
+              title={`No folders with ${many}`}
+              description={`No tag you can see is on any of your ${many}`}
+            />
+          )
+        : renderItems()}
     </div>
   );
 
@@ -148,36 +245,7 @@ const FolderView = ({
           onNavigate={handleBreadcrumbNavigate}
         />
 
-        {/* Content grid or loading skeleton */}
-        {loading ? (
-          loadingSkeleton
-        ) : (
-          <>
-            <div className={gridClasses}>
-              {/* Folders first */}
-              {folders.map((folder) => (
-                <FolderCard
-                  key={folder.id}
-                  folder={folder}
-                  onClick={handleFolderClick}
-                />
-              ))}
-
-              {/* Then leaf items */}
-              {leafItems.map((item) => renderItem(item))}
-            </div>
-
-            {/* Empty state */}
-            {folders.length === 0 && leafItems.length === 0 && (
-              <div
-                className="text-center py-12"
-                style={{ color: "var(--text-secondary)" }}
-              >
-                {emptyMessage}
-              </div>
-            )}
-          </>
-        )}
+        {content}
       </div>
     );
   }
@@ -190,7 +258,7 @@ const FolderView = ({
         <FolderTreeSidebar
           tags={tags}
           currentPath={currentPath}
-          onNavigate={setCurrentPath}
+          onNavigate={onPathChange}
           className="w-64 flex-shrink-0 h-[calc(100vh-200px)] sticky top-4 ml-4 rounded-lg"
         />
       )}
@@ -224,36 +292,7 @@ const FolderView = ({
           />
         </div>
 
-        {/* Content grid or loading skeleton */}
-        {loading ? (
-          loadingSkeleton
-        ) : (
-          <>
-            <div className={gridClasses}>
-              {/* Folders first */}
-              {folders.map((folder) => (
-                <FolderCard
-                  key={folder.id}
-                  folder={folder}
-                  onClick={handleFolderClick}
-                />
-              ))}
-
-              {/* Then leaf items */}
-              {leafItems.map((item) => renderItem(item))}
-            </div>
-
-            {/* Empty state */}
-            {folders.length === 0 && leafItems.length === 0 && (
-              <div
-                className="text-center py-12"
-                style={{ color: "var(--text-secondary)" }}
-              >
-                {emptyMessage}
-              </div>
-            )}
-          </>
-        )}
+        {content}
       </div>
     </div>
   );

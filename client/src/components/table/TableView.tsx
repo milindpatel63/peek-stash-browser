@@ -1,7 +1,8 @@
-import { useState, useRef, useEffect, useCallback, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useConfig } from "../../contexts/ConfigContext";
+import { useElementScrollRestoration } from "../../hooks/useScrollRestoration";
 import TableHeader from "./TableHeader";
 import { getCellRenderer } from "./cellRenderers";
-import { useConfig } from "../../contexts/ConfigContext";
 
 interface ColumnDef {
   id: string;
@@ -24,7 +25,10 @@ interface Props {
   onHideColumn?: (columnId: string) => void;
   entityType: string;
   isLoading?: boolean;
-  columnsPopover?: ReactNode;
+  /** An image row's link, for a list that shows its images in place */
+  itemPath?: ((item: Record<string, unknown>) => string) | undefined;
+  /** Opens an image row in the list's viewer on a plain click */
+  onItemOpen?: ((item: Record<string, unknown>) => void) | undefined;
 }
 
 /**
@@ -38,21 +42,29 @@ const TableView = ({
   onHideColumn,
   entityType,
   isLoading = false,
-  columnsPopover,
+  itemPath,
+  onItemOpen,
 }: Props) => {
   const { hasMultipleInstances } = useConfig();
 
   // Context menu state: { columnId, x, y } or null
-  const [contextMenu, setContextMenu] = useState<{ columnId: string; x: number; y: number } | null>(null);
+  const [contextMenu, setContextMenu] = useState<{
+    columnId: string;
+    x: number;
+    y: number;
+  } | null>(null);
 
   // Scroll state for showing/hiding the scroll hint
   const scrollContainerRef = useRef<HTMLDivElement>(null);
+  // Back restores the box's own scroll, which the window's restore never saw
+  useElementScrollRestoration(scrollContainerRef);
   const [canScrollRight, setCanScrollRight] = useState(false);
 
   const checkScrollState = useCallback(() => {
     const el = scrollContainerRef.current;
     if (el) {
-      const hasMoreToScroll = el.scrollWidth > el.clientWidth &&
+      const hasMoreToScroll =
+        el.scrollWidth > el.clientWidth &&
         el.scrollLeft < el.scrollWidth - el.clientWidth - 1;
       setCanScrollRight(hasMoreToScroll);
     }
@@ -69,13 +81,17 @@ const TableView = ({
         window.removeEventListener("resize", checkScrollState);
       };
     }
+    return undefined;
   }, [checkScrollState, columns]);
 
   /**
    * Handle right-click on column header
    * Opens context menu for non-mandatory columns
    */
-  const handleColumnContextMenu = (columnId: string, event: React.MouseEvent) => {
+  const handleColumnContextMenu = (
+    columnId: string,
+    event: React.MouseEvent
+  ) => {
     event.preventDefault();
     setContextMenu({
       columnId,
@@ -111,11 +127,11 @@ const TableView = ({
         <tr
           key={`skeleton-${i}`}
           style={{
-            backgroundColor: i % 2 === 1 ? "var(--bg-secondary)" : "transparent",
+            backgroundColor:
+              i % 2 === 1 ? "var(--bg-secondary)" : "transparent",
             borderBottom: "1px solid var(--border-color)",
           }}
         >
-          {columnsPopover && <td className="w-10 px-2 py-3" />}
           {columns.map((column) => (
             <td key={column.id} className={`${column.width} px-4 py-3`}>
               <div
@@ -138,7 +154,7 @@ const TableView = ({
       return (
         <tr>
           <td
-            colSpan={columns.length + (columnsPopover ? 1 : 0)}
+            colSpan={columns.length}
             className="px-3 py-8 text-center"
             style={{ color: "var(--text-muted)" }}
           >
@@ -153,13 +169,17 @@ const TableView = ({
         key={(item.id as React.Key) || index}
         className="transition-colors hover:bg-[var(--bg-card)]"
         style={{
-          backgroundColor: index % 2 === 1 ? "var(--bg-secondary)" : "transparent",
+          backgroundColor:
+            index % 2 === 1 ? "var(--bg-secondary)" : "transparent",
           borderBottom: "1px solid var(--border-color)",
         }}
       >
-        {columnsPopover && <td className="w-10 px-2 py-2" />}
         {columns.map((column) => {
-          const renderer = getCellRenderer(column.id, entityType, { hasMultipleInstances });
+          const renderer = getCellRenderer(column.id, entityType, {
+            hasMultipleInstances,
+            itemPath,
+            onItemOpen,
+          });
           const hasMaxWidth = column.width?.startsWith("max-w");
           return (
             <td
@@ -193,20 +213,20 @@ const TableView = ({
       )}
       <div
         ref={scrollContainerRef}
-        className="w-full overflow-x-auto [-webkit-overflow-scrolling:touch]"
+        // Phones scroll the page and the box only sideways; from md up the box
+        // is no taller than the screen and scrolls both ways, so the sticky
+        // header (TableHeader) stays in view
+        className="w-full overflow-x-auto [-webkit-overflow-scrolling:touch] md:overflow-auto md:max-h-[calc(100dvh-8rem)]"
       >
         <table className="table-fixed min-w-full">
-        <TableHeader
-          columns={columns}
-          sort={sort}
-          onSort={onSort}
-          onColumnContextMenu={handleColumnContextMenu}
-          entityType={entityType}
-          columnsPopover={columnsPopover}
-        />
-        <tbody>
-          {isLoading ? renderSkeletonRows() : renderRows()}
-        </tbody>
+          <TableHeader
+            columns={columns}
+            sort={sort}
+            onSort={onSort}
+            onColumnContextMenu={handleColumnContextMenu}
+            entityType={entityType}
+          />
+          <tbody>{isLoading ? renderSkeletonRows() : renderRows()}</tbody>
         </table>
       </div>
 
@@ -214,10 +234,7 @@ const TableView = ({
       {contextMenu && (
         <>
           {/* Backdrop to close menu on click */}
-          <div
-            className="fixed inset-0 z-40"
-            onClick={closeContextMenu}
-          />
+          <div className="fixed inset-0 z-40" onClick={closeContextMenu} />
           {/* Menu */}
           <div
             className="fixed z-50 rounded-lg shadow-lg min-w-[120px]"

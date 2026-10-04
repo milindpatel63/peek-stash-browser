@@ -1,74 +1,60 @@
-import { useEffect, useState } from "react";
-import { apiGet, apiPut } from "../../../api";
+import type { UpdateUserSettingsBody } from "@peek/shared-types";
+import { getErrorMessage } from "../../../api";
+import {
+  useUpdateUserSettings,
+  useUserSettings,
+} from "../../../api/hooks/useUserSettings";
 import { useUnitPreference } from "../../../contexts/UnitPreferenceContext";
+import { useSaveTableColumns } from "../../../hooks/useTableColumns";
 import { showError, showSuccess } from "../../../utils/toast";
+import { StatusMessage } from "../../ui/index";
 import CardDisplaySettings from "../CardDisplaySettings";
 import TableColumnSettings from "../TableColumnSettings";
 
+type ViewPreferenceKey = keyof Pick<
+  UpdateUserSettingsBody,
+  "preferredPreviewQuality" | "wallPlayback" | "lightboxDoubleTapAction"
+>;
+
+/** A stable empty set of table columns, so the editor keeps its edits. */
+const NO_TABLE_DEFAULTS = {};
+
 const CustomizationTab = () => {
-  const [loading, setLoading] = useState(true);
+  // The settings query: a save updates it, and every reader with it. After a
+  // failed load the editors would show defaults, and a table-column save
+  // would replace every stored entity's columns: show Retry instead
+  const { data, isPending, error, refetch } = useUserSettings();
+  const save = useUpdateUserSettings();
+  const saveTableColumns = useSaveTableColumns();
   const { unitPreference, setUnitPreference } = useUnitPreference();
-  const [preferredPreviewQuality, setPreferredPreviewQuality] = useState("sprite");
-  const [wallPlayback, setWallPlayback] = useState("autoplay");
-  const [lightboxDoubleTapAction, setLightboxDoubleTapAction] = useState("favorite");
-  const [tableColumnDefaults, setTableColumnDefaults] = useState<Record<string, { visible: string[]; order: string[] }>>({});
+  const settings = data?.settings;
+  const preferredPreviewQuality = settings?.preferredPreviewQuality ?? "sprite";
+  const wallPlayback = settings?.wallPlayback ?? "autoplay";
+  const lightboxDoubleTapAction =
+    settings?.lightboxDoubleTapAction ?? "favorite";
+  const tableColumnDefaults =
+    settings?.tableColumnDefaults ?? NO_TABLE_DEFAULTS;
 
-  // Load settings on mount
-  useEffect(() => {
-    const loadSettings = async () => {
-      try {
-        setLoading(true);
-        const data = await apiGet<{ settings: Record<string, unknown> }>("/user/settings");
-        const { settings } = data;
-
-        setPreferredPreviewQuality((settings.preferredPreviewQuality as string) || "sprite");
-        setWallPlayback((settings.wallPlayback as string) || "autoplay");
-        setLightboxDoubleTapAction((settings.lightboxDoubleTapAction as string) || "favorite");
-        setTableColumnDefaults((settings.tableColumnDefaults as Record<string, { visible: string[]; order: string[] }>) || {});
-      } catch {
-        showError("Failed to load customization settings");
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    loadSettings();
-  }, []);
-
-  const saveViewPreference = async (key: string, value: string) => {
+  const saveViewPreference = async (key: ViewPreferenceKey, value: string) => {
     try {
-      await apiPut("/user/settings", {
-        [key]: value,
-      });
-
-      if (key === "preferredPreviewQuality") {
-        setPreferredPreviewQuality(value);
-      } else if (key === "wallPlayback") {
-        setWallPlayback(value);
-      } else if (key === "lightboxDoubleTapAction") {
-        setLightboxDoubleTapAction(value);
-      }
+      await save.mutateAsync({ [key]: value });
       showSuccess("View preference saved!");
     } catch (err) {
-      showError((err as Error).message || "Failed to save view preference");
+      showError(getErrorMessage(err, "Failed to save view preference"));
     }
   };
 
-  const saveTableColumnDefaults = async (newDefaults: Record<string, { visible: string[]; order: string[] }>) => {
-    try {
-      await apiPut("/user/settings", {
-        tableColumnDefaults: newDefaults,
-      });
-      setTableColumnDefaults(newDefaults);
-      showSuccess("Table column defaults saved!");
-    } catch (err) {
-      showError(
-        (err as Error).message || "Failed to save table column defaults"
-      );
-    }
+  // The edited types over the latest saved map, through the tables' save
+  // queue. A failure is reported there and rethrown, so the editor keeps its
+  // changes marked unsaved
+  const saveTableColumnDefaults = async (
+    edited: Record<string, { visible: string[]; order: string[] }>
+  ) => {
+    await saveTableColumns(edited);
+    showSuccess("Table columns saved!");
   };
 
-  if (loading) {
+  if (isPending) {
     return (
       <div
         className="flex items-center justify-center p-12"
@@ -76,6 +62,17 @@ const CustomizationTab = () => {
       >
         <div className="animate-spin w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full"></div>
       </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <StatusMessage
+        variant="error"
+        title="Failed to load customization settings"
+        message={getErrorMessage(error)}
+        onRetry={() => void refetch()}
+      />
     );
   }
 
@@ -108,7 +105,12 @@ const CustomizationTab = () => {
             <select
               id="preferredPreviewQuality"
               value={preferredPreviewQuality}
-              onChange={(e) => saveViewPreference("preferredPreviewQuality", e.target.value)}
+              onChange={(e) =>
+                void saveViewPreference(
+                  "preferredPreviewQuality",
+                  e.target.value
+                )
+              }
               className="w-full px-4 py-2 rounded-lg"
               style={{
                 backgroundColor: "var(--bg-secondary)",
@@ -121,8 +123,8 @@ const CustomizationTab = () => {
               <option value="mp4">High Quality - MP4 Video</option>
             </select>
             <p className="text-sm mt-1" style={{ color: "var(--text-muted)" }}>
-              Quality of preview animations shown when hovering over scene cards. Low
-              quality (sprite) uses less bandwidth.
+              Quality of preview animations shown when hovering over scene
+              cards. Low quality (sprite) uses less bandwidth.
             </p>
           </div>
 
@@ -138,7 +140,9 @@ const CustomizationTab = () => {
             <select
               id="wallPlayback"
               value={wallPlayback}
-              onChange={(e) => saveViewPreference("wallPlayback", e.target.value)}
+              onChange={(e) =>
+                void saveViewPreference("wallPlayback", e.target.value)
+              }
               className="w-full px-4 py-2 rounded-lg"
               style={{
                 backgroundColor: "var(--bg-secondary)",
@@ -151,9 +155,9 @@ const CustomizationTab = () => {
               <option value="static">Static Thumbnails</option>
             </select>
             <p className="text-sm mt-1" style={{ color: "var(--text-muted)" }}>
-              Controls how scene previews behave in Wall view. Autoplay plays all visible
-              previews simultaneously. Hover only plays when you mouse over. Static shows
-              thumbnails only.
+              Controls how scene previews behave in Wall view. Autoplay plays
+              all visible previews simultaneously. Hover only plays when you
+              mouse over. Static shows thumbnails only.
             </p>
           </div>
 
@@ -169,7 +173,7 @@ const CustomizationTab = () => {
             <select
               id="unitPreference"
               value={unitPreference}
-              onChange={(e) => (setUnitPreference as (v: string) => void)(e.target.value)}
+              onChange={(e) => void setUnitPreference(e.target.value)}
               className="w-full px-4 py-2 rounded-lg"
               style={{
                 backgroundColor: "var(--bg-secondary)",
@@ -181,8 +185,8 @@ const CustomizationTab = () => {
               <option value="imperial">Imperial (ft/in, lbs)</option>
             </select>
             <p className="text-sm mt-1" style={{ color: "var(--text-muted)" }}>
-              Display performer height, weight, and measurements in your preferred unit
-              system.
+              Display performer height, weight, and measurements in your
+              preferred unit system.
             </p>
           </div>
 
@@ -198,7 +202,12 @@ const CustomizationTab = () => {
             <select
               id="lightboxDoubleTapAction"
               value={lightboxDoubleTapAction}
-              onChange={(e) => saveViewPreference("lightboxDoubleTapAction", e.target.value)}
+              onChange={(e) =>
+                void saveViewPreference(
+                  "lightboxDoubleTapAction",
+                  e.target.value
+                )
+              }
               className="w-full px-4 py-2 rounded-lg"
               style={{
                 backgroundColor: "var(--bg-secondary)",
@@ -211,8 +220,8 @@ const CustomizationTab = () => {
               <option value="fullscreen">Toggle Fullscreen</option>
             </select>
             <p className="text-sm mt-1" style={{ color: "var(--text-muted)" }}>
-              Action performed when double-tapping (mobile) or double-clicking (desktop) an
-              image in the lightbox.
+              Action performed when double-tapping (mobile) or double-clicking
+              (desktop) an image in the lightbox.
             </p>
           </div>
         </div>
@@ -229,7 +238,7 @@ const CustomizationTab = () => {
         <CardDisplaySettings />
       </div>
 
-      {/* Table Column Defaults */}
+      {/* Table columns (the ones each table saves) */}
       <div
         className="p-6 rounded-lg border"
         style={{

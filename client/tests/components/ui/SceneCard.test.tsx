@@ -1,9 +1,35 @@
-import { describe, it, expect } from "vitest";
-import { createElement } from "react";
+import { type ComponentProps, createElement } from "react";
+import { RouterProvider, createMemoryRouter } from "react-router-dom";
+import type { NormalizedScene } from "@peek/shared-types";
+import { act, fireEvent, render, screen } from "@testing-library/react";
+import { must } from "@tests/testUtils";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import SceneCard from "../../../src/components/ui/SceneCard";
 
+vi.mock("../../../src/contexts/CardDisplaySettingsContext", () => ({
+  useCardDisplaySettings: () => ({ getSettings: () => ({}) }),
+}));
+vi.mock("../../../src/contexts/ConfigContext", () => ({
+  useConfig: () => ({ hasMultipleInstances: false }),
+}));
+vi.mock("../../../src/hooks/useTVMode", () => ({
+  useTVMode: () => ({ isTVMode: false }),
+}));
+vi.mock("../../../src/components/ui/index", () => ({
+  SceneCardPreview: () => null,
+  TooltipEntityGrid: () => null,
+}));
+
+/** SceneCard renders from these fields; the rest are left out */
+const partialScene = (
+  fields: Partial<Omit<NormalizedScene, "paths" | "files">> & {
+    paths: Partial<NormalizedScene["paths"]>;
+    files: Partial<NormalizedScene["files"][number]>[];
+  }
+) => fields as NormalizedScene;
+
 describe("SceneCard", () => {
-  const mockScene = {
+  const mockScene = partialScene({
     id: "1",
     title: "Test Scene",
     paths: { screenshot: "/screenshot.jpg" },
@@ -16,7 +42,7 @@ describe("SceneCard", () => {
     performers: [],
     tags: [],
     studio: null,
-  };
+  });
 
   it("is a React forwardRef component", () => {
     expect(typeof SceneCard).toBe("object");
@@ -24,7 +50,7 @@ describe("SceneCard", () => {
   });
 
   it("accepts expected props", () => {
-    const element = createElement(SceneCard as any, {
+    const element = createElement(SceneCard, {
       scene: mockScene,
       fromPageTitle: "Performers",
       tabIndex: 0,
@@ -35,7 +61,7 @@ describe("SceneCard", () => {
   });
 
   it("accepts fromPageTitle prop", () => {
-    const element = createElement(SceneCard as any, {
+    const element = createElement(SceneCard, {
       scene: mockScene,
       fromPageTitle: "My Tag Name",
     });
@@ -47,7 +73,7 @@ describe("SceneCard", () => {
 
   it("accepts onClick callback", () => {
     const onClick = () => {};
-    const element = createElement(SceneCard as any, {
+    const element = createElement(SceneCard, {
       scene: mockScene,
       onClick,
     });
@@ -57,11 +83,206 @@ describe("SceneCard", () => {
 
   it("accepts onHideSuccess callback", () => {
     const onHideSuccess = () => {};
-    const element = createElement(SceneCard as any, {
+    const element = createElement(SceneCard, {
       scene: mockScene,
       onHideSuccess,
     });
 
     expect(element.props.onHideSuccess).toBe(onHideSuccess);
+  });
+});
+
+describe("navigation", () => {
+  const scene = partialScene({
+    id: "1",
+    instanceId: "inst-1",
+    title: "Test Scene",
+    paths: { screenshot: "/screenshot.jpg" },
+    files: [{ duration: 3600 }],
+    performers: [],
+    groups: [],
+    galleries: [],
+    tags: [],
+    inheritedTags: [],
+  });
+
+  const renderCard = (onClick?: (s: unknown) => void) => {
+    const router = createMemoryRouter(
+      [
+        {
+          path: "/scenes",
+          element: (
+            <SceneCard scene={scene} onClick={onClick} hideRatingControls />
+          ),
+        },
+        { path: "/scene/:id", element: <div>scene page</div> },
+      ],
+      { initialEntries: ["/scenes"] }
+    );
+    const utils = render(<RouterProvider router={router} />);
+    const [imageLink] = Array.from(
+      utils.container.querySelectorAll<HTMLAnchorElement>('a[href="/scene/1"]')
+    );
+    const titleLink = must(
+      screen.getByText("Test Scene").closest("a"),
+      "title link"
+    );
+    const card = must(
+      utils.container.firstElementChild as HTMLElement | null,
+      "card"
+    );
+    return { router, imageLink, titleLink, card };
+  };
+
+  it("clicking the title calls onClick once and navigates nothing else", () => {
+    const onClick = vi.fn();
+    const { router, titleLink } = renderCard(onClick);
+
+    fireEvent.click(titleLink);
+
+    expect(router.state.location.pathname).toBe("/scenes");
+    expect(onClick).toHaveBeenCalledTimes(1);
+    expect(onClick).toHaveBeenCalledWith(scene);
+  });
+
+  it("clicking the image does the same", () => {
+    const onClick = vi.fn();
+    const { router, imageLink, titleLink } = renderCard(onClick);
+    expect(imageLink).not.toBe(titleLink);
+
+    fireEvent.click(must(imageLink));
+
+    expect(router.state.location.pathname).toBe("/scenes");
+    expect(onClick).toHaveBeenCalledTimes(1);
+    expect(onClick).toHaveBeenCalledWith(scene);
+  });
+
+  it("without onClick, the title link navigates to the scene", () => {
+    const { router, titleLink } = renderCard();
+
+    fireEvent.click(titleLink);
+
+    expect(router.state.location.pathname).toBe("/scene/1");
+  });
+
+  it("Enter on a focused scene card calls onClick with the scene (the page's playlist handler), like a click", () => {
+    const onClick = vi.fn();
+    const { router, card } = renderCard(onClick);
+
+    card.focus();
+    fireEvent.keyDown(card, { key: "Enter" });
+
+    expect(onClick).toHaveBeenCalledTimes(1);
+    expect(onClick).toHaveBeenCalledWith(scene);
+    expect(router.state.location.pathname).toBe("/scenes");
+  });
+
+  it("Enter on the card without onClick opens the scene like the link", () => {
+    const { router, card } = renderCard();
+
+    card.focus();
+    fireEvent.keyDown(card, { key: "Enter" });
+
+    expect(router.state.location.pathname).toBe("/scene/1");
+  });
+});
+
+describe("selection checkbox", () => {
+  const scene = partialScene({
+    id: "1",
+    instanceId: "inst-1",
+    title: "Test Scene",
+    paths: { screenshot: "/screenshot.jpg" },
+    files: [{ duration: 3600 }],
+    performers: [],
+    groups: [],
+    galleries: [],
+    tags: [],
+    inheritedTags: [],
+  });
+
+  const renderCard = (props: Partial<ComponentProps<typeof SceneCard>>) => {
+    const router = createMemoryRouter([
+      {
+        path: "/",
+        element: <SceneCard scene={scene} hideRatingControls {...props} />,
+      },
+    ]);
+    return render(<RouterProvider router={router} />);
+  };
+
+  it("no selection checkbox without onToggleSelect", () => {
+    renderCard({});
+
+    // The folder and timeline views render cards that cannot select
+    expect(screen.queryByRole("button", { name: /select scene/i })).toBeNull();
+  });
+
+  it("the checkbox reports a range when shift is held", () => {
+    const onToggleSelect = vi.fn();
+    renderCard({ onToggleSelect });
+    const checkbox = screen.getByRole("button", { name: /select scene/i });
+
+    fireEvent.click(checkbox);
+    fireEvent.click(checkbox, { shiftKey: true });
+
+    expect(onToggleSelect).toHaveBeenNthCalledWith(1, scene, { range: false });
+    expect(onToggleSelect).toHaveBeenNthCalledWith(2, scene, { range: true });
+  });
+});
+
+describe("screenshot", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("the card image draws no img of its own: the preview draws the screenshot", async () => {
+    // Everything observed is reported visible
+    vi.stubGlobal(
+      "IntersectionObserver",
+      class {
+        constructor(private readonly callback: IntersectionObserverCallback) {}
+        observe(target: Element) {
+          queueMicrotask(() =>
+            this.callback(
+              [
+                {
+                  target,
+                  isIntersecting: true,
+                  intersectionRatio: 1,
+                } as IntersectionObserverEntry,
+              ],
+              this as unknown as IntersectionObserver
+            )
+          );
+        }
+        unobserve() {}
+        disconnect() {}
+      }
+    );
+    const scene = partialScene({
+      id: "1",
+      instanceId: "inst-1",
+      title: "Test Scene",
+      paths: { screenshot: "/screenshot.jpg" },
+      files: [{ duration: 3600 }],
+      performers: [],
+      tags: [],
+    });
+    const router = createMemoryRouter(
+      [
+        {
+          path: "/scenes",
+          element: <SceneCard scene={scene} hideRatingControls />,
+        },
+      ],
+      { initialEntries: ["/scenes"] }
+    );
+
+    const { container } = render(<RouterProvider router={router} />);
+    await act(() => Promise.resolve());
+
+    // The preview is mocked out here, so the card itself shows no img
+    expect(container.querySelectorAll("img")).toHaveLength(0);
   });
 });

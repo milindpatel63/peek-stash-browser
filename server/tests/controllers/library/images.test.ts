@@ -1,40 +1,33 @@
 /**
  * Unit Tests for Images Library Controller
  *
- * Tests findImages and findImageById.
- * Note: mergeImagesWithUserData and transformImageResult are private
- * and tested indirectly through the handlers.
+ * Tests findImages: the parsed request reaches the image builder, whose
+ * rows go out as they are, each with its stashUrl.
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { findImages } from "../../../controllers/library/images.js";
+// --- Imports ---
+
+import prisma from "../../../prisma/singleton.js";
+import { imageQueryBuilder } from "../../../services/ImageQueryBuilder.js";
+import type { ImageListItem } from "../../../types/index.js";
+import {
+  malformed,
+  reqFor,
+  resFor,
+  testUser,
+} from "../../helpers/controllerTestUtils.js";
+import { must } from "../../helpers/must.js";
 
 // --- Mocks (must come before module import) ---
 
-vi.mock("../../../prisma/singleton.js", () => ({
-  default: {
-    imageRating: { findMany: vi.fn() },
-    imageViewHistory: { findMany: vi.fn() },
-  },
-}));
-
-vi.mock("../../../services/StashEntityService.js", () => ({
-  stashEntityService: {
-    getImage: vi.fn(),
-  },
-}));
+vi.mock(
+  "../../../prisma/singleton.js",
+  () => import("../../helpers/prismaSingletonMock.js")
+);
 
 vi.mock("../../../services/ImageQueryBuilder.js", () => ({
   imageQueryBuilder: { execute: vi.fn() },
-}));
-
-vi.mock("../../../services/StashInstanceManager.js", () => ({
-  stashInstanceManager: {
-    get: vi.fn(),
-    getDefaultConfig: vi.fn().mockReturnValue({ id: "default" }),
-  },
-}));
-
-vi.mock("../../../services/UserInstanceService.js", () => ({
-  getUserAllowedInstanceIds: vi.fn().mockResolvedValue(["default"]),
 }));
 
 vi.mock("../../../utils/logger.js", () => ({
@@ -44,79 +37,63 @@ vi.mock("../../../utils/logger.js", () => ({
 vi.mock("../../../utils/stashUrl.js", () => ({
   buildStashEntityUrl: vi
     .fn()
-    .mockImplementation((_type, id) => `http://stash/images/${id}`),
+    .mockImplementation(
+      (
+        _type: string,
+        id: string | number,
+        _inst: string | undefined,
+        viewer: { role: string } | undefined
+      ) => (viewer?.role === "ADMIN" ? `http://stash/images/${id}` : null)
+    ),
 }));
 
-// --- Imports ---
-
-import prisma from "../../../prisma/singleton.js";
-import { stashEntityService } from "../../../services/StashEntityService.js";
-import { imageQueryBuilder } from "../../../services/ImageQueryBuilder.js";
-import {
-  findImages,
-  findImageById,
-} from "../../../controllers/library/images.js";
-import { mockReq, mockRes } from "../../helpers/controllerTestUtils.js";
-
-const mockPrisma = vi.mocked(prisma);
-const mockStashEntityService = vi.mocked(stashEntityService);
+const mockPrisma = vi.mocked(prisma, true);
 const mockImageQueryBuilder = vi.mocked(imageQueryBuilder);
 
-const defaultUser = { id: 1, role: "USER" };
-const adminUser = { id: 1, role: "ADMIN" };
+const defaultUser = testUser();
+const adminUser = testUser({ role: "ADMIN" });
 
-/** Helper to create a minimal mock image for query builder results */
-function createQueryBuilderImage(overrides: Record<string, unknown> = {}) {
-  return {
-    id: overrides.id ?? "img1",
-    stashInstanceId: overrides.stashInstanceId ?? "default",
-    instanceId: overrides.instanceId ?? "default",
-    title: overrides.title ?? "Test Image",
-    pathThumbnail: "/api/proxy/image/img1/thumbnail",
-    pathPreview: "/api/proxy/image/img1/preview",
-    pathImage: "/api/proxy/image/img1/image",
-    userRating: overrides.userRating ?? null,
-    userFavorite: overrides.userFavorite ?? 0,
-    userOCount: overrides.userOCount ?? 0,
-    userViewCount: overrides.userViewCount ?? 0,
-    userLastViewedAt: overrides.userLastViewedAt ?? null,
-    stashRating100: overrides.stashRating100 ?? null,
-    stashOCounter: overrides.stashOCounter ?? 0,
-    ...overrides,
+/** A row as the query builder's execute returns it, which the controller sends. */
+function createQueryBuilderImage(
+  overrides: Partial<ImageListItem> = {}
+): ImageListItem {
+  const paths = {
+    thumbnail: "/api/proxy/image/img1/thumbnail",
+    preview: "/api/proxy/image/img1/preview",
+    image: "/api/proxy/image/img1/image",
   };
-}
-
-/** Helper to create a mock NormalizedImage for findImageById */
-function createMockNormalizedImage(overrides: Record<string, unknown> = {}) {
   return {
-    id: overrides.id ?? "img1",
-    instanceId: overrides.instanceId ?? "default",
-    title: overrides.title ?? "Test Image",
+    id: "img1",
+    instanceId: "default",
+    title: "Test Image",
     code: null,
     details: null,
     photographer: null,
+    urls: [],
     date: null,
-    rating100: overrides.rating100 ?? null,
-    o_counter: overrides.o_counter ?? 0,
+    studioId: null,
     organized: false,
-    paths: {
-      thumbnail: "/api/proxy/image/img1/thumbnail",
-      preview: "/api/proxy/image/img1/preview",
-      image: "/api/proxy/image/img1/image",
-    },
-    width: 800,
-    height: 600,
-    filePath: "/path/img1.jpg",
-    fileSize: 1024,
+    filePath: null,
+    width: null,
+    height: null,
+    fileSize: null,
+    paths,
+    stashCreatedAt: null,
+    stashUpdatedAt: null,
+    rating100: null,
+    favorite: false,
+    oCounter: 0,
+    viewCount: 0,
+    lastViewedAt: null,
     performers: [],
     tags: [],
-    studio: null,
     galleries: [],
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
+    studio: null,
     ...overrides,
   };
 }
+
+const bare = (id: string) => ({ id, instanceId: undefined });
 
 describe("Images Controller", () => {
   beforeEach(() => {
@@ -131,345 +108,358 @@ describe("Images Controller", () => {
     it("returns images from query builder on happy path", async () => {
       const images = [createQueryBuilderImage({ id: "img1" })];
       mockImageQueryBuilder.execute.mockResolvedValue({
-        images: images as any,
+        items: images,
         total: 1,
       });
 
-      const req = mockReq(
-        { filter: {}, image_filter: {} },
-        {},
-        defaultUser
-      );
-      const res = mockRes();
+      const req = reqFor(findImages, {
+        body: { filter: {}, image_filter: {} },
+        user: defaultUser,
+        allowedInstanceIds: ["inst-a", "inst-b"],
+      });
+      const res = resFor(findImages);
 
       await findImages(req, res);
 
+      // The builder reads the parsed request and the viewer's instances
+      const call = must(mockImageQueryBuilder.execute.mock.calls[0])[0];
+      expect(call).toMatchObject({
+        userId: 1,
+        allowedInstanceIds: ["inst-a", "inst-b"],
+        request: { page: 1, sort: { field: "title", direction: "ASC" } },
+      });
       expect(res._getStatus()).toBe(200);
-      const body = res._getBody();
+      const body = res._getOkBody();
       expect(body.findImages.count).toBe(1);
       expect(body.findImages.images).toHaveLength(1);
     });
 
-    it("transforms image results with paths object", async () => {
+    it("sends each builder row as it is, with its paths and the viewer's data", async () => {
       const images = [
         createQueryBuilderImage({
           id: "img1",
-          pathThumbnail: "/thumb",
-          pathPreview: "/prev",
-          pathImage: "/full",
+          paths: { thumbnail: "/thumb", preview: "/prev", image: "/full" },
+          rating100: 60,
+          oCounter: 2,
         }),
       ];
       mockImageQueryBuilder.execute.mockResolvedValue({
-        images: images as any,
+        items: images,
         total: 1,
       });
 
-      const req = mockReq(
-        { filter: {}, image_filter: {} },
-        {},
-        defaultUser
-      );
-      const res = mockRes();
+      const req = reqFor(findImages, {
+        body: { filter: {}, image_filter: {} },
+        user: defaultUser,
+      });
+      const res = resFor(findImages);
 
       await findImages(req, res);
 
-      const body = res._getBody();
-      const img = body.findImages.images[0];
-      expect(img.paths).toEqual({
-        thumbnail: "/thumb",
-        preview: "/prev",
-        image: "/full",
+      const body = res._getOkBody();
+      const img = must(body.findImages.images[0]);
+      expect(img).toMatchObject({
+        paths: { thumbnail: "/thumb", preview: "/prev", image: "/full" },
+        rating100: 60,
+        oCounter: 2,
       });
     });
 
-    it("adds stashUrl to each image", async () => {
+    it("adds stashUrl to each image for an admin", async () => {
       const images = [createQueryBuilderImage({ id: "img1" })];
       mockImageQueryBuilder.execute.mockResolvedValue({
-        images: images as any,
+        items: images,
         total: 1,
       });
 
-      const req = mockReq(
-        { filter: {}, image_filter: {} },
-        {},
-        defaultUser
-      );
-      const res = mockRes();
+      const req = reqFor(findImages, {
+        body: { filter: {}, image_filter: {} },
+        user: adminUser,
+      });
+      const res = resFor(findImages);
 
       await findImages(req, res);
 
-      const body = res._getBody();
-      expect(body.findImages.images[0].stashUrl).toBe(
+      const body = res._getOkBody();
+      expect(must(body.findImages.images[0])).toHaveProperty(
+        "stashUrl",
         "http://stash/images/img1"
       );
     });
 
+    it("does not send stashUrl to a regular user", async () => {
+      mockImageQueryBuilder.execute.mockResolvedValue({
+        items: [
+          createQueryBuilderImage({ id: "img1" }),
+          createQueryBuilderImage({ id: "img2" }),
+        ],
+        total: 2,
+      });
+
+      const req = reqFor(findImages, {
+        body: { filter: {}, image_filter: {} },
+        user: defaultUser,
+      });
+      const res = resFor(findImages);
+
+      await findImages(req, res);
+
+      const images = res._getOkBody().findImages.images;
+      expect(images).toHaveLength(2);
+      for (const image of images)
+        expect(image).toHaveProperty("stashUrl", null);
+    });
+
     it("passes filter parameters to query builder", async () => {
       mockImageQueryBuilder.execute.mockResolvedValue({
-        images: [],
+        items: [],
         total: 0,
       });
 
-      const req = mockReq(
-        {
+      const req = reqFor(findImages, {
+        body: {
           filter: { sort: "title", direction: "DESC", page: 2, per_page: 20 },
           image_filter: {
             favorite: true,
             rating100: { modifier: "GREATER_THAN", value: 50 },
           },
         },
-        {},
-        defaultUser
-      );
-      const res = mockRes();
+        user: defaultUser,
+      });
+      const res = resFor(findImages);
 
       await findImages(req, res);
 
-      expect(mockImageQueryBuilder.execute).toHaveBeenCalledWith(
-        expect.objectContaining({
-          userId: 1,
-          sort: "title",
-          sortDirection: "DESC",
-          page: 2,
-          perPage: 20,
-        })
-      );
+      const { request } = must(mockImageQueryBuilder.execute.mock.calls[0])[0];
+      expect(request).toMatchObject({
+        page: 2,
+        perPage: 20,
+        sort: { field: "title", direction: "DESC" },
+        filter: {
+          favorite: true,
+          rating100: { modifier: "GREATER_THAN", value: 50 },
+        },
+      });
     });
 
     it("builds filters from image_filter body", async () => {
       mockImageQueryBuilder.execute.mockResolvedValue({
-        images: [],
+        items: [],
         total: 0,
       });
 
-      const req = mockReq(
-        {
+      const req = reqFor(findImages, {
+        body: {
           filter: {},
           image_filter: {
-            performers: { value: ["p1"], modifier: "INCLUDES" },
-            tags: { value: ["t1"], modifier: "INCLUDES" },
-            studios: { value: ["s1"] },
-            galleries: { value: ["g1"] },
+            performers: { value: ["11"], modifier: "INCLUDES" },
+            tags: { value: ["12:inst-a"], modifier: "INCLUDES", depth: -1 },
+            studios: { value: ["13"] },
+            galleries: { value: ["14"] },
           },
         },
-        {},
-        defaultUser
-      );
-      const res = mockRes();
+        user: defaultUser,
+      });
+      const res = resFor(findImages);
 
       await findImages(req, res);
 
-      const callArgs = mockImageQueryBuilder.execute.mock.calls[0][0];
-      expect(callArgs.filters.performers).toEqual({
-        value: ["p1"],
+      const { filter } = must(mockImageQueryBuilder.execute.mock.calls[0])[0]
+        .request;
+      expect(filter.performers).toEqual({
+        refs: [bare("11")],
         modifier: "INCLUDES",
+        depth: 0,
       });
-      expect(callArgs.filters.tags).toEqual({
-        value: ["t1"],
+      expect(filter.tags).toEqual({
+        refs: [{ id: "12", instanceId: "inst-a" }],
         modifier: "INCLUDES",
+        depth: -1,
       });
-      expect(callArgs.filters.studios).toEqual({
-        value: ["s1"],
+      expect(filter.studios).toEqual({
+        refs: [bare("13")],
         modifier: "INCLUDES",
+        depth: 0,
       });
-      expect(callArgs.filters.galleries).toEqual({
-        value: ["g1"],
+      expect(filter.galleries).toEqual({
+        refs: [bare("14")],
         modifier: "INCLUDES",
+        depth: 0,
       });
+    });
+
+    it("passes image_filter.instance_id as the specific instance", async () => {
+      mockImageQueryBuilder.execute.mockResolvedValue({
+        items: [],
+        total: 0,
+      });
+
+      const req = reqFor(findImages, {
+        body: { ids: ["201"], image_filter: { instance_id: "inst-b" } },
+        user: defaultUser,
+      });
+      const res = resFor(findImages);
+
+      await findImages(req, res);
+
+      const { request } = must(mockImageQueryBuilder.execute.mock.calls[0])[0];
+      expect(request.specificInstanceId).toBe("inst-b");
+      expect(request.filter.ids).toEqual({
+        refs: [bare("201")],
+        modifier: "INCLUDES",
+        depth: 0,
+      });
+    });
+
+    it("answers the ambiguous lookup for one bare id found on two instances", async () => {
+      mockImageQueryBuilder.execute.mockResolvedValue({
+        items: [
+          createQueryBuilderImage({ id: "201", instanceId: "inst-a" }),
+          createQueryBuilderImage({ id: "201", instanceId: "inst-b" }),
+        ],
+        total: 2,
+      });
+
+      const req = reqFor(findImages, {
+        body: { ids: ["201"] },
+        user: defaultUser,
+      });
+      const res = resFor(findImages);
+
+      await findImages(req, res);
+
+      expect(res._getStatus()).toBe(400);
+      expect(res._getBody()).toMatchObject({
+        error: "Ambiguous lookup",
+        matches: [
+          { id: "201", instanceId: "inst-a" },
+          { id: "201", instanceId: "inst-b" },
+        ],
+      });
+    });
+
+    it("an unknown image_filter key answers 400 before any query", async () => {
+      const req = reqFor(findImages, {
+        body: malformed({ image_filter: { not_a_field: true } }),
+        user: defaultUser,
+      });
+      const res = resFor(findImages);
+
+      await expect(findImages(req, res)).rejects.toMatchObject({
+        statusCode: 400,
+        issues: [{ path: "image_filter.not_a_field" }],
+      });
+      expect(mockImageQueryBuilder.execute).not.toHaveBeenCalled();
     });
 
     it("supports top-level ids parameter", async () => {
       mockImageQueryBuilder.execute.mockResolvedValue({
-        images: [],
+        items: [],
         total: 0,
       });
 
-      const req = mockReq(
-        { filter: {}, ids: ["img1", "img2"] },
-        {},
-        defaultUser
-      );
-      const res = mockRes();
+      const req = reqFor(findImages, {
+        body: { filter: {}, ids: ["201", "202:inst-b"] },
+        user: defaultUser,
+      });
+      const res = resFor(findImages);
 
       await findImages(req, res);
 
-      const callArgs = mockImageQueryBuilder.execute.mock.calls[0][0];
-      expect(callArgs.filters.ids).toEqual({
-        value: ["img1", "img2"],
+      const { request } = must(mockImageQueryBuilder.execute.mock.calls[0])[0];
+      expect(request.filter.ids).toEqual({
+        refs: [bare("201"), { id: "202", instanceId: "inst-b" }],
         modifier: "INCLUDES",
+        depth: 0,
       });
     });
 
     it("parses random_<seed> sort field", async () => {
       mockImageQueryBuilder.execute.mockResolvedValue({
-        images: [],
+        items: [],
         total: 0,
       });
 
-      const req = mockReq(
-        { filter: { sort: "random_12345" }, image_filter: {} },
-        {},
-        defaultUser
-      );
-      const res = mockRes();
+      const req = reqFor(findImages, {
+        body: { filter: { sort: "random_12345" }, image_filter: {} },
+        user: defaultUser,
+      });
+      const res = resFor(findImages);
 
       await findImages(req, res);
 
-      const callArgs = mockImageQueryBuilder.execute.mock.calls[0][0];
-      expect(callArgs.sort).toBe("random");
-      expect(callArgs.randomSeed).toBe(12345);
+      const { request } = must(mockImageQueryBuilder.execute.mock.calls[0])[0];
+      expect(request.sort).toMatchObject({ field: "random", seed: 12345 });
     });
 
     it("handles bare 'random' sort field", async () => {
       mockImageQueryBuilder.execute.mockResolvedValue({
-        images: [],
+        items: [],
         total: 0,
       });
 
-      const req = mockReq(
-        { filter: { sort: "random" }, image_filter: {} },
-        {},
-        defaultUser
-      );
-      const res = mockRes();
+      const req = reqFor(findImages, {
+        body: { filter: { sort: "random" }, image_filter: {} },
+        user: defaultUser,
+      });
+      const res = resFor(findImages);
 
       await findImages(req, res);
 
-      const callArgs = mockImageQueryBuilder.execute.mock.calls[0][0];
-      expect(callArgs.randomSeed).toBeDefined();
-      expect(typeof callArgs.randomSeed).toBe("number");
+      const { request } = must(mockImageQueryBuilder.execute.mock.calls[0])[0];
+      expect(request.sort.field).toBe("random");
+      expect(typeof request.sort.seed).toBe("number");
     });
 
-    it("admins skip exclusions", async () => {
+    it("admins apply exclusions too", async () => {
+      // Their rows hold only their own hides and cascades (item 13)
       mockImageQueryBuilder.execute.mockResolvedValue({
-        images: [],
+        items: [],
         total: 0,
       });
 
-      const req = mockReq(
-        { filter: {}, image_filter: {} },
-        {},
-        adminUser
-      );
-      const res = mockRes();
+      const req = reqFor(findImages, {
+        body: { filter: {}, image_filter: {} },
+        user: adminUser,
+      });
+      const res = resFor(findImages);
 
       await findImages(req, res);
 
-      const callArgs = mockImageQueryBuilder.execute.mock.calls[0][0];
-      expect(callArgs.applyExclusions).toBe(false);
+      const callArgs = must(mockImageQueryBuilder.execute.mock.calls[0])[0];
+      expect(callArgs.applyExclusions).toBe(true);
     });
 
     it("non-admins apply exclusions", async () => {
       mockImageQueryBuilder.execute.mockResolvedValue({
-        images: [],
+        items: [],
         total: 0,
       });
 
-      const req = mockReq(
-        { filter: {}, image_filter: {} },
-        {},
-        defaultUser
-      );
-      const res = mockRes();
+      const req = reqFor(findImages, {
+        body: { filter: {}, image_filter: {} },
+        user: defaultUser,
+      });
+      const res = resFor(findImages);
 
       await findImages(req, res);
 
-      const callArgs = mockImageQueryBuilder.execute.mock.calls[0][0];
+      const callArgs = must(mockImageQueryBuilder.execute.mock.calls[0])[0];
       expect(callArgs.applyExclusions).toBe(true);
     });
 
-    it("returns 500 when query builder throws", async () => {
-      mockImageQueryBuilder.execute.mockRejectedValue(
-        new Error("DB error")
-      );
+    it("a failure reaches the error handler: query builder throws", async () => {
+      mockImageQueryBuilder.execute.mockRejectedValue(new Error("DB error"));
 
-      const req = mockReq({ filter: {} }, {}, defaultUser);
-      const res = mockRes();
-
-      await findImages(req, res);
-
-      expect(res._getStatus()).toBe(500);
-      expect(res._getBody().error).toBe("Failed to find images");
-    });
-  });
-
-  // ─── findImageById ──────────────────────────────────────────
-
-  describe("findImageById", () => {
-    it("returns image with merged user data on happy path", async () => {
-      const image = createMockNormalizedImage({ id: "img1" });
-      mockStashEntityService.getImage.mockResolvedValue(image as any);
-
-      const req = mockReq({}, { id: "img1" }, defaultUser, {});
-      const res = mockRes();
-
-      await findImageById(req, res);
-
-      expect(res._getStatus()).toBe(200);
-      const body = res._getBody();
-      expect(body.id).toBe("img1");
-      expect(body.stashUrl).toBe("http://stash/images/img1");
-    });
-
-    it("returns 404 when image not found", async () => {
-      mockStashEntityService.getImage.mockResolvedValue(null as any);
-
-      const req = mockReq({}, { id: "missing" }, defaultUser, {});
-      const res = mockRes();
-
-      await findImageById(req, res);
-
-      expect(res._getStatus()).toBe(404);
-      expect(res._getBody().error).toBe("Image not found");
-    });
-
-    it("uses instanceId from query parameter", async () => {
-      const image = createMockNormalizedImage({
-        id: "img1",
-        instanceId: "custom-inst",
+      const req = reqFor(findImages, {
+        body: { filter: {} },
+        user: defaultUser,
       });
-      mockStashEntityService.getImage.mockResolvedValue(image as any);
+      const res = resFor(findImages);
 
-      const req = mockReq({}, { id: "img1" }, defaultUser, {
-        instanceId: "custom-inst",
-      });
-      const res = mockRes();
+      await expect(findImages(req, res)).rejects.toThrow("DB error");
 
-      await findImageById(req, res);
-
-      expect(mockStashEntityService.getImage).toHaveBeenCalledWith(
-        "img1",
-        "custom-inst"
-      );
-    });
-
-    it("falls back to default instance when no query param", async () => {
-      const image = createMockNormalizedImage({ id: "img1" });
-      mockStashEntityService.getImage.mockResolvedValue(image as any);
-
-      const req = mockReq({}, { id: "img1" }, defaultUser, {});
-      const res = mockRes();
-
-      await findImageById(req, res);
-
-      expect(mockStashEntityService.getImage).toHaveBeenCalledWith(
-        "img1",
-        "default"
-      );
-    });
-
-    it("returns 500 on error", async () => {
-      mockStashEntityService.getImage.mockRejectedValue(
-        new Error("service fail")
-      );
-
-      const req = mockReq({}, { id: "img1" }, defaultUser, {});
-      const res = mockRes();
-
-      await findImageById(req, res);
-
-      expect(res._getStatus()).toBe(500);
-      expect(res._getBody().error).toBe("Failed to find image");
+      expect(res.json).not.toHaveBeenCalled();
     });
   });
 });

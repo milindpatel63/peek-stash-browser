@@ -20,7 +20,10 @@ export type InstanceAwareId = string & { readonly __brand: "InstanceAwareId" };
  * @param instanceId - The Stash instance ID
  * @returns Branded composite key "id:instanceId"
  */
-export function makeEntityRef(id: string | number, instanceId: string): InstanceAwareId {
+export function makeEntityRef(
+  id: string | number,
+  instanceId: string
+): InstanceAwareId {
   return `${id}:${instanceId}` as InstanceAwareId;
 }
 
@@ -32,12 +35,18 @@ export function makeEntityRef(id: string | number, instanceId: string): Instance
  * @param ref - A composite key string ("id:instanceId") or bare ID
  * @returns Parsed components; instanceId is undefined for bare IDs
  */
-export function parseEntityRef(ref: string): { id: string; instanceId: string | undefined } {
+export function parseEntityRef(ref: string): {
+  id: string;
+  instanceId: string | undefined;
+} {
   if (!ref) return { id: ref, instanceId: undefined };
   const str = String(ref);
   const colonIdx = str.indexOf(":");
   if (colonIdx === -1) return { id: str, instanceId: undefined };
-  return { id: str.substring(0, colonIdx), instanceId: str.substring(colonIdx + 1) };
+  return {
+    id: str.substring(0, colonIdx),
+    instanceId: str.substring(colonIdx + 1),
+  };
 }
 
 /**
@@ -56,18 +65,4 @@ export function assertEntityRef(value: string): InstanceAwareId {
     throw new Error(`Expected composite key "id:instanceId", got "${value}"`);
   }
   return value as InstanceAwareId;
-}
-
-/**
- * Coerce a string array to InstanceAwareId[] at API boundaries.
- *
- * This is an explicit trust boundary — the caller acknowledges these
- * values are entity references (potentially composite keys from the client).
- * The runtime behavior is unchanged; composite key parsing already handles
- * both bare and composite formats.
- *
- * Use at route handlers where filter values arrive from the client.
- */
-export function coerceEntityRefs(values: string[]): InstanceAwareId[] {
-  return values as InstanceAwareId[];
 }

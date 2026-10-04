@@ -1,23 +1,20 @@
 import express from "express";
 import {
   clearAllWatchHistory,
-  getAllWatchHistory,
+  decrementOCounter,
   getWatchHistory,
+  getWatchedScenes,
   incrementOCounter,
   incrementPlayCount,
-  pingWatchHistory,
   saveActivity,
 } from "../controllers/watchHistory.js";
-import { authenticate } from "../middleware/auth.js";
-import { authenticated } from "../utils/routeHelpers.js";
+import { authenticate, requireCacheReady } from "../middleware/auth.js";
+import { authenticated, libraryHandler } from "../utils/routeHelpers.js";
 
 const router = express.Router();
 
 // All watch history routes require authentication
 router.use(authenticate);
-
-// Ping watch history (legacy - called every 30 seconds during playback)
-router.post("/ping", authenticated(pingWatchHistory));
 
 // Save activity (called by track-activity plugin every 10 seconds)
 router.post("/save-activity", authenticated(saveActivity));
@@ -28,11 +25,15 @@ router.post("/increment-play-count", authenticated(incrementPlayCount));
 // Increment O counter
 router.post("/increment-o", authenticated(incrementOCounter));
 
-// Get all watch history for current user (Continue Watching carousel)
-router.get("/", authenticated(getAllWatchHistory));
+// Remove the newest O ("Remove last O")
+router.post("/decrement-o", authenticated(decrementOCounter));
 
 // Clear all watch history for current user
 router.delete("/", authenticated(clearAllWatchHistory));
+
+// The viewer's watched scenes, paged, sorted and filtered in SQL (before
+// /:sceneId, which would take "scenes" as an id)
+router.get("/scenes", requireCacheReady, libraryHandler(getWatchedScenes));
 
 // Get watch history for specific scene
 router.get("/:sceneId", authenticated(getWatchHistory));

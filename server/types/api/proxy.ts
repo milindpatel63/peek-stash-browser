@@ -4,8 +4,8 @@
  *
  * Types for the internal HTTP proxy that forwards requests to Stash instances.
  */
-
 import type { Response } from "express";
+import type { OutgoingHttpHeaders } from "http";
 
 /**
  * Options for the shared proxy HTTP request helper
@@ -16,4 +16,14 @@ export interface ProxyOptions {
   label: string;
   defaultCacheControl: string;
   timeoutMs: number;
+  /**
+   * Headers sent to Stash: the browser's `Range`, `If-Range`, `If-None-Match`
+   * and `If-Modified-Since`, when it sent them
+   */
+  requestHeaders: OutgoingHttpHeaders;
+  /**
+   * The browser sent HEAD. Stash refuses HEAD (405), so Stash is asked with a
+   * GET for one byte and the browser gets the headers and no body
+   */
+  headOnly: boolean;
 }

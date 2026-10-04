@@ -1,0 +1,2219 @@
+{
+  "options": [
+    {
+      "type": "section-header",
+      "label": "Common Filters",
+      "key": "section-common",
+      "collapsible": true,
+      "defaultOpen": true
+    },
+    {
+      "key": "name",
+      "label": "Name Search",
+      "type": "text",
+      "defaultValue": "",
+      "placeholder": "Search name...",
+      "maxLength": 500
+    },
+    {
+      "key": "tagIds",
+      "label": "Tags",
+      "type": "searchable-select",
+      "entityType": "tags",
+      "multi": true,
+      "defaultValue": [],
+      "placeholder": "Select tags...",
+      "modifierOptions": [
+        {
+          "value": "INCLUDES_ALL",
+          "label": "Has ALL of these"
+        },
+        {
+          "value": "INCLUDES",
+          "label": "Has ANY of these"
+        },
+        {
+          "value": "EXCLUDES",
+          "label": "Has NONE of these"
+        },
+        {
+          "value": "IS_NULL",
+          "label": "Has none"
+        },
+        {
+          "value": "NOT_NULL",
+          "label": "Has any"
+        }
+      ],
+      "modifierKey": "tagIdsModifier",
+      "defaultModifier": "INCLUDES_ALL",
+      "supportsHierarchy": true,
+      "hierarchyKey": "tagIdsDepth",
+      "hierarchyLabel": "Include sub-tags",
+      "countFilterContext": "performers",
+      "excludeKey": "tagIdsExclude"
+    },
+    {
+      "key": "tagFavorite",
+      "label": "Has a Favorite Tag",
+      "type": "select",
+      "defaultValue": "any",
+      "options": [
+        {
+          "value": "any",
+          "label": "Any"
+        },
+        {
+          "value": "true",
+          "label": "Yes"
+        },
+        {
+          "value": "false",
+          "label": "No"
+        }
+      ],
+      "noBlank": true
+    },
+    {
+      "key": "gender",
+      "label": "Gender",
+      "type": "select",
+      "defaultValue": [],
+      "multi": true,
+      "options": [
+        {
+          "value": "MALE",
+          "label": "Male"
+        },
+        {
+          "value": "FEMALE",
+          "label": "Female"
+        },
+        {
+          "value": "TRANSGENDER_MALE",
+          "label": "Trans Male"
+        },
+        {
+          "value": "TRANSGENDER_FEMALE",
+          "label": "Trans Female"
+        },
+        {
+          "value": "INTERSEX",
+          "label": "Intersex"
+        },
+        {
+          "value": "NON_BINARY",
+          "label": "Non-Binary"
+        }
+      ],
+      "placeholder": "Any gender",
+      "modifierOptions": [
+        {
+          "value": "INCLUDES",
+          "label": "Is ANY of these"
+        },
+        {
+          "value": "EXCLUDES",
+          "label": "Is NONE of these"
+        },
+        {
+          "value": "IS_NULL",
+          "label": "Has none"
+        },
+        {
+          "value": "NOT_NULL",
+          "label": "Has any"
+        }
+      ],
+      "modifierKey": "genderModifier",
+      "defaultModifier": "INCLUDES"
+    },
+    {
+      "key": "rating",
+      "label": "Rating (0-100)",
+      "type": "range",
+      "defaultValue": {},
+      "min": 0,
+      "max": 100,
+      "modifierOptions": [
+        {
+          "value": "BETWEEN",
+          "label": "Between"
+        },
+        {
+          "value": "IS_NULL",
+          "label": "Not rated"
+        },
+        {
+          "value": "NOT_NULL",
+          "label": "Rated"
+        }
+      ],
+      "modifierKey": "ratingModifier",
+      "defaultModifier": "BETWEEN"
+    },
+    {
+      "key": "oCounter",
+      "label": "O Count",
+      "type": "range",
+      "defaultValue": {},
+      "min": 0,
+      "max": 1000
+    },
+    {
+      "key": "sceneCount",
+      "label": "Scene Count",
+      "type": "range",
+      "defaultValue": {},
+      "min": 0,
+      "max": 1000
+    },
+    {
+      "key": "favorite",
+      "label": "Favorite Performers",
+      "type": "checkbox",
+      "defaultValue": false,
+      "placeholder": "Favorites Only"
+    },
+    {
+      "type": "section-header",
+      "label": "Entity Filters",
+      "key": "section-entities",
+      "collapsible": true,
+      "defaultOpen": false
+    },
+    {
+      "key": "studioIds",
+      "label": "Studios",
+      "type": "searchable-select",
+      "entityType": "studios",
+      "multi": true,
+      "defaultValue": [],
+      "placeholder": "Select studios...",
+      "modifierOptions": [
+        {
+          "value": "INCLUDES_ALL",
+          "label": "Has ALL of these"
+        },
+        {
+          "value": "INCLUDES",
+          "label": "Has ANY of these"
+        },
+        {
+          "value": "EXCLUDES",
+          "label": "Has NONE of these"
+        }
+      ],
+      "modifierKey": "studioIdsModifier",
+      "defaultModifier": "INCLUDES",
+      "supportsHierarchy": true,
+      "hierarchyKey": "studioIdsDepth",
+      "hierarchyLabel": "Include sub-studios",
+      "excludeKey": "studioIdsExclude"
+    },
+    {
+      "key": "groupIds",
+      "label": "Collections",
+      "type": "searchable-select",
+      "entityType": "groups",
+      "multi": true,
+      "defaultValue": [],
+      "placeholder": "Select collections...",
+      "modifierOptions": [
+        {
+          "value": "INCLUDES_ALL",
+          "label": "In ALL of these"
+        },
+        {
+          "value": "INCLUDES",
+          "label": "In ANY of these"
+        },
+        {
+          "value": "EXCLUDES",
+          "label": "NOT in these"
+        }
+      ],
+      "modifierKey": "groupIdsModifier",
+      "defaultModifier": "INCLUDES"
+    },
+    {
+      "key": "performerIds",
+      "label": "Appears With",
+      "type": "searchable-select",
+      "entityType": "performers",
+      "multi": true,
+      "defaultValue": [],
+      "placeholder": "Select performers...",
+      "modifierOptions": [
+        {
+          "value": "INCLUDES_ALL",
+          "label": "Has ALL of these"
+        },
+        {
+          "value": "INCLUDES",
+          "label": "Has ANY of these"
+        },
+        {
+          "value": "EXCLUDES",
+          "label": "Has NONE of these"
+        }
+      ],
+      "modifierKey": "performerIdsModifier",
+      "defaultModifier": "INCLUDES",
+      "excludeKey": "performerIdsExclude"
+    },
+    {
+      "type": "section-header",
+      "label": "Date Ranges",
+      "key": "section-dates",
+      "collapsible": true,
+      "defaultOpen": false
+    },
+    {
+      "key": "age",
+      "label": "Age",
+      "type": "range",
+      "defaultValue": {},
+      "min": 18,
+      "max": 100
+    },
+    {
+      "key": "birthYear",
+      "label": "Birth Year",
+      "type": "range",
+      "defaultValue": {},
+      "min": 1900,
+      "max": 2010
+    },
+    {
+      "key": "deathYear",
+      "label": "Death Year",
+      "type": "range",
+      "defaultValue": {},
+      "min": 1900,
+      "max": 2100
+    },
+    {
+      "key": "careerLength",
+      "label": "Career Length (years)",
+      "type": "range",
+      "defaultValue": {},
+      "min": 0,
+      "max": 50,
+      "modifierOptions": [
+        {
+          "value": "BETWEEN",
+          "label": "Between"
+        },
+        {
+          "value": "IS_NULL",
+          "label": "Not set"
+        },
+        {
+          "value": "NOT_NULL",
+          "label": "Set"
+        }
+      ],
+      "modifierKey": "careerLengthModifier",
+      "defaultModifier": "BETWEEN"
+    },
+    {
+      "key": "birthdate",
+      "label": "Birth Date",
+      "type": "date-range",
+      "defaultValue": {}
+    },
+    {
+      "key": "deathDate",
+      "label": "Death Date",
+      "type": "date-range",
+      "defaultValue": {}
+    },
+    {
+      "key": "createdAt",
+      "label": "Created Date",
+      "type": "date-range",
+      "defaultValue": {}
+    },
+    {
+      "key": "updatedAt",
+      "label": "Updated Date",
+      "type": "date-range",
+      "defaultValue": {}
+    },
+    {
+      "type": "section-header",
+      "label": "Performer Attributes",
+      "key": "section-attributes",
+      "collapsible": true,
+      "defaultOpen": false
+    },
+    {
+      "key": "hairColor",
+      "label": "Hair Color",
+      "type": "select",
+      "defaultValue": "",
+      "options": [
+        {
+          "value": "BLONDE",
+          "label": "Blonde"
+        },
+        {
+          "value": "BRUNETTE",
+          "label": "Brunette"
+        },
+        {
+          "value": "BLACK",
+          "label": "Black"
+        },
+        {
+          "value": "RED",
+          "label": "Red"
+        },
+        {
+          "value": "AUBURN",
+          "label": "Auburn"
+        },
+        {
+          "value": "GREY",
+          "label": "Grey"
+        },
+        {
+          "value": "BALD",
+          "label": "Bald"
+        },
+        {
+          "value": "VARIOUS",
+          "label": "Various"
+        },
+        {
+          "value": "OTHER",
+          "label": "Other"
+        }
+      ],
+      "placeholder": "Any hair color"
+    },
+    {
+      "key": "eyeColor",
+      "label": "Eye Color",
+      "type": "select",
+      "defaultValue": "",
+      "options": [
+        {
+          "value": "BROWN",
+          "label": "Brown"
+        },
+        {
+          "value": "BLUE",
+          "label": "Blue"
+        },
+        {
+          "value": "GREEN",
+          "label": "Green"
+        },
+        {
+          "value": "GREY",
+          "label": "Grey"
+        },
+        {
+          "value": "HAZEL",
+          "label": "Hazel"
+        },
+        {
+          "value": "OTHER",
+          "label": "Other"
+        }
+      ],
+      "placeholder": "Any eye color"
+    },
+    {
+      "key": "ethnicity",
+      "label": "Ethnicity",
+      "type": "select",
+      "defaultValue": "",
+      "options": [
+        {
+          "value": "CAUCASIAN",
+          "label": "Caucasian"
+        },
+        {
+          "value": "BLACK",
+          "label": "Black"
+        },
+        {
+          "value": "ASIAN",
+          "label": "Asian"
+        },
+        {
+          "value": "INDIAN",
+          "label": "Indian"
+        },
+        {
+          "value": "LATIN",
+          "label": "Latin"
+        },
+        {
+          "value": "MIDDLE_EASTERN",
+          "label": "Middle Eastern"
+        },
+        {
+          "value": "MIXED",
+          "label": "Mixed"
+        },
+        {
+          "value": "OTHER",
+          "label": "Other"
+        }
+      ],
+      "placeholder": "Any ethnicity"
+    },
+    {
+      "key": "fakeTits",
+      "label": "Breast Type",
+      "type": "select",
+      "defaultValue": "",
+      "options": [
+        {
+          "value": "Fake",
+          "label": "Fake/Augmented"
+        },
+        {
+          "value": "Natural",
+          "label": "Natural"
+        }
+      ],
+      "placeholder": "Any"
+    },
+    {
+      "key": "country",
+      "label": "Country",
+      "type": "text",
+      "defaultValue": "",
+      "placeholder": "e.g. US",
+      "maxLength": 500
+    },
+    {
+      "key": "circumcised",
+      "label": "Circumcised",
+      "type": "select",
+      "defaultValue": "",
+      "options": [
+        {
+          "value": "CUT",
+          "label": "Cut"
+        },
+        {
+          "value": "UNCUT",
+          "label": "Uncut"
+        }
+      ],
+      "placeholder": "Any"
+    },
+    {
+      "key": "measurements",
+      "label": "Measurements",
+      "type": "text",
+      "defaultValue": "",
+      "placeholder": "e.g. 34-24-34",
+      "maxLength": 500
+    },
+    {
+      "key": "tattoos",
+      "label": "Tattoos",
+      "type": "text",
+      "defaultValue": "",
+      "placeholder": "Search tattoos...",
+      "maxLength": 500
+    },
+    {
+      "key": "piercings",
+      "label": "Piercings",
+      "type": "text",
+      "defaultValue": "",
+      "placeholder": "Search piercings...",
+      "maxLength": 500
+    },
+    {
+      "key": "height",
+      "label": "Height (cm)",
+      "type": "range",
+      "defaultValue": {},
+      "min": 100,
+      "max": 250,
+      "modifierOptions": [
+        {
+          "value": "BETWEEN",
+          "label": "Between"
+        },
+        {
+          "value": "IS_NULL",
+          "label": "Not set"
+        },
+        {
+          "value": "NOT_NULL",
+          "label": "Set"
+        }
+      ],
+      "modifierKey": "heightModifier",
+      "defaultModifier": "BETWEEN"
+    },
+    {
+      "key": "weight",
+      "label": "Weight (kg)",
+      "type": "range",
+      "defaultValue": {},
+      "min": 30,
+      "max": 200,
+      "modifierOptions": [
+        {
+          "value": "BETWEEN",
+          "label": "Between"
+        },
+        {
+          "value": "IS_NULL",
+          "label": "Not set"
+        },
+        {
+          "value": "NOT_NULL",
+          "label": "Set"
+        }
+      ],
+      "modifierKey": "weightModifier",
+      "defaultModifier": "BETWEEN"
+    },
+    {
+      "key": "penisLength",
+      "label": "Penis Length (cm)",
+      "type": "range",
+      "defaultValue": {},
+      "min": 0,
+      "max": 40,
+      "modifierOptions": [
+        {
+          "value": "BETWEEN",
+          "label": "Between"
+        },
+        {
+          "value": "IS_NULL",
+          "label": "Not set"
+        },
+        {
+          "value": "NOT_NULL",
+          "label": "Set"
+        }
+      ],
+      "modifierKey": "penisLengthModifier",
+      "defaultModifier": "BETWEEN"
+    },
+    {
+      "type": "section-header",
+      "label": "Other Filters",
+      "key": "section-other",
+      "collapsible": true,
+      "defaultOpen": false
+    },
+    {
+      "key": "playCount",
+      "label": "Play Count",
+      "type": "range",
+      "defaultValue": {},
+      "min": 0,
+      "max": 1000
+    },
+    {
+      "key": "tagCount",
+      "label": "Tag Count",
+      "type": "range",
+      "defaultValue": {},
+      "min": 0,
+      "max": 1000
+    },
+    {
+      "key": "imageCount",
+      "label": "Image Count",
+      "type": "range",
+      "defaultValue": {},
+      "min": 0,
+      "max": 10000
+    },
+    {
+      "key": "galleryCount",
+      "label": "Gallery Count",
+      "type": "range",
+      "defaultValue": {},
+      "min": 0,
+      "max": 1000
+    },
+    {
+      "key": "markerCount",
+      "label": "Marker Count",
+      "type": "range",
+      "defaultValue": {},
+      "min": 0,
+      "max": 1000
+    },
+    {
+      "key": "disambiguation",
+      "label": "Disambiguation",
+      "type": "text",
+      "defaultValue": "",
+      "placeholder": "Search disambiguation...",
+      "maxLength": 500
+    },
+    {
+      "key": "aliases",
+      "label": "Aliases",
+      "type": "text",
+      "defaultValue": "",
+      "placeholder": "Search aliases...",
+      "maxLength": 500,
+      "modifierOptions": [
+        {
+          "value": "INCLUDES",
+          "label": "Contains"
+        },
+        {
+          "value": "EXCLUDES",
+          "label": "Excludes"
+        },
+        {
+          "value": "IS_NULL",
+          "label": "Has none"
+        },
+        {
+          "value": "NOT_NULL",
+          "label": "Has any"
+        }
+      ],
+      "modifierKey": "aliasesModifier",
+      "defaultModifier": "INCLUDES"
+    },
+    {
+      "key": "url",
+      "label": "URL",
+      "type": "text",
+      "defaultValue": "",
+      "placeholder": "Search URLs...",
+      "maxLength": 500,
+      "modifierOptions": [
+        {
+          "value": "INCLUDES",
+          "label": "Contains"
+        },
+        {
+          "value": "EXCLUDES",
+          "label": "Excludes"
+        },
+        {
+          "value": "IS_NULL",
+          "label": "Has none"
+        },
+        {
+          "value": "NOT_NULL",
+          "label": "Has any"
+        }
+      ],
+      "modifierKey": "urlModifier",
+      "defaultModifier": "INCLUDES"
+    },
+    {
+      "key": "stashId",
+      "label": "StashDB ID",
+      "type": "text",
+      "defaultValue": "",
+      "placeholder": "Search StashDB ID...",
+      "maxLength": 100,
+      "modifierOptions": [
+        {
+          "value": "EQUALS",
+          "label": "Equals"
+        },
+        {
+          "value": "IS_NULL",
+          "label": "Has none"
+        },
+        {
+          "value": "NOT_NULL",
+          "label": "Has any"
+        }
+      ],
+      "modifierKey": "stashIdModifier",
+      "defaultModifier": "EQUALS"
+    },
+    {
+      "key": "details",
+      "label": "Details Search",
+      "type": "text",
+      "defaultValue": "",
+      "placeholder": "Search details...",
+      "maxLength": 500
+    }
+  ],
+  "imperialOptions": [
+    {
+      "type": "section-header",
+      "label": "Common Filters",
+      "key": "section-common",
+      "collapsible": true,
+      "defaultOpen": true
+    },
+    {
+      "key": "name",
+      "label": "Name Search",
+      "type": "text",
+      "defaultValue": "",
+      "placeholder": "Search name...",
+      "maxLength": 500
+    },
+    {
+      "key": "tagIds",
+      "label": "Tags",
+      "type": "searchable-select",
+      "entityType": "tags",
+      "multi": true,
+      "defaultValue": [],
+      "placeholder": "Select tags...",
+      "modifierOptions": [
+        {
+          "value": "INCLUDES_ALL",
+          "label": "Has ALL of these"
+        },
+        {
+          "value": "INCLUDES",
+          "label": "Has ANY of these"
+        },
+        {
+          "value": "EXCLUDES",
+          "label": "Has NONE of these"
+        },
+        {
+          "value": "IS_NULL",
+          "label": "Has none"
+        },
+        {
+          "value": "NOT_NULL",
+          "label": "Has any"
+        }
+      ],
+      "modifierKey": "tagIdsModifier",
+      "defaultModifier": "INCLUDES_ALL",
+      "supportsHierarchy": true,
+      "hierarchyKey": "tagIdsDepth",
+      "hierarchyLabel": "Include sub-tags",
+      "countFilterContext": "performers",
+      "excludeKey": "tagIdsExclude"
+    },
+    {
+      "key": "tagFavorite",
+      "label": "Has a Favorite Tag",
+      "type": "select",
+      "defaultValue": "any",
+      "options": [
+        {
+          "value": "any",
+          "label": "Any"
+        },
+        {
+          "value": "true",
+          "label": "Yes"
+        },
+        {
+          "value": "false",
+          "label": "No"
+        }
+      ],
+      "noBlank": true
+    },
+    {
+      "key": "gender",
+      "label": "Gender",
+      "type": "select",
+      "defaultValue": [],
+      "multi": true,
+      "options": [
+        {
+          "value": "MALE",
+          "label": "Male"
+        },
+        {
+          "value": "FEMALE",
+          "label": "Female"
+        },
+        {
+          "value": "TRANSGENDER_MALE",
+          "label": "Trans Male"
+        },
+        {
+          "value": "TRANSGENDER_FEMALE",
+          "label": "Trans Female"
+        },
+        {
+          "value": "INTERSEX",
+          "label": "Intersex"
+        },
+        {
+          "value": "NON_BINARY",
+          "label": "Non-Binary"
+        }
+      ],
+      "placeholder": "Any gender",
+      "modifierOptions": [
+        {
+          "value": "INCLUDES",
+          "label": "Is ANY of these"
+        },
+        {
+          "value": "EXCLUDES",
+          "label": "Is NONE of these"
+        },
+        {
+          "value": "IS_NULL",
+          "label": "Has none"
+        },
+        {
+          "value": "NOT_NULL",
+          "label": "Has any"
+        }
+      ],
+      "modifierKey": "genderModifier",
+      "defaultModifier": "INCLUDES"
+    },
+    {
+      "key": "rating",
+      "label": "Rating (0-100)",
+      "type": "range",
+      "defaultValue": {},
+      "min": 0,
+      "max": 100,
+      "modifierOptions": [
+        {
+          "value": "BETWEEN",
+          "label": "Between"
+        },
+        {
+          "value": "IS_NULL",
+          "label": "Not rated"
+        },
+        {
+          "value": "NOT_NULL",
+          "label": "Rated"
+        }
+      ],
+      "modifierKey": "ratingModifier",
+      "defaultModifier": "BETWEEN"
+    },
+    {
+      "key": "oCounter",
+      "label": "O Count",
+      "type": "range",
+      "defaultValue": {},
+      "min": 0,
+      "max": 1000
+    },
+    {
+      "key": "sceneCount",
+      "label": "Scene Count",
+      "type": "range",
+      "defaultValue": {},
+      "min": 0,
+      "max": 1000
+    },
+    {
+      "key": "favorite",
+      "label": "Favorite Performers",
+      "type": "checkbox",
+      "defaultValue": false,
+      "placeholder": "Favorites Only"
+    },
+    {
+      "type": "section-header",
+      "label": "Entity Filters",
+      "key": "section-entities",
+      "collapsible": true,
+      "defaultOpen": false
+    },
+    {
+      "key": "studioIds",
+      "label": "Studios",
+      "type": "searchable-select",
+      "entityType": "studios",
+      "multi": true,
+      "defaultValue": [],
+      "placeholder": "Select studios...",
+      "modifierOptions": [
+        {
+          "value": "INCLUDES_ALL",
+          "label": "Has ALL of these"
+        },
+        {
+          "value": "INCLUDES",
+          "label": "Has ANY of these"
+        },
+        {
+          "value": "EXCLUDES",
+          "label": "Has NONE of these"
+        }
+      ],
+      "modifierKey": "studioIdsModifier",
+      "defaultModifier": "INCLUDES",
+      "supportsHierarchy": true,
+      "hierarchyKey": "studioIdsDepth",
+      "hierarchyLabel": "Include sub-studios",
+      "excludeKey": "studioIdsExclude"
+    },
+    {
+      "key": "groupIds",
+      "label": "Collections",
+      "type": "searchable-select",
+      "entityType": "groups",
+      "multi": true,
+      "defaultValue": [],
+      "placeholder": "Select collections...",
+      "modifierOptions": [
+        {
+          "value": "INCLUDES_ALL",
+          "label": "In ALL of these"
+        },
+        {
+          "value": "INCLUDES",
+          "label": "In ANY of these"
+        },
+        {
+          "value": "EXCLUDES",
+          "label": "NOT in these"
+        }
+      ],
+      "modifierKey": "groupIdsModifier",
+      "defaultModifier": "INCLUDES"
+    },
+    {
+      "key": "performerIds",
+      "label": "Appears With",
+      "type": "searchable-select",
+      "entityType": "performers",
+      "multi": true,
+      "defaultValue": [],
+      "placeholder": "Select performers...",
+      "modifierOptions": [
+        {
+          "value": "INCLUDES_ALL",
+          "label": "Has ALL of these"
+        },
+        {
+          "value": "INCLUDES",
+          "label": "Has ANY of these"
+        },
+        {
+          "value": "EXCLUDES",
+          "label": "Has NONE of these"
+        }
+      ],
+      "modifierKey": "performerIdsModifier",
+      "defaultModifier": "INCLUDES",
+      "excludeKey": "performerIdsExclude"
+    },
+    {
+      "type": "section-header",
+      "label": "Date Ranges",
+      "key": "section-dates",
+      "collapsible": true,
+      "defaultOpen": false
+    },
+    {
+      "key": "age",
+      "label": "Age",
+      "type": "range",
+      "defaultValue": {},
+      "min": 18,
+      "max": 100
+    },
+    {
+      "key": "birthYear",
+      "label": "Birth Year",
+      "type": "range",
+      "defaultValue": {},
+      "min": 1900,
+      "max": 2010
+    },
+    {
+      "key": "deathYear",
+      "label": "Death Year",
+      "type": "range",
+      "defaultValue": {},
+      "min": 1900,
+      "max": 2100
+    },
+    {
+      "key": "careerLength",
+      "label": "Career Length (years)",
+      "type": "range",
+      "defaultValue": {},
+      "min": 0,
+      "max": 50,
+      "modifierOptions": [
+        {
+          "value": "BETWEEN",
+          "label": "Between"
+        },
+        {
+          "value": "IS_NULL",
+          "label": "Not set"
+        },
+        {
+          "value": "NOT_NULL",
+          "label": "Set"
+        }
+      ],
+      "modifierKey": "careerLengthModifier",
+      "defaultModifier": "BETWEEN"
+    },
+    {
+      "key": "birthdate",
+      "label": "Birth Date",
+      "type": "date-range",
+      "defaultValue": {}
+    },
+    {
+      "key": "deathDate",
+      "label": "Death Date",
+      "type": "date-range",
+      "defaultValue": {}
+    },
+    {
+      "key": "createdAt",
+      "label": "Created Date",
+      "type": "date-range",
+      "defaultValue": {}
+    },
+    {
+      "key": "updatedAt",
+      "label": "Updated Date",
+      "type": "date-range",
+      "defaultValue": {}
+    },
+    {
+      "type": "section-header",
+      "label": "Performer Attributes",
+      "key": "section-attributes",
+      "collapsible": true,
+      "defaultOpen": false
+    },
+    {
+      "key": "hairColor",
+      "label": "Hair Color",
+      "type": "select",
+      "defaultValue": "",
+      "options": [
+        {
+          "value": "BLONDE",
+          "label": "Blonde"
+        },
+        {
+          "value": "BRUNETTE",
+          "label": "Brunette"
+        },
+        {
+          "value": "BLACK",
+          "label": "Black"
+        },
+        {
+          "value": "RED",
+          "label": "Red"
+        },
+        {
+          "value": "AUBURN",
+          "label": "Auburn"
+        },
+        {
+          "value": "GREY",
+          "label": "Grey"
+        },
+        {
+          "value": "BALD",
+          "label": "Bald"
+        },
+        {
+          "value": "VARIOUS",
+          "label": "Various"
+        },
+        {
+          "value": "OTHER",
+          "label": "Other"
+        }
+      ],
+      "placeholder": "Any hair color"
+    },
+    {
+      "key": "eyeColor",
+      "label": "Eye Color",
+      "type": "select",
+      "defaultValue": "",
+      "options": [
+        {
+          "value": "BROWN",
+          "label": "Brown"
+        },
+        {
+          "value": "BLUE",
+          "label": "Blue"
+        },
+        {
+          "value": "GREEN",
+          "label": "Green"
+        },
+        {
+          "value": "GREY",
+          "label": "Grey"
+        },
+        {
+          "value": "HAZEL",
+          "label": "Hazel"
+        },
+        {
+          "value": "OTHER",
+          "label": "Other"
+        }
+      ],
+      "placeholder": "Any eye color"
+    },
+    {
+      "key": "ethnicity",
+      "label": "Ethnicity",
+      "type": "select",
+      "defaultValue": "",
+      "options": [
+        {
+          "value": "CAUCASIAN",
+          "label": "Caucasian"
+        },
+        {
+          "value": "BLACK",
+          "label": "Black"
+        },
+        {
+          "value": "ASIAN",
+          "label": "Asian"
+        },
+        {
+          "value": "INDIAN",
+          "label": "Indian"
+        },
+        {
+          "value": "LATIN",
+          "label": "Latin"
+        },
+        {
+          "value": "MIDDLE_EASTERN",
+          "label": "Middle Eastern"
+        },
+        {
+          "value": "MIXED",
+          "label": "Mixed"
+        },
+        {
+          "value": "OTHER",
+          "label": "Other"
+        }
+      ],
+      "placeholder": "Any ethnicity"
+    },
+    {
+      "key": "fakeTits",
+      "label": "Breast Type",
+      "type": "select",
+      "defaultValue": "",
+      "options": [
+        {
+          "value": "Fake",
+          "label": "Fake/Augmented"
+        },
+        {
+          "value": "Natural",
+          "label": "Natural"
+        }
+      ],
+      "placeholder": "Any"
+    },
+    {
+      "key": "country",
+      "label": "Country",
+      "type": "text",
+      "defaultValue": "",
+      "placeholder": "e.g. US",
+      "maxLength": 500
+    },
+    {
+      "key": "circumcised",
+      "label": "Circumcised",
+      "type": "select",
+      "defaultValue": "",
+      "options": [
+        {
+          "value": "CUT",
+          "label": "Cut"
+        },
+        {
+          "value": "UNCUT",
+          "label": "Uncut"
+        }
+      ],
+      "placeholder": "Any"
+    },
+    {
+      "key": "measurements",
+      "label": "Measurements",
+      "type": "text",
+      "defaultValue": "",
+      "placeholder": "e.g. 34-24-34",
+      "maxLength": 500
+    },
+    {
+      "key": "tattoos",
+      "label": "Tattoos",
+      "type": "text",
+      "defaultValue": "",
+      "placeholder": "Search tattoos...",
+      "maxLength": 500
+    },
+    {
+      "key": "piercings",
+      "label": "Piercings",
+      "type": "text",
+      "defaultValue": "",
+      "placeholder": "Search piercings...",
+      "maxLength": 500
+    },
+    {
+      "key": "height",
+      "label": "Height (ft/in)",
+      "type": "imperial-height-range",
+      "defaultValue": {},
+      "min": 100,
+      "max": 250,
+      "measure": "height",
+      "modifierOptions": [
+        {
+          "value": "BETWEEN",
+          "label": "Between"
+        },
+        {
+          "value": "IS_NULL",
+          "label": "Not set"
+        },
+        {
+          "value": "NOT_NULL",
+          "label": "Set"
+        }
+      ],
+      "modifierKey": "heightModifier",
+      "defaultModifier": "BETWEEN"
+    },
+    {
+      "key": "weight",
+      "label": "Weight (lbs)",
+      "type": "range",
+      "defaultValue": {},
+      "min": 50,
+      "max": 500,
+      "measure": "weight",
+      "modifierOptions": [
+        {
+          "value": "BETWEEN",
+          "label": "Between"
+        },
+        {
+          "value": "IS_NULL",
+          "label": "Not set"
+        },
+        {
+          "value": "NOT_NULL",
+          "label": "Set"
+        }
+      ],
+      "modifierKey": "weightModifier",
+      "defaultModifier": "BETWEEN"
+    },
+    {
+      "key": "penisLength",
+      "label": "Penis Length (inches)",
+      "type": "range",
+      "defaultValue": {},
+      "min": 1,
+      "max": 15,
+      "measure": "length",
+      "modifierOptions": [
+        {
+          "value": "BETWEEN",
+          "label": "Between"
+        },
+        {
+          "value": "IS_NULL",
+          "label": "Not set"
+        },
+        {
+          "value": "NOT_NULL",
+          "label": "Set"
+        }
+      ],
+      "modifierKey": "penisLengthModifier",
+      "defaultModifier": "BETWEEN"
+    },
+    {
+      "type": "section-header",
+      "label": "Other Filters",
+      "key": "section-other",
+      "collapsible": true,
+      "defaultOpen": false
+    },
+    {
+      "key": "playCount",
+      "label": "Play Count",
+      "type": "range",
+      "defaultValue": {},
+      "min": 0,
+      "max": 1000
+    },
+    {
+      "key": "tagCount",
+      "label": "Tag Count",
+      "type": "range",
+      "defaultValue": {},
+      "min": 0,
+      "max": 1000
+    },
+    {
+      "key": "imageCount",
+      "label": "Image Count",
+      "type": "range",
+      "defaultValue": {},
+      "min": 0,
+      "max": 10000
+    },
+    {
+      "key": "galleryCount",
+      "label": "Gallery Count",
+      "type": "range",
+      "defaultValue": {},
+      "min": 0,
+      "max": 1000
+    },
+    {
+      "key": "markerCount",
+      "label": "Marker Count",
+      "type": "range",
+      "defaultValue": {},
+      "min": 0,
+      "max": 1000
+    },
+    {
+      "key": "disambiguation",
+      "label": "Disambiguation",
+      "type": "text",
+      "defaultValue": "",
+      "placeholder": "Search disambiguation...",
+      "maxLength": 500
+    },
+    {
+      "key": "aliases",
+      "label": "Aliases",
+      "type": "text",
+      "defaultValue": "",
+      "placeholder": "Search aliases...",
+      "maxLength": 500,
+      "modifierOptions": [
+        {
+          "value": "INCLUDES",
+          "label": "Contains"
+        },
+        {
+          "value": "EXCLUDES",
+          "label": "Excludes"
+        },
+        {
+          "value": "IS_NULL",
+          "label": "Has none"
+        },
+        {
+          "value": "NOT_NULL",
+          "label": "Has any"
+        }
+      ],
+      "modifierKey": "aliasesModifier",
+      "defaultModifier": "INCLUDES"
+    },
+    {
+      "key": "url",
+      "label": "URL",
+      "type": "text",
+      "defaultValue": "",
+      "placeholder": "Search URLs...",
+      "maxLength": 500,
+      "modifierOptions": [
+        {
+          "value": "INCLUDES",
+          "label": "Contains"
+        },
+        {
+          "value": "EXCLUDES",
+          "label": "Excludes"
+        },
+        {
+          "value": "IS_NULL",
+          "label": "Has none"
+        },
+        {
+          "value": "NOT_NULL",
+          "label": "Has any"
+        }
+      ],
+      "modifierKey": "urlModifier",
+      "defaultModifier": "INCLUDES"
+    },
+    {
+      "key": "stashId",
+      "label": "StashDB ID",
+      "type": "text",
+      "defaultValue": "",
+      "placeholder": "Search StashDB ID...",
+      "maxLength": 100,
+      "modifierOptions": [
+        {
+          "value": "EQUALS",
+          "label": "Equals"
+        },
+        {
+          "value": "IS_NULL",
+          "label": "Has none"
+        },
+        {
+          "value": "NOT_NULL",
+          "label": "Has any"
+        }
+      ],
+      "modifierKey": "stashIdModifier",
+      "defaultModifier": "EQUALS"
+    },
+    {
+      "key": "details",
+      "label": "Details Search",
+      "type": "text",
+      "defaultValue": "",
+      "placeholder": "Search details...",
+      "maxLength": 500
+    }
+  ],
+  "locks": [
+    {
+      "field": "name",
+      "lockedFieldsTop": [
+        "name"
+      ],
+      "lockedFieldsInner": [
+        "name",
+        "performer_filter"
+      ],
+      "removedStateKeys": [
+        "name"
+      ],
+      "removedOptions": [
+        "text:name"
+      ],
+      "optionCountAfter": 45
+    },
+    {
+      "field": "tags",
+      "lockedFieldsTop": [
+        "tags"
+      ],
+      "lockedFieldsInner": [
+        "performer_filter",
+        "tags"
+      ],
+      "removedStateKeys": [
+        "tagIds",
+        "tagIdsModifier",
+        "tagIdsDepth"
+      ],
+      "removedOptions": [
+        "searchable-select:tagIds"
+      ],
+      "optionCountAfter": 45
+    },
+    {
+      "field": "tag_favorite",
+      "lockedFieldsTop": [
+        "tag_favorite"
+      ],
+      "lockedFieldsInner": [
+        "performer_filter",
+        "tag_favorite"
+      ],
+      "removedStateKeys": [
+        "tagFavorite"
+      ],
+      "removedOptions": [
+        "select:tagFavorite"
+      ],
+      "optionCountAfter": 45
+    },
+    {
+      "field": "gender",
+      "lockedFieldsTop": [
+        "gender"
+      ],
+      "lockedFieldsInner": [
+        "gender",
+        "performer_filter"
+      ],
+      "removedStateKeys": [
+        "gender",
+        "genderModifier"
+      ],
+      "removedOptions": [
+        "select:gender"
+      ],
+      "optionCountAfter": 45
+    },
+    {
+      "field": "rating100",
+      "lockedFieldsTop": [
+        "rating100"
+      ],
+      "lockedFieldsInner": [
+        "performer_filter",
+        "rating100"
+      ],
+      "removedStateKeys": [
+        "rating",
+        "ratingModifier"
+      ],
+      "removedOptions": [
+        "range:rating"
+      ],
+      "optionCountAfter": 45
+    },
+    {
+      "field": "o_counter",
+      "lockedFieldsTop": [
+        "o_counter"
+      ],
+      "lockedFieldsInner": [
+        "o_counter",
+        "performer_filter"
+      ],
+      "removedStateKeys": [
+        "oCounter"
+      ],
+      "removedOptions": [
+        "range:oCounter"
+      ],
+      "optionCountAfter": 45
+    },
+    {
+      "field": "scene_count",
+      "lockedFieldsTop": [
+        "scene_count"
+      ],
+      "lockedFieldsInner": [
+        "performer_filter",
+        "scene_count"
+      ],
+      "removedStateKeys": [
+        "sceneCount"
+      ],
+      "removedOptions": [
+        "range:sceneCount"
+      ],
+      "optionCountAfter": 45
+    },
+    {
+      "field": "favorite",
+      "lockedFieldsTop": [
+        "favorite"
+      ],
+      "lockedFieldsInner": [
+        "favorite",
+        "performer_filter"
+      ],
+      "removedStateKeys": [
+        "favorite"
+      ],
+      "removedOptions": [
+        "checkbox:favorite"
+      ],
+      "optionCountAfter": 45
+    },
+    {
+      "field": "studios",
+      "lockedFieldsTop": [
+        "studios"
+      ],
+      "lockedFieldsInner": [
+        "performer_filter",
+        "studios"
+      ],
+      "removedStateKeys": [
+        "studioIds",
+        "studioIdsModifier",
+        "studioIdsDepth"
+      ],
+      "removedOptions": [
+        "searchable-select:studioIds"
+      ],
+      "optionCountAfter": 45
+    },
+    {
+      "field": "groups",
+      "lockedFieldsTop": [
+        "groups"
+      ],
+      "lockedFieldsInner": [
+        "groups",
+        "performer_filter"
+      ],
+      "removedStateKeys": [
+        "groupIds",
+        "groupIdsModifier"
+      ],
+      "removedOptions": [
+        "searchable-select:groupIds"
+      ],
+      "optionCountAfter": 45
+    },
+    {
+      "field": "performers",
+      "lockedFieldsTop": [
+        "performers"
+      ],
+      "lockedFieldsInner": [
+        "performer_filter",
+        "performers"
+      ],
+      "removedStateKeys": [
+        "performerIds",
+        "performerIdsModifier"
+      ],
+      "removedOptions": [
+        "searchable-select:performerIds"
+      ],
+      "optionCountAfter": 45
+    },
+    {
+      "field": "age",
+      "lockedFieldsTop": [
+        "age"
+      ],
+      "lockedFieldsInner": [
+        "age",
+        "performer_filter"
+      ],
+      "removedStateKeys": [
+        "age"
+      ],
+      "removedOptions": [
+        "range:age"
+      ],
+      "optionCountAfter": 45
+    },
+    {
+      "field": "birth_year",
+      "lockedFieldsTop": [
+        "birth_year"
+      ],
+      "lockedFieldsInner": [
+        "birth_year",
+        "performer_filter"
+      ],
+      "removedStateKeys": [
+        "birthYear"
+      ],
+      "removedOptions": [
+        "range:birthYear"
+      ],
+      "optionCountAfter": 45
+    },
+    {
+      "field": "death_year",
+      "lockedFieldsTop": [
+        "death_year"
+      ],
+      "lockedFieldsInner": [
+        "death_year",
+        "performer_filter"
+      ],
+      "removedStateKeys": [
+        "deathYear"
+      ],
+      "removedOptions": [
+        "range:deathYear"
+      ],
+      "optionCountAfter": 45
+    },
+    {
+      "field": "career_length",
+      "lockedFieldsTop": [
+        "career_length"
+      ],
+      "lockedFieldsInner": [
+        "career_length",
+        "performer_filter"
+      ],
+      "removedStateKeys": [
+        "careerLength",
+        "careerLengthModifier"
+      ],
+      "removedOptions": [
+        "range:careerLength"
+      ],
+      "optionCountAfter": 45
+    },
+    {
+      "field": "birthdate",
+      "lockedFieldsTop": [
+        "birthdate"
+      ],
+      "lockedFieldsInner": [
+        "birthdate",
+        "performer_filter"
+      ],
+      "removedStateKeys": [
+        "birthdate"
+      ],
+      "removedOptions": [
+        "date-range:birthdate"
+      ],
+      "optionCountAfter": 45
+    },
+    {
+      "field": "death_date",
+      "lockedFieldsTop": [
+        "death_date"
+      ],
+      "lockedFieldsInner": [
+        "death_date",
+        "performer_filter"
+      ],
+      "removedStateKeys": [
+        "deathDate"
+      ],
+      "removedOptions": [
+        "date-range:deathDate"
+      ],
+      "optionCountAfter": 45
+    },
+    {
+      "field": "created_at",
+      "lockedFieldsTop": [
+        "created_at"
+      ],
+      "lockedFieldsInner": [
+        "created_at",
+        "performer_filter"
+      ],
+      "removedStateKeys": [
+        "createdAt"
+      ],
+      "removedOptions": [
+        "date-range:createdAt"
+      ],
+      "optionCountAfter": 45
+    },
+    {
+      "field": "updated_at",
+      "lockedFieldsTop": [
+        "updated_at"
+      ],
+      "lockedFieldsInner": [
+        "performer_filter",
+        "updated_at"
+      ],
+      "removedStateKeys": [
+        "updatedAt"
+      ],
+      "removedOptions": [
+        "date-range:updatedAt"
+      ],
+      "optionCountAfter": 45
+    },
+    {
+      "field": "hair_color",
+      "lockedFieldsTop": [
+        "hair_color"
+      ],
+      "lockedFieldsInner": [
+        "hair_color",
+        "performer_filter"
+      ],
+      "removedStateKeys": [
+        "hairColor"
+      ],
+      "removedOptions": [
+        "select:hairColor"
+      ],
+      "optionCountAfter": 45
+    },
+    {
+      "field": "eye_color",
+      "lockedFieldsTop": [
+        "eye_color"
+      ],
+      "lockedFieldsInner": [
+        "eye_color",
+        "performer_filter"
+      ],
+      "removedStateKeys": [
+        "eyeColor"
+      ],
+      "removedOptions": [
+        "select:eyeColor"
+      ],
+      "optionCountAfter": 45
+    },
+    {
+      "field": "ethnicity",
+      "lockedFieldsTop": [
+        "ethnicity"
+      ],
+      "lockedFieldsInner": [
+        "ethnicity",
+        "performer_filter"
+      ],
+      "removedStateKeys": [
+        "ethnicity"
+      ],
+      "removedOptions": [
+        "select:ethnicity"
+      ],
+      "optionCountAfter": 45
+    },
+    {
+      "field": "fake_tits",
+      "lockedFieldsTop": [
+        "fake_tits"
+      ],
+      "lockedFieldsInner": [
+        "fake_tits",
+        "performer_filter"
+      ],
+      "removedStateKeys": [
+        "fakeTits"
+      ],
+      "removedOptions": [
+        "select:fakeTits"
+      ],
+      "optionCountAfter": 45
+    },
+    {
+      "field": "country",
+      "lockedFieldsTop": [
+        "country"
+      ],
+      "lockedFieldsInner": [
+        "country",
+        "performer_filter"
+      ],
+      "removedStateKeys": [
+        "country"
+      ],
+      "removedOptions": [
+        "text:country"
+      ],
+      "optionCountAfter": 45
+    },
+    {
+      "field": "circumcised",
+      "lockedFieldsTop": [
+        "circumcised"
+      ],
+      "lockedFieldsInner": [
+        "circumcised",
+        "performer_filter"
+      ],
+      "removedStateKeys": [
+        "circumcised"
+      ],
+      "removedOptions": [
+        "select:circumcised"
+      ],
+      "optionCountAfter": 45
+    },
+    {
+      "field": "measurements",
+      "lockedFieldsTop": [
+        "measurements"
+      ],
+      "lockedFieldsInner": [
+        "measurements",
+        "performer_filter"
+      ],
+      "removedStateKeys": [
+        "measurements"
+      ],
+      "removedOptions": [
+        "text:measurements"
+      ],
+      "optionCountAfter": 45
+    },
+    {
+      "field": "tattoos",
+      "lockedFieldsTop": [
+        "tattoos"
+      ],
+      "lockedFieldsInner": [
+        "performer_filter",
+        "tattoos"
+      ],
+      "removedStateKeys": [
+        "tattoos"
+      ],
+      "removedOptions": [
+        "text:tattoos"
+      ],
+      "optionCountAfter": 45
+    },
+    {
+      "field": "piercings",
+      "lockedFieldsTop": [
+        "piercings"
+      ],
+      "lockedFieldsInner": [
+        "performer_filter",
+        "piercings"
+      ],
+      "removedStateKeys": [
+        "piercings"
+      ],
+      "removedOptions": [
+        "text:piercings"
+      ],
+      "optionCountAfter": 45
+    },
+    {
+      "field": "height",
+      "lockedFieldsTop": [
+        "height"
+      ],
+      "lockedFieldsInner": [
+        "height",
+        "performer_filter"
+      ],
+      "removedStateKeys": [
+        "height",
+        "heightModifier"
+      ],
+      "removedOptions": [
+        "range:height"
+      ],
+      "optionCountAfter": 45
+    },
+    {
+      "field": "weight",
+      "lockedFieldsTop": [
+        "weight"
+      ],
+      "lockedFieldsInner": [
+        "performer_filter",
+        "weight"
+      ],
+      "removedStateKeys": [
+        "weight",
+        "weightModifier"
+      ],
+      "removedOptions": [
+        "range:weight"
+      ],
+      "optionCountAfter": 45
+    },
+    {
+      "field": "penis_length",
+      "lockedFieldsTop": [
+        "penis_length"
+      ],
+      "lockedFieldsInner": [
+        "penis_length",
+        "performer_filter"
+      ],
+      "removedStateKeys": [
+        "penisLength",
+        "penisLengthModifier"
+      ],
+      "removedOptions": [
+        "range:penisLength"
+      ],
+      "optionCountAfter": 45
+    },
+    {
+      "field": "play_count",
+      "lockedFieldsTop": [
+        "play_count"
+      ],
+      "lockedFieldsInner": [
+        "performer_filter",
+        "play_count"
+      ],
+      "removedStateKeys": [
+        "playCount"
+      ],
+      "removedOptions": [
+        "range:playCount"
+      ],
+      "optionCountAfter": 45
+    },
+    {
+      "field": "tag_count",
+      "lockedFieldsTop": [
+        "tag_count"
+      ],
+      "lockedFieldsInner": [
+        "performer_filter",
+        "tag_count"
+      ],
+      "removedStateKeys": [
+        "tagCount"
+      ],
+      "removedOptions": [
+        "range:tagCount"
+      ],
+      "optionCountAfter": 45
+    },
+    {
+      "field": "image_count",
+      "lockedFieldsTop": [
+        "image_count"
+      ],
+      "lockedFieldsInner": [
+        "image_count",
+        "performer_filter"
+      ],
+      "removedStateKeys": [
+        "imageCount"
+      ],
+      "removedOptions": [
+        "range:imageCount"
+      ],
+      "optionCountAfter": 45
+    },
+    {
+      "field": "gallery_count",
+      "lockedFieldsTop": [
+        "gallery_count"
+      ],
+      "lockedFieldsInner": [
+        "gallery_count",
+        "performer_filter"
+      ],
+      "removedStateKeys": [
+        "galleryCount"
+      ],
+      "removedOptions": [
+        "range:galleryCount"
+      ],
+      "optionCountAfter": 45
+    },
+    {
+      "field": "marker_count",
+      "lockedFieldsTop": [
+        "marker_count"
+      ],
+      "lockedFieldsInner": [
+        "marker_count",
+        "performer_filter"
+      ],
+      "removedStateKeys": [
+        "markerCount"
+      ],
+      "removedOptions": [
+        "range:markerCount"
+      ],
+      "optionCountAfter": 45
+    },
+    {
+      "field": "disambiguation",
+      "lockedFieldsTop": [
+        "disambiguation"
+      ],
+      "lockedFieldsInner": [
+        "disambiguation",
+        "performer_filter"
+      ],
+      "removedStateKeys": [
+        "disambiguation"
+      ],
+      "removedOptions": [
+        "text:disambiguation"
+      ],
+      "optionCountAfter": 45
+    },
+    {
+      "field": "aliases",
+      "lockedFieldsTop": [
+        "aliases"
+      ],
+      "lockedFieldsInner": [
+        "aliases",
+        "performer_filter"
+      ],
+      "removedStateKeys": [
+        "aliases",
+        "aliasesModifier"
+      ],
+      "removedOptions": [
+        "text:aliases"
+      ],
+      "optionCountAfter": 45
+    },
+    {
+      "field": "url",
+      "lockedFieldsTop": [
+        "url"
+      ],
+      "lockedFieldsInner": [
+        "performer_filter",
+        "url"
+      ],
+      "removedStateKeys": [
+        "url",
+        "urlModifier"
+      ],
+      "removedOptions": [
+        "text:url"
+      ],
+      "optionCountAfter": 45
+    },
+    {
+      "field": "stash_id",
+      "lockedFieldsTop": [
+        "stash_id"
+      ],
+      "lockedFieldsInner": [
+        "performer_filter",
+        "stash_id"
+      ],
+      "removedStateKeys": [
+        "stashId",
+        "stashIdModifier"
+      ],
+      "removedOptions": [
+        "text:stashId"
+      ],
+      "optionCountAfter": 45
+    },
+    {
+      "field": "details",
+      "lockedFieldsTop": [
+        "details"
+      ],
+      "lockedFieldsInner": [
+        "details",
+        "performer_filter"
+      ],
+      "removedStateKeys": [
+        "details"
+      ],
+      "removedOptions": [
+        "text:details"
+      ],
+      "optionCountAfter": 45
+    }
+  ]
+}

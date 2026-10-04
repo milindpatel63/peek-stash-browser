@@ -4,11 +4,26 @@
  * Common wrappers and utilities for testing React components and hooks.
  * Provides context providers and helper functions used across tests.
  */
-import { render } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { vi } from "vitest";
 import type { ReactNode } from "react";
+import {
+  MemoryRouter,
+  RouterProvider,
+  createMemoryRouter,
+} from "react-router-dom";
+import type { FilterPreset } from "@peek/shared-types";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { act, render } from "@testing-library/react";
+import { vi } from "vitest";
+import { queryKeys } from "@/api/queryKeys";
+import { getDefaultSettings } from "@/config/entityDisplayConfig";
+import {
+  AuthContext,
+  type AuthContextValue,
+} from "@/contexts/AuthContextProvider";
+import { CardDisplaySettingsContext } from "@/contexts/CardDisplaySettingsContext";
+import { TVModeProvider } from "@/contexts/TVModeProvider";
+import { type PinsByList, pinsAnswer } from "./helpers/filterPins";
+import { userSettingsResponse } from "./helpers/userSettings";
 
 // ============================================================================
 // Query Client Wrapper
@@ -36,6 +51,29 @@ export const createQueryWrapper = () => {
     <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
   );
 };
+
+// ============================================================================
+// Auth Context Value
+// ============================================================================
+
+/**
+ * An AuthContext value for rendering code that calls useAuth without
+ * AuthProvider's /auth/check request. Defaults to a finished check, signed out.
+ *
+ * @example
+ * <AuthContext.Provider value={createAuthValue({ isAuthenticated: true })}>
+ */
+export const createAuthValue = (
+  overrides: Partial<AuthContextValue> = {}
+): AuthContextValue => ({
+  isAuthenticated: false,
+  isLoading: false,
+  user: null,
+  login: vi.fn(),
+  logout: vi.fn(),
+  updateUser: vi.fn(),
+  ...overrides,
+});
 
 // ============================================================================
 // Router Wrapper
@@ -93,6 +131,105 @@ export const renderWithProviders = (
 };
 
 // ============================================================================
+// List Page Render
+// ============================================================================
+
+interface ListPageOptions {
+  /** The router's history, the last entry current (default `["/"]`) */
+  initialEntries?: string[];
+  /** Saved presets by entity type, in the query cache */
+  presets?: Record<string, FilterPreset[]>;
+  /** Default preset ids by context, in the query cache */
+  defaultPresets?: Record<string, string>;
+  /** Card display settings by entity type, over the defaults */
+  cardSettings?: Record<string, Record<string, unknown>>;
+  /** The user's settings, over the server's defaults */
+  userSettings?: Parameters<typeof userSettingsResponse>[0];
+  /** The query cache's stale time (the app's is 5 minutes); 0 by default */
+  staleTime?: number;
+  /** Leave the preset queries unseeded: the test's `apiGet` answers them */
+  presetsPending?: boolean;
+  /** The user's filter pins per list; a list not named has none */
+  pins?: PinsByList;
+  /**
+   * The test's own client (`createQueryClient()`: the app's retries and its
+   * library-initializing handling), seeded as the default one; `staleTime`
+   * is then the client's own
+   */
+  queryClient?: QueryClient;
+}
+
+/**
+ * Renders a list page as the app does: a data router (so a test can step
+ * Back with `router.navigate(-1)`), a fresh QueryClient with the presets,
+ * filter pins (none unless `pins` names a list's) and user settings in its
+ * cache, a signed-in user, `TVModeProvider` and a card
+ * display settings stub. `ConfigContext`'s default is one Stash instance.
+ * Page tests mock the list hooks (`@/api/hooks`) or `@/api/library`, and
+ * render the real controls and pagination.
+ */
+export const renderListPage = (
+  ui: React.ReactElement,
+  {
+    initialEntries = ["/"],
+    presets = {},
+    defaultPresets = {},
+    cardSettings = {},
+    userSettings = {},
+    staleTime = 0,
+    presetsPending = false,
+    pins = {},
+    queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, staleTime } },
+    }),
+  }: ListPageOptions = {}
+) => {
+  // The preset queries' keys (`usePresets`), read here so importing this
+  // file evaluates no query options a test's mocks could break
+  if (!presetsPending) {
+    queryClient.setQueryData(queryKeys.user.filterPresets(), { presets });
+    queryClient.setQueryData(queryKeys.user.defaultPresets(), {
+      defaults: defaultPresets,
+    });
+  }
+  queryClient.setQueryData(queryKeys.user.filterPins(), pinsAnswer(pins));
+  queryClient.setQueryData(
+    queryKeys.user.settings(),
+    userSettingsResponse(userSettings)
+  );
+
+  const cardDisplay = {
+    getSettings: (entityType: string) => ({
+      ...getDefaultSettings(entityType),
+      ...cardSettings[entityType],
+    }),
+    updateSettings: vi.fn(() => Promise.resolve()),
+    isLoading: false,
+  };
+  const auth = createAuthValue({
+    isAuthenticated: true,
+    user: { id: 1, username: "viewer", role: "USER", setupCompleted: true },
+  });
+  const router = createMemoryRouter([{ path: "*", element: ui }], {
+    initialEntries,
+    initialIndex: initialEntries.length - 1,
+  });
+
+  const result = render(
+    <QueryClientProvider client={queryClient}>
+      <AuthContext.Provider value={auth}>
+        <TVModeProvider>
+          <CardDisplaySettingsContext.Provider value={cardDisplay}>
+            <RouterProvider router={router} />
+          </CardDisplaySettingsContext.Provider>
+        </TVModeProvider>
+      </AuthContext.Provider>
+    </QueryClientProvider>
+  );
+  return { ...result, router, queryClient };
+};
+
+// ============================================================================
 // API Mock Helpers
 // ============================================================================
 
@@ -112,41 +249,30 @@ export const createMockApi = () => ({
   apiPatch: vi.fn().mockResolvedValue({}),
   apiDelete: vi.fn().mockResolvedValue({}),
   libraryApi: {
-    findScenes: vi.fn().mockResolvedValue({ findScenes: { count: 0, scenes: [] } }),
-    findPerformers: vi.fn().mockResolvedValue({ findPerformers: { count: 0, performers: [] } }),
-    findStudios: vi.fn().mockResolvedValue({ findStudios: { count: 0, studios: [] } }),
+    findScenes: vi
+      .fn()
+      .mockResolvedValue({ findScenes: { count: 0, scenes: [] } }),
+    findPerformers: vi
+      .fn()
+      .mockResolvedValue({ findPerformers: { count: 0, performers: [] } }),
+    findStudios: vi
+      .fn()
+      .mockResolvedValue({ findStudios: { count: 0, studios: [] } }),
     findTags: vi.fn().mockResolvedValue({ findTags: { count: 0, tags: [] } }),
-    findGroups: vi.fn().mockResolvedValue({ findGroups: { count: 0, groups: [] } }),
-    findGalleries: vi.fn().mockResolvedValue({ findGalleries: { count: 0, galleries: [] } }),
-    findImages: vi.fn().mockResolvedValue({ findImages: { count: 0, images: [] } }),
+    findGroups: vi
+      .fn()
+      .mockResolvedValue({ findGroups: { count: 0, groups: [] } }),
+    findGalleries: vi
+      .fn()
+      .mockResolvedValue({ findGalleries: { count: 0, galleries: [] } }),
+    findImages: vi
+      .fn()
+      .mockResolvedValue({ findImages: { count: 0, images: [] } }),
     getScene: vi.fn().mockResolvedValue(null),
     updateRating: vi.fn().mockResolvedValue({}),
     updateFavorite: vi.fn().mockResolvedValue({}),
   },
 });
-
-/**
- * Sets up preset API mocks for useFilterState tests
- *
- * @param {object} apiGet - The mocked apiGet function
- * @param {object} options - Configuration options
- * @param {object} options.presets - Presets by artifact type
- * @param {object} options.defaults - Default preset IDs by artifact type
- */
-export const setupPresetMocks = (
-  apiGet: any,
-  { presets = {}, defaults = {} } = {}
-) => {
-  apiGet.mockImplementation((url: any) => {
-    if (url === "/user/filter-presets") {
-      return Promise.resolve({ presets });
-    }
-    if (url === "/user/default-presets") {
-      return Promise.resolve({ defaults });
-    }
-    return Promise.resolve({});
-  });
-};
 
 // ============================================================================
 // Event Simulation Helpers
@@ -159,7 +285,11 @@ export const setupPresetMocks = (
  * @param {string} key - Key to simulate (e.g., "ArrowRight", "Enter")
  * @param {object} options - Additional event options
  */
-export const simulateKeyDown = (element: HTMLElement, key: string, options = {}) => {
+export const simulateKeyDown = (
+  element: HTMLElement,
+  key: string,
+  options = {}
+) => {
   const event = new KeyboardEvent("keydown", {
     key,
     bubbles: true,
@@ -192,7 +322,10 @@ export const simulateClick = (element: HTMLElement) => {
  * @param {number} timeout - Max time to wait in ms
  * @returns {Promise<void>}
  */
-export const waitForCondition = async (condition: () => boolean, timeout = 1000) => {
+export const waitForCondition = async (
+  condition: () => boolean,
+  timeout = 1000
+) => {
   const start = Date.now();
   while (!condition()) {
     if (Date.now() - start > timeout) {
@@ -206,12 +339,40 @@ export const waitForCondition = async (condition: () => boolean, timeout = 1000)
  * Flushes all pending promises
  * Useful after triggering async operations
  */
+/**
+ * `await act(async () => { ... })` for a step that awaits nothing: React
+ * flushes the updates, effects and promises the step started before the
+ * test goes on. A plain `act(() => ...)` is typed as returning nothing, and
+ * an async callback without an await fails require-await.
+ */
+export const actAsync = (step: () => void): Promise<void> =>
+  act(() => {
+    step();
+    return Promise.resolve();
+  });
+
 export const flushPromises = () =>
   new Promise((resolve) => setTimeout(resolve, 0));
 
 // ============================================================================
 // Assertion Helpers
 // ============================================================================
+
+/**
+ * The value, or a thrown error naming what was missing.
+ *
+ * For index access a test relies on, such as `must(result[0]).id` or
+ * `must(mock.calls[0])[0]`: a missing element fails the test with a clear
+ * message instead of a TypeError, and never lets it pass silently the way
+ * `?.` inside `expect(...)` would. Falsy values such as `0` and `""` are
+ * returned as they are. The same helper as `server/tests/helpers/must.ts`.
+ */
+export function must<T>(value: T | null | undefined, what = "value"): T {
+  if (value === undefined || value === null) {
+    throw new Error(`expected ${what} to be present`);
+  }
+  return value;
+}
 
 /**
  * Checks if an element is visible (not hidden by CSS)

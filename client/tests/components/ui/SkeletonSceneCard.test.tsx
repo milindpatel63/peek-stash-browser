@@ -1,13 +1,13 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render } from "@testing-library/react";
+import { must } from "@tests/testUtils";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import SkeletonSceneCard from "../../../src/components/ui/SkeletonSceneCard";
+import { useCardDisplaySettings } from "../../../src/contexts/CardDisplaySettingsContext";
 
 // Mock the useCardDisplaySettings hook
 vi.mock("../../../src/contexts/CardDisplaySettingsContext", () => ({
   useCardDisplaySettings: vi.fn(),
 }));
-
-import SkeletonSceneCard from "../../../src/components/ui/SkeletonSceneCard";
-import { useCardDisplaySettings } from "../../../src/contexts/CardDisplaySettingsContext";
 
 describe("SkeletonSceneCard", () => {
   const mockGetSettings = vi.fn();
@@ -43,13 +43,13 @@ describe("SkeletonSceneCard", () => {
       const { container } = render(<SkeletonSceneCard entityType="scene" />);
 
       // The rating row should be present
-      const ratingRow = container.querySelector(
-        '[style*="height: 2rem"]'
-      );
+      const ratingRow = container.querySelector('[style*="height: 2rem"]');
       expect(ratingRow).toBeTruthy();
 
       // Should have rating badge placeholder
-      const ratingBadge = ratingRow!.querySelector('[style*="width: 3.5rem"]');
+      const ratingBadge = must(ratingRow).querySelector(
+        '[style*="width: 3.5rem"]'
+      );
       expect(ratingBadge).toBeTruthy();
     });
 
@@ -120,13 +120,13 @@ describe("SkeletonSceneCard", () => {
       const { container } = render(<SkeletonSceneCard entityType="scene" />);
 
       // Rating row should exist
-      const ratingRow = container.querySelector(
-        '[style*="height: 2rem"]'
-      );
+      const ratingRow = container.querySelector('[style*="height: 2rem"]');
       expect(ratingRow).toBeTruthy();
 
       // Should have rating badge placeholder
-      const ratingBadge = ratingRow!.querySelector('[style*="width: 3.5rem"]');
+      const ratingBadge = must(ratingRow).querySelector(
+        '[style*="width: 3.5rem"]'
+      );
       expect(ratingBadge).toBeTruthy();
     });
 
@@ -141,9 +141,7 @@ describe("SkeletonSceneCard", () => {
       const { container } = render(<SkeletonSceneCard entityType="scene" />);
 
       // Rating row should exist (because favorite is enabled)
-      const ratingRow = container.querySelector(
-        '[style*="height: 2rem"]'
-      );
+      const ratingRow = container.querySelector('[style*="height: 2rem"]');
       expect(ratingRow).toBeTruthy();
     });
   });
@@ -163,7 +161,10 @@ describe("SkeletonSceneCard", () => {
     const findByAspectRatio = (container: HTMLElement, ratio: string) => {
       const allDivs = container.querySelectorAll("div");
       for (const div of allDivs) {
-        if (div.style.aspectRatio && div.style.aspectRatio.replace(/\s/g, "") === ratio) {
+        if (
+          div.style.aspectRatio &&
+          div.style.aspectRatio.replace(/\s/g, "") === ratio
+        ) {
           return div;
         }
       }
@@ -178,7 +179,9 @@ describe("SkeletonSceneCard", () => {
     });
 
     it("uses 2/3 aspect ratio for performer entityType", () => {
-      const { container } = render(<SkeletonSceneCard entityType="performer" />);
+      const { container } = render(
+        <SkeletonSceneCard entityType="performer" />
+      );
 
       const imageDiv = findByAspectRatio(container, "2/3");
       expect(imageDiv).toBeTruthy();
@@ -240,7 +243,9 @@ describe("SkeletonSceneCard", () => {
     it("always renders indicators skeleton", () => {
       const { container } = render(<SkeletonSceneCard entityType="scene" />);
 
-      const indicatorsDiv = container.querySelector('[style*="height: 3.5rem"]');
+      const indicatorsDiv = container.querySelector(
+        '[style*="height: 3.5rem"]'
+      );
       expect(indicatorsDiv).toBeTruthy();
     });
   });

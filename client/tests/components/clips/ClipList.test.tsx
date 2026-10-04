@@ -1,8 +1,11 @@
-import { describe, it, expect, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { render, screen } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
 import ClipList from "../../../src/components/clips/ClipList";
+import { AuthContext } from "../../../src/contexts/AuthContextProvider";
 import { CardDisplaySettingsProvider } from "../../../src/contexts/CardDisplaySettingsContext";
+import { createAuthValue } from "../../testUtils";
 
 // Mock the api module
 vi.mock("../../../src/api", () => ({
@@ -16,6 +19,7 @@ const mockClips = [
     seconds: 0,
     endSeconds: 30,
     sceneId: "s1",
+    instanceId: "inst-a",
     isGenerated: true,
     primaryTag: { id: "1", name: "Intro", color: "#00ff00" },
     tags: [],
@@ -27,6 +31,7 @@ const mockClips = [
     seconds: 60,
     endSeconds: 90,
     sceneId: "s1",
+    instanceId: "inst-a",
     isGenerated: true,
     primaryTag: { id: "2", name: "Action", color: "#ff0000" },
     tags: [],
@@ -36,9 +41,13 @@ const mockClips = [
 
 const renderWithProviders = (ui: React.ReactElement) => {
   return render(
-    <MemoryRouter>
-      <CardDisplaySettingsProvider>{ui}</CardDisplaySettingsProvider>
-    </MemoryRouter>
+    <QueryClientProvider client={new QueryClient()}>
+      <MemoryRouter>
+        <AuthContext.Provider value={createAuthValue()}>
+          <CardDisplaySettingsProvider>{ui}</CardDisplaySettingsProvider>
+        </AuthContext.Provider>
+      </MemoryRouter>
+    </QueryClientProvider>
   );
 };
 
@@ -58,7 +67,9 @@ describe("ClipList", () => {
     const { container } = renderWithProviders(
       <ClipList clips={[]} onClipClick={() => {}} loading={true} />
     );
-    expect(container.querySelectorAll(".animate-pulse").length).toBeGreaterThan(0);
+    expect(container.querySelectorAll(".animate-pulse").length).toBeGreaterThan(
+      0
+    );
   });
 
   it("renders clip grid", () => {

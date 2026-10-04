@@ -1,12 +1,45 @@
-import { describe, it, expect } from "vitest";
 import { createElement } from "react";
+import { MemoryRouter } from "react-router-dom";
+import { render } from "@testing-library/react";
+import { must } from "@tests/testUtils";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import ImageCard from "../../../src/components/cards/ImageCard";
+import type { BaseCardProps } from "../../../src/components/ui/BaseCard";
+
+const { baseCardProps } = vi.hoisted(() => ({
+  baseCardProps: vi.fn<(props: BaseCardProps) => void>(),
+}));
+
+vi.mock("../../../src/contexts/ConfigContext", () => ({
+  useConfig: () => ({ hasMultipleInstances: false }),
+}));
+vi.mock("../../../src/contexts/CardDisplaySettingsContext", () => ({
+  useCardDisplaySettings: () => ({
+    getSettings: () => ({
+      showRelationshipIndicators: true,
+      showStudio: true,
+      showDate: true,
+    }),
+  }),
+}));
+// Captures the rating controls the card hands to BaseCard
+vi.mock("../../../src/components/ui/BaseCard", () => ({
+  BaseCard: (props: BaseCardProps) => {
+    baseCardProps(props);
+    return null;
+  },
+}));
+
+beforeEach(() => baseCardProps.mockClear());
 
 describe("ImageCard", () => {
   const mockImage = {
     id: "1",
     title: "Test Image",
     paths: { thumbnail: "/thumb.jpg", image: "/full.jpg" },
+    performers: [],
+    tags: [],
+    galleries: [],
   };
 
   it("is a React forwardRef component", () => {
@@ -86,5 +119,111 @@ describe("ImageCard", () => {
     } as any);
 
     expect(element.props.onHideSuccess).toBe(onHideSuccess);
+  });
+
+  it("names the image's instance in each change it reports", () => {
+    const onOCounterChange = vi.fn();
+    const onRatingChange = vi.fn();
+    const onFavoriteChange = vi.fn();
+    render(
+      <MemoryRouter>
+        <ImageCard
+          image={
+            {
+              ...mockImage,
+              instanceId: "inst-b",
+              rating100: 40,
+            } as never
+          }
+          onOCounterChange={onOCounterChange}
+          onRatingChange={onRatingChange}
+          onFavoriteChange={onFavoriteChange}
+        />
+      </MemoryRouter>
+    );
+
+    const controls = must(
+      must(baseCardProps.mock.lastCall, "BaseCard's props")[0]
+        .ratingControlsProps,
+      "the rating controls"
+    );
+    controls.onOCounterChange?.("1", 3);
+    controls.onRatingChange?.("1", 80);
+    controls.onFavoriteChange?.("1", true);
+
+    expect(onOCounterChange).toHaveBeenCalledWith("1", 3, "inst-b");
+    expect(onRatingChange).toHaveBeenCalledWith("1", 80, "inst-b");
+    expect(onFavoriteChange).toHaveBeenCalledWith("1", true, "inst-b");
+  });
+
+  it("an image card shows the image's own studio, performers and tags from a list row", () => {
+    render(
+      <MemoryRouter>
+        <ImageCard
+          image={
+            {
+              ...mockImage,
+              instanceId: "inst-a",
+              date: null,
+              studio: { id: "s1", instanceId: "inst-a", name: "Acme" },
+              performers: [
+                { id: "p1", instanceId: "inst-a", name: "P One" },
+                { id: "p2", instanceId: "inst-a", name: "P Two" },
+              ],
+              tags: [{ id: "t1", instanceId: "inst-a", name: "T One" }],
+              galleries: [
+                { id: "g1", instanceId: "inst-a", title: "G", cover: null },
+              ],
+            } as never
+          }
+        />
+      </MemoryRouter>
+    );
+
+    const props = must(baseCardProps.mock.lastCall, "BaseCard's props")[0];
+    expect(props.subtitle).toBe("Acme");
+    const counts = Object.fromEntries(
+      (props.indicators ?? []).map((i) => [i.type, i.count])
+    );
+    expect(counts).toMatchObject({ PERFORMERS: 2, TAGS: 1, GALLERIES: 1 });
+  });
+
+  it("an image card with a resolution shows a resolution badge", () => {
+    render(
+      <MemoryRouter>
+        <ImageCard
+          image={
+            {
+              ...mockImage,
+              instanceId: "inst-a",
+              width: 1920,
+              height: 1080,
+            } as never
+          }
+        />
+      </MemoryRouter>
+    );
+
+    const props = must(baseCardProps.mock.lastCall, "BaseCard's props")[0];
+    expect(props.indicatorBadge).toEqual({
+      label: "1080p",
+      title: "1920x1080",
+    });
+    // A badge, not a count type
+    expect(props.indicators?.map((i) => i.type) ?? []).not.toContain(
+      "RESOLUTION"
+    );
+  });
+
+  it("an image without a size shows no resolution badge", () => {
+    render(
+      <MemoryRouter>
+        <ImageCard image={{ ...mockImage, instanceId: "inst-a" } as never} />
+      </MemoryRouter>
+    );
+
+    expect(
+      must(baseCardProps.mock.lastCall, "BaseCard's props")[0].indicatorBadge
+    ).toBeUndefined();
   });
 });

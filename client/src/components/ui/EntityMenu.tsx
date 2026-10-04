@@ -1,30 +1,47 @@
-import { MoreVertical } from "lucide-react";
-import { useState, useRef, useEffect, useLayoutEffect } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { MoreVertical } from "lucide-react";
+import { useCoarsePointer } from "../../hooks/useHoverCapable";
 
 /**
- * EntityMenu - 3-dot menu for entity cards
- * Provides "Hide [Entity Type]" option
+ * EntityMenu - 3-dot menu for entity cards, the scene page and the image viewer
+ * Items: "Remove last O" (when `onRemoveLastO` is given and the O count is
+ * above 0) and "Hide [Entity Type]" (when `onHide` is given). A menu with no
+ * item to show renders nothing.
  * Uses portal to render dropdown outside card stacking context
  */
 interface HidePayload {
   entityType: string;
   entityId: string;
   entityName: string;
+  instanceId: string;
 }
 
 interface Props {
   entityType: string;
   entityId: string;
   entityName: string;
+  instanceId: string;
   onHide?: (payload: HidePayload) => void;
+  /** The entity's O count: Remove last O shows only above 0 */
+  oCount?: number;
+  onRemoveLastO?: () => void;
 }
 
-const EntityMenu = ({ entityType, entityId, entityName, onHide }: Props) => {
+const EntityMenu = ({
+  entityType,
+  entityId,
+  entityName,
+  instanceId,
+  onHide,
+  oCount = 0,
+  onRemoveLastO,
+}: Props) => {
   const [isOpen, setIsOpen] = useState(false);
   const [menuPosition, setMenuPosition] = useState({ top: 0, right: 0 });
   const menuRef = useRef<HTMLDivElement>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
+  const coarsePointer = useCoarsePointer();
 
   // Update menu position when opening (useLayoutEffect prevents position flicker)
   useLayoutEffect(() => {
@@ -37,7 +54,8 @@ const EntityMenu = ({ entityType, entityId, entityName, onHide }: Props) => {
     }
   }, [isOpen]);
 
-  // Close menu when clicking outside
+  // Close menu when clicking outside,
+  // in the capture phase: a Modal stops the press bubbling past its backdrop
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent | TouchEvent) => {
       if (
@@ -51,13 +69,13 @@ const EntityMenu = ({ entityType, entityId, entityName, onHide }: Props) => {
     };
 
     if (isOpen) {
-      document.addEventListener("mousedown", handleClickOutside);
-      document.addEventListener("touchstart", handleClickOutside);
+      document.addEventListener("mousedown", handleClickOutside, true);
+      document.addEventListener("touchstart", handleClickOutside, true);
     }
 
     return () => {
-      document.removeEventListener("mousedown", handleClickOutside);
-      document.removeEventListener("touchstart", handleClickOutside);
+      document.removeEventListener("mousedown", handleClickOutside, true);
+      document.removeEventListener("touchstart", handleClickOutside, true);
     };
   }, [isOpen]);
 
@@ -68,6 +86,7 @@ const EntityMenu = ({ entityType, entityId, entityName, onHide }: Props) => {
       window.addEventListener("scroll", handleScroll, true);
       return () => window.removeEventListener("scroll", handleScroll, true);
     }
+    return undefined;
   }, [isOpen]);
 
   const handleButtonClick = (e: React.MouseEvent<HTMLButtonElement>) => {
@@ -80,12 +99,33 @@ const EntityMenu = ({ entityType, entityId, entityName, onHide }: Props) => {
     e.preventDefault();
     e.stopPropagation();
     setIsOpen(false);
-    onHide?.({ entityType, entityId, entityName });
+    onHide?.({
+      entityType,
+      entityId,
+      entityName,
+      instanceId,
+    });
   };
+
+  const handleRemoveLastOClick = (e: React.MouseEvent<HTMLButtonElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsOpen(false);
+    onRemoveLastO?.();
+  };
+
+  const showRemoveLastO = onRemoveLastO !== undefined && oCount > 0;
+  const showHide = onHide !== undefined;
 
   // Capitalize first letter of entity type
   const capitalizedType =
     entityType.charAt(0).toUpperCase() + entityType.slice(1);
+
+  if (!showRemoveLastO && !showHide) {
+    // Nothing to offer (the last O just went): no button, and closed
+    if (isOpen) setIsOpen(false);
+    return null;
+  }
 
   return (
     <div className="relative">
@@ -93,7 +133,11 @@ const EntityMenu = ({ entityType, entityId, entityName, onHide }: Props) => {
       <button
         ref={buttonRef}
         onClick={handleButtonClick}
-        className="p-1 rounded hover:bg-opacity-20 hover:bg-white transition-colors"
+        className={`p-1 rounded hover:bg-opacity-20 hover:bg-white transition-colors ${
+          // The 26 px button gets a 44 px hit area from a ::before; its box
+          // (and the card's row) stay as they are
+          coarsePointer ? "relative before:absolute before:-inset-[9px]" : ""
+        }`}
         style={{ color: "var(--text-primary)" }}
         aria-label="More options"
         title="More options"
@@ -116,13 +160,24 @@ const EntityMenu = ({ entityType, entityId, entityName, onHide }: Props) => {
               zIndex: 9999,
             }}
           >
-            <button
-              onClick={handleHideClick}
-              className="w-full text-left px-4 py-2 hover:bg-opacity-10 hover:bg-white transition-colors text-sm"
-              style={{ color: "var(--text-primary)" }}
-            >
-              Hide {capitalizedType}
-            </button>
+            {showRemoveLastO && (
+              <button
+                onClick={handleRemoveLastOClick}
+                className="w-full text-left px-4 py-2 hover:bg-opacity-10 hover:bg-white transition-colors text-sm"
+                style={{ color: "var(--text-primary)" }}
+              >
+                Remove last O
+              </button>
+            )}
+            {showHide && (
+              <button
+                onClick={handleHideClick}
+                className="w-full text-left px-4 py-2 hover:bg-opacity-10 hover:bg-white transition-colors text-sm"
+                style={{ color: "var(--text-primary)" }}
+              >
+                Hide {capitalizedType}
+              </button>
+            )}
           </div>,
           document.body
         )}

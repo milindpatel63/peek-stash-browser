@@ -1,71 +1,153 @@
-import { test, expect } from "@playwright/test";
+import { type Locator, type Page, expect, test } from "@playwright/test";
 import { ListPage } from "./pages/ListPage";
+import { requireData } from "./support/data";
 
 /**
- * E2E tests for pagination behavior across library list pages.
+ * E2E tests for pagination on the scene list: Next and Previous, the page and
+ * per_page URL parameters, the per-page selector, and the scroll position and
+ * history around them.
  *
- * Covers URL state management, per-page selector, page navigation,
- * and cross-entity pagination support.
+ * The replay library has 361 scenes, so every page here is full; a dev-stack
+ * library with a single page skips (requireData).
  */
 
+/** A card's title text */
+const titleOf = (card: Locator) => card.locator(".card-title");
+
+/** Opens the scene list at `path` and waits for its cards */
+async function openScenes(page: Page, path: string) {
+  const list = new ListPage(page);
+  await list.goto(path);
+  requireData(await list.waitForResults("Scene"), "scenes");
+  return { list, cards: list.cards("Scene") };
+}
+
+/** Fails, or skips on the dev stack, unless the list has a second page */
+async function requireSecondPage(list: ListPage) {
+  requireData(await list.nextPage.isEnabled(), "more than one page of scenes");
+}
+
 test.describe("Pagination", () => {
-  test("pagination controls appear when there are multiple pages", async ({
+  test("Next and Previous move between pages", async ({ page }) => {
+    const { list, cards } = await openScenes(page, "/scenes?per_page=12");
+    await requireSecondPage(list);
+    const firstTitle = (await titleOf(cards.first()).innerText()).trim();
+
+    await list.nextPage.click();
+    await expect(page).toHaveURL(/[?&]page=2(&|$)/);
+    await expect(titleOf(cards.first())).not.toHaveText(firstTitle);
+
+    await list.previousPage.click();
+    await expect(page).toHaveURL((url) => {
+      const pageParam = url.searchParams.get("page");
+      return pageParam === null || pageParam === "1";
+    });
+    await expect(titleOf(cards.first())).toHaveText(firstTitle);
+  });
+
+  test("page=2 in the URL opens the second page", async ({ page }) => {
+    const { list, cards } = await openScenes(page, "/scenes?per_page=24");
+    requireData((await cards.count()) >= 13, "13 scenes");
+    const thirteenth = (await titleOf(cards.nth(12)).innerText()).trim();
+
+    await list.goto("/scenes?page=2&per_page=12");
+    await expect(titleOf(cards.first())).toHaveText(thirteenth, {
+      timeout: 10_000,
+    });
+  });
+
+  test("choosing 48 per page shows up to 48 cards and writes per_page", async ({
     page,
   }) => {
-    const listPage = new ListPage(page);
-    await listPage.goto("/scenes");
+    const { list, cards } = await openScenes(page, "/scenes");
+    await requireSecondPage(list);
 
-    // Pagination may or may not be visible depending on data
-    // Just verify the page loads correctly
-    await expect(listPage.searchInput).toBeVisible();
+    await list.perPage.selectOption("48");
+    await expect(page).toHaveURL(/[?&]per_page=48(&|$)/);
+    await expect.poll(() => cards.count()).toBeGreaterThan(24);
+    expect(await cards.count()).toBeLessThanOrEqual(48);
   });
 
-  test("page URL param updates when navigating pages", async ({ page }) => {
-    const listPage = new ListPage(page);
-    await listPage.goto("/scenes?page=2");
-
-    // URL should preserve the page param
-    expect(page.url()).toContain("page=2");
-    await expect(listPage.searchInput).toBeVisible({ timeout: 10_000 });
-  });
-
-  test("per-page selector changes results count", async ({ page }) => {
-    const listPage = new ListPage(page);
-    await listPage.goto("/scenes");
-
-    // Check if per-page selector exists
-    if (await listPage.perPageSelect.isVisible().catch(() => false)) {
-      const value = await listPage.perPageSelect.inputValue();
-      expect(["12", "24", "48", "96", "120"]).toContain(value);
-    }
-  });
-
-  test("navigating to page=1 and page=2 shows different URL state", async ({
+  test("per_page in the URL sets the selector and the card count", async ({
     page,
   }) => {
-    const listPage = new ListPage(page);
-    await listPage.goto("/scenes?page=1");
-    await expect(listPage.searchInput).toBeVisible({ timeout: 10_000 });
+    const { list, cards } = await openScenes(page, "/scenes?per_page=12");
+    await requireSecondPage(list);
 
-    // Navigate to page 2
-    await page.goto("/scenes?page=2");
-    await expect(listPage.searchInput).toBeVisible({ timeout: 10_000 });
-    expect(page.url()).toContain("page=2");
+    await expect(cards).toHaveCount(12);
+    await expect(list.perPage).toHaveValue("12");
+  });
+});
+
+test.describe("Scroll position", () => {
+  const scrollY = (page: Page) => page.evaluate(() => window.scrollY);
+
+  const titleLinkOf = (card: Locator) => card.locator("a:has(.card-title)");
+
+  test("changing page size keeps the scroll position", async ({ page }) => {
+    const { list, cards } = await openScenes(page, "/scenes?per_page=24");
+    await requireSecondPage(list);
+
+    await list.perPage.scrollIntoViewIfNeeded();
+    const before = await scrollY(page);
+    expect(before).toBeGreaterThan(200);
+
+    await list.perPage.selectOption("48");
+    await expect(page).toHaveURL(/per_page=48/);
+    await expect.poll(() => cards.count()).toBeGreaterThan(24);
+
+    expect(await scrollY(page)).toBeGreaterThanOrEqual(before - 50);
   });
 
-  test("pagination works on performers page", async ({ page }) => {
-    const listPage = new ListPage(page);
-    await listPage.goto("/performers");
+  test("Back from a scene returns to the list at the same position in one press", async ({
+    page,
+  }) => {
+    const { cards } = await openScenes(page, "/scenes?per_page=24");
+    requireData((await cards.count()) >= 16, "16 scenes");
 
-    await expect(listPage.searchInput).toBeVisible();
-    // Verify page loads with pagination support
+    const card = cards.nth(15);
+    await card.scrollIntoViewIfNeeded();
+    const before = await scrollY(page);
+
+    await titleLinkOf(card).click();
+    await expect(page).toHaveURL(/\/scene\//);
+
+    await page.goBack();
+    await expect(page).toHaveURL(/\/scenes\?per_page=24$/);
+    await expect
+      .poll(async () => Math.abs((await scrollY(page)) - before), {
+        timeout: 10_000,
+      })
+      .toBeLessThanOrEqual(100);
   });
 
-  test("per-page value persists in URL", async ({ page }) => {
-    const listPage = new ListPage(page);
-    await listPage.goto("/scenes?per_page=48");
+  test("opening a scene from the grid adds exactly one history entry", async ({
+    page,
+  }) => {
+    const { cards } = await openScenes(page, "/scenes?per_page=24");
 
-    await expect(listPage.searchInput).toBeVisible({ timeout: 10_000 });
-    expect(page.url()).toContain("per_page=48");
+    const lengthBefore = await page.evaluate(() => history.length);
+    await titleLinkOf(cards.first()).click();
+    await expect(page).toHaveURL(/\/scene\//);
+
+    expect(await page.evaluate(() => history.length)).toBe(lengthBefore + 1);
+  });
+
+  test("ctrl-click opens the scene in a new tab and leaves the grid", async ({
+    page,
+  }) => {
+    const { cards } = await openScenes(page, "/scenes?per_page=24");
+
+    const link = titleLinkOf(cards.first());
+    const [newPage] = await Promise.all([
+      page.context().waitForEvent("page"),
+      link.click({ modifiers: ["ControlOrMeta"] }),
+    ]);
+    await newPage.waitForURL(/\/scene\//);
+
+    // Give a stray in-app navigation time to happen before checking.
+    await page.waitForTimeout(500);
+    expect(new URL(page.url()).pathname).toBe("/scenes");
+    await newPage.close();
   });
 });

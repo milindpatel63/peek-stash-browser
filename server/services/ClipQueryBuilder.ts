@@ -1,611 +1,560 @@
 /**
- * ClipQueryBuilder - SQL-native clip querying
+ * The clip list on the base query builder (item 74): the Clips page, a
+ * scene's clips and a clip by id.
  *
- * Builds parameterized SQL queries for clip filtering, sorting, and pagination.
- * Uses JOIN-based exclusions to avoid SQLite parameter limits (P2029 error).
+ * A clip shows only while its scene does: the scene is joined on the clip's
+ * (sceneId, sceneInstanceId) and must be live, and the viewer's exclusions
+ * apply to both, the clip's own rows (its tags cascade to it) through the
+ * base's join and the scene's through the spec's second join. Its primary
+ * tag and tag list load with the page's relations, only the tags the viewer
+ * may see. A clip has no per-user data, so no user joins. The instance
+ * filter, the random sort and the count are the base's.
+ *
+ * How it plans (S5, measured at 207k and 300k clips): the default page
+ * (newest first) walks `StashClip_browse_idx` and stops after its rows,
+ * each clip's scene read by its key (`deletedAt` never drives it, see the
+ * spec); the count checks each scene live on
+ * `StashScene_id_stashInstanceId_deletedAt_idx` from the index alone. A
+ * filter on the clip's tags, its scene's tags or its scene's performers
+ * matches a list of the parents the junction's ref index names
+ * (`sortedByIndex: false`): SQLite drives from it when it is short, and
+ * builds it once and probes it per clip when it is long (beside a studio or
+ * a scene, which drive, each probes per clip). The scene is an INNER JOIN
+ * the planner may reorder, so a studio drives from its own scenes; forcing
+ * the clip first (`CROSS JOIN`) made a studio's page 13 times slower.
  */
-import prisma from "../prisma/singleton.js";
-import { logger } from "../utils/logger.js";
-import type { FilterClause } from "../utils/sqlFilterBuilders.js";
+import type { SortDirection } from "@peek/shared-types/filters/index.js";
+import type { ClipTagRef } from "../types/api/clips.js";
+import type { ClipRow, ClipTagRefRow } from "../types/internal/queryRows.js";
+import type {
+  ClipListRequest,
+  FilterRef,
+  RefCriterion,
+} from "../types/parsedFilters.js";
+import { entityKey } from "../utils/entityRef.js";
+import { expandRefs, expandRefsEach } from "../utils/hierarchyUtils.js";
 import {
-  parseCompositeFilterValues,
-  buildJunctionFilter,
-  buildDirectFilter,
-} from "../utils/sqlFilterBuilders.js";
-import { coerceEntityRefs } from "@peek/shared-types/instanceAwareId.js";
+  type ColumnTarget,
+  type FilterClause,
+  type JunctionTarget,
+  type RefClauseOptions,
+  allOf,
+  anyOf,
+  buildInstantFilter,
+  buildNumericFilter,
+  buildTextFilter,
+  exclusionJoin,
+  refClause,
+  searchAll,
+} from "../utils/sqlClauses.js";
+import { searchTerms } from "../utils/sqlHelpers.js";
+import {
+  EntityQueryBuilder,
+  type EntitySpec,
+  type FieldClauses,
+  type Leaf,
+  type LeafContext,
+  type QueryContext,
+  type SortExpr,
+  hierarchicalRefClause,
+} from "./query/EntityQueryBuilder.js";
+import {
+  type NestedEntity,
+  type NestedLink,
+  loadNestedRefs,
+} from "./query/nestedRefs.js";
 
-// Query builder options
-export interface ClipQueryOptions {
-  userId: number;
-  page?: number;
-  perPage?: number;
-  sortBy?: string;
-  sortDir?: "asc" | "desc";
-  isGenerated?: boolean;
-  sceneId?: string;
-  tagIds?: string[];
-  sceneTagIds?: string[];
-  performerIds?: string[];
-  studioId?: string;
-  q?: string;
-  allowedInstanceIds?: string[];
-  randomSeed?: number; // Seed for consistent random ordering
-}
-
-// Clip with relations (matches ClipService interface)
+/**
+ * A clip with its scene and tags as the database holds them: ClipService
+ * turns the paths into proxy URLs and the dates into ISO strings
+ * (`ClipWithRelations` in `shared/types/api/clips.ts`)
+ */
 export interface ClipWithRelations {
   id: string;
+  instanceId: string;
   sceneId: string;
   title: string | null;
   seconds: number;
   endSeconds: number | null;
   primaryTagId: string | null;
+  screenshotPath: string | null;
   isGenerated: boolean;
   stashCreatedAt: Date | null;
   stashUpdatedAt: Date | null;
-  primaryTag: { id: string; name: string; color: string | null } | null;
-  tags: Array<{ id: string; name: string; color: string | null }>;
+  primaryTag: ClipTagRef | null;
+  tags: ClipTagRef[];
   scene: {
     id: string;
     title: string | null;
     pathScreenshot: string | null;
     studioId: string | null;
-    stashInstanceId: string | null;
+    stashInstanceId: string;
   };
 }
 
-// Raw query result row
-interface ClipRow {
-  id: string;
-  stashInstanceId: string;
-  sceneId: string;
-  sceneInstanceId: string;
-  title: string | null;
-  seconds: number;
-  endSeconds: number | null;
-  primaryTagId: string | null;
-  primaryTagInstanceId: string | null;
-  isGenerated: number; // SQLite returns 0/1
-  stashCreatedAt: string | null;
-  stashUpdatedAt: string | null;
-  // Scene fields
-  sceneTitle: string | null;
-  scenePathScreenshot: string | null;
-  sceneStudioId: string | null;
-  // Primary tag fields
-  primaryTagName: string | null;
-  primaryTagColor: string | null;
+/** A scene's clips: the scene by (id, instance), a bare id on every allowed instance */
+export interface SceneClipsOptions {
+  readonly userId: number;
+  readonly allowedInstanceIds: readonly string[];
+  readonly scene: FilterRef;
+  /** Clips without a generated preview too */
+  readonly includeUngenerated: boolean;
+}
+
+/** A clip by its ref: a bare id matches it on every allowed instance */
+export interface ClipByIdOptions {
+  readonly userId: number;
+  readonly allowedInstanceIds: readonly string[];
+  readonly ref: FilterRef;
+}
+
+const SELECT_COLUMNS = `c.id, c.stashInstanceId, c.sceneId, c.sceneInstanceId,
+  c.title, c.seconds, c.endSeconds,
+  c.primaryTagId, c.primaryTagInstanceId,
+  c.screenshotPath,
+  c.isGenerated, c.stashCreatedAt, c.stashUpdatedAt,
+  s.title AS sceneTitle, s.pathScreenshot AS scenePathScreenshot,
+  s.studioId AS sceneStudioId`;
+
+/**
+ * The name a clip shows (`clipTitle` in the client): its title, else its
+ * primary tag's name while the tag is live. A hidden tag hides the clip, so
+ * no visibility arm. A scalar subquery, read only for untitled rows, so
+ * titled clips keep the browse index's title column.
+ */
+export const CLIP_NAME_SQL = `COALESCE(NULLIF(c.title, ''), (SELECT pt.name FROM StashTag pt WHERE pt.id = c.primaryTagId AND pt.stashInstanceId = c.primaryTagInstanceId AND pt.deletedAt IS NULL))`;
+
+/** The clip's scene, on its (id, instance): a clip without one does not list */
+const SCENE_JOIN =
+  "INNER JOIN StashScene s ON c.sceneId = s.id AND c.sceneInstanceId = s.stashInstanceId";
+
+/** Clips of a scene: the clip's own scene columns */
+const CLIP_SCENE: ColumnTarget = {
+  kind: "column",
+  parentTable: "StashClip",
+  parentAlias: "c",
+  idCol: "sceneId",
+  instanceCol: "sceneInstanceId",
+};
+
+/** A tag on the clip itself: its primary tag ... */
+const PRIMARY_TAG: ColumnTarget = {
+  kind: "column",
+  parentTable: "StashClip",
+  parentAlias: "c",
+  idCol: "primaryTagId",
+  instanceCol: "primaryTagInstanceId",
+};
+
+/** The primary tag as a nested ref's link: a column of the clip's own row */
+const PRIMARY_TAG_LINK: NestedLink = {
+  table: "StashClip",
+  parentIdCol: "id",
+  parentInstanceCol: "stashInstanceId",
+  refIdCol: "primaryTagId",
+  refInstanceCol: "primaryTagInstanceId",
+};
+
+/** A clip's tag as a nested ref: its name and color */
+const CLIP_TAG_REF: NestedEntity<ClipTagRefRow, ClipTagRef> = {
+  table: "StashTag",
+  entityType: "tag",
+  columns: "x.name, x.color",
+  toRef: (row) => ({ id: row.id, name: row.name, color: row.color }),
+};
+
+/** ... or one of its tag list */
+const CLIP_TAGS: JunctionTarget = {
+  kind: "junction",
+  table: "ClipTag",
+  alias: "ct",
+  parentAlias: "c",
+  parentIdCol: "clipId",
+  parentInstanceCol: "clipInstanceId",
+  refIdCol: "tagId",
+  refInstanceCol: "tagInstanceId",
+};
+
+/**
+ * A tag on the clip's scene, matched on the clip's own scene columns: while
+ * the default page walks StashClip_browse_idx, a clip whose scene lacks the
+ * tag is passed over from the index before its scene is read
+ */
+const SCENE_TAGS: JunctionTarget = {
+  kind: "junction",
+  table: "SceneTag",
+  alias: "st",
+  parentAlias: "s",
+  parentKey: ["c.sceneId", "c.sceneInstanceId"],
+  parentIdCol: "sceneId",
+  parentInstanceCol: "sceneInstanceId",
+  refIdCol: "tagId",
+  refInstanceCol: "tagInstanceId",
+};
+
+/** A tag the clip's scene inherits (from its performers, studio, groups) */
+const SCENE_INHERITED_TAGS: JunctionTarget = {
+  ...SCENE_TAGS,
+  table: "SceneInheritedTag",
+  alias: "sit",
+};
+
+/** A performer in the clip's scene */
+const SCENE_PERFORMERS: JunctionTarget = {
+  kind: "junction",
+  table: "ScenePerformer",
+  alias: "sp",
+  parentAlias: "s",
+  parentIdCol: "sceneId",
+  parentInstanceCol: "sceneInstanceId",
+  refIdCol: "performerId",
+  refInstanceCol: "performerInstanceId",
+};
+
+/** The clip's scene's studio */
+const SCENE_STUDIO: ColumnTarget = {
+  kind: "column",
+  parentTable: "StashScene",
+  parentAlias: "s",
+  idCol: "studioId",
+  instanceCol: "stashInstanceId",
+};
+
+/**
+ * A clip ref clause's options: the CTE name, and the index shape when the
+ * list drives or the leaf sits under an any group
+ */
+function refOptions(ctx: LeafContext, name: string): RefClauseOptions {
+  return {
+    name,
+    allowedInstanceIds: ctx.allowedInstanceIds,
+    ...(ctx.lists === true || ctx.underAny ? { sortedByIndex: false } : {}),
+  };
 }
 
 /**
- * Builds and executes SQL queries for clip filtering
+ * A clip leaf's CTE name: the one the statement always had for the field's
+ * own values (`studio`, `scene`), the leaf's for its excludes
+ * (`studios_not`), so the two leaves of one field never share a name
  */
-class ClipQueryBuilder {
-  private readonly SELECT_COLUMNS = `
-    c.id, c.stashInstanceId, c.sceneId, c.sceneInstanceId,
-    c.title, c.seconds, c.endSeconds,
-    c.primaryTagId, c.primaryTagInstanceId,
-    c.isGenerated, c.stashCreatedAt, c.stashUpdatedAt,
-    s.title AS sceneTitle, s.pathScreenshot AS scenePathScreenshot,
-    s.studioId AS sceneStudioId,
-    pt.name AS primaryTagName, pt.color AS primaryTagColor
-  `.trim();
+function cteName(ctx: LeafContext, field: string, own: string): string {
+  return ctx.name === field ? own : ctx.name;
+}
 
-  /**
-   * Build FROM clause with exclusion JOIN
-   */
-  private buildFromClause(userId: number): { sql: string; params: number[] } {
+/**
+ * A tag on the clip itself: its primary tag or one of its tag list, each
+ * ref with its sub-tags to the criterion's depth. Has ANY is either holding
+ * any of the refs; Has ALL each ref (with its sub-tags) held by one or the
+ * other (one OR per ref, AND-ed), so a clip with T1 as its primary tag and
+ * T2 in its list has both; Has NONE neither holding any (the primary tag's
+ * EXCLUDES keeps a clip without one). An OR of the two EXCLUDES would keep
+ * a clip holding a ref in only one of them. The CTEs are the statement's
+ * own (`primary_tag`, `clip_tags`), the excludes' leaf's prefixed with its
+ * name.
+ */
+async function clipTagClause(
+  criterion: RefCriterion,
+  ctx: LeafContext
+): Promise<FilterClause> {
+  const prefix = ctx.name === "tags" ? "" : `${ctx.name}_`;
+  const opts = (name: string) => refOptions(ctx, `${prefix}${name}`);
+  const { depth } = criterion;
+  const allowed = ctx.allowedInstanceIds;
+  const either = (matched: readonly FilterRef[], tag: string) =>
+    anyOf([
+      refClause(PRIMARY_TAG, matched, "INCLUDES", opts(`${tag}primary_tag`)),
+      refClause(CLIP_TAGS, matched, "INCLUDES", opts(`${tag}clip_tags`)),
+    ]);
+  switch (criterion.modifier) {
+    case "INCLUDES":
+      return either(
+        await expandRefs("tag", criterion.refs, depth, allowed),
+        ""
+      );
+    case "INCLUDES_ALL": {
+      const groups = await expandRefsEach(
+        "tag",
+        criterion.refs,
+        depth,
+        allowed
+      );
+      return allOf(groups.map((group, i) => either(group, `all${i}_`)));
+    }
+    case "EXCLUDES": {
+      const refs = await expandRefs("tag", criterion.refs, depth, allowed);
+      return allOf([
+        refClause(PRIMARY_TAG, refs, "EXCLUDES", opts("primary_tag")),
+        refClause(CLIP_TAGS, refs, "EXCLUDES", opts("clip_tags")),
+      ]);
+    }
+  }
+}
+
+/** A ref criterion that names the clips the statement drives from: a studio's or scenes' INCLUDES */
+function drives(criterion: Leaf<"clip">["criterion"]): boolean {
+  return (
+    typeof criterion === "object" &&
+    "refs" in criterion &&
+    criterion.modifier !== "EXCLUDES" &&
+    criterion.refs.length > 0
+  );
+}
+
+class ClipQueryBuilder extends EntityQueryBuilder<
+  ClipRow,
+  ClipWithRelations,
+  "clip"
+> {
+  protected readonly spec: EntitySpec = {
+    table: "StashClip",
+    alias: "c",
+    entityType: "clip",
+    userJoins: [],
+    joins: [SCENE_JOIN],
+    // The scene's exclusion rows: a clip hides with its scene
+    extraJoins: (ctx) =>
+      ctx.applyExclusions
+        ? [
+            {
+              sql: exclusionJoin(
+                "es",
+                "scene",
+                "c.sceneId",
+                "c.sceneInstanceId"
+              ),
+              params: [ctx.userId],
+            },
+          ]
+        : [],
+    extraBaseWhere: (ctx) => [
+      // `+` keeps deletedAt from driving the scene: with sqlite_stat1 alone
+      // (no STAT4 samples) SQLite averages deletedAt over its distinct
+      // values, takes the live scenes for a few thousand and lists the clips
+      // from every live scene, then sorts them (325 ms a page at 207k clips,
+      // against 0.4 with the hint). The scene is still read by its key, the
+      // check done on StashScene_id_stashInstanceId_deletedAt_idx.
+      { sql: "+s.deletedAt IS NULL", params: [] },
+      ...(ctx.applyExclusions ? [{ sql: "es.id IS NULL", params: [] }] : []),
+    ],
+    selectColumns: () => ({ sql: SELECT_COLUMNS, params: [] }),
+    defaultSort: "stashCreatedAt",
+  };
+
+  protected sortMap(
+    direction: SortDirection,
+    _filter: ClipListRequest["filter"],
+    _ctx: QueryContext
+  ): Record<string, SortExpr> {
+    const by = (sql: string): SortExpr => ({
+      sql: `${sql} ${direction}`,
+      params: [],
+    });
     return {
-      sql: `
-        FROM StashClip c
-        INNER JOIN StashScene s ON c.sceneId = s.id AND c.sceneInstanceId = s.stashInstanceId
-        LEFT JOIN StashTag pt ON c.primaryTagId = pt.id AND c.primaryTagInstanceId = pt.stashInstanceId
-        LEFT JOIN UserExcludedEntity e ON e.userId = ? AND e.entityType = 'scene' AND e.entityId = c.sceneId AND (e.instanceId = '' OR e.instanceId = c.sceneInstanceId)
-      `.trim(),
-      params: [userId],
+      stashCreatedAt: by("c.stashCreatedAt"),
+      stashUpdatedAt: by("c.stashUpdatedAt"),
+      title: this.titleSort(direction),
+      seconds: by("c.seconds"),
+      sceneTitle: by("s.title"),
+      duration: by("(c.endSeconds - c.seconds)"),
     };
   }
 
   /**
-   * Build base WHERE clause (always filter deleted and excluded)
+   * The name the card shows (`CLIP_NAME_SQL`: the title, else the live
+   * primary tag's name), case-insensitive; a clip with neither last in both
+   * directions.
    */
-  private buildBaseWhere(): FilterClause {
+  private titleSort(direction: SortDirection): SortExpr {
     return {
-      sql: "c.deletedAt IS NULL AND s.deletedAt IS NULL AND e.id IS NULL",
+      sql: `${CLIP_NAME_SQL} IS NULL, ${CLIP_NAME_SQL} COLLATE NOCASE ${direction}`,
       params: [],
     };
   }
 
   /**
-   * Build instance filter clause
+   * The clip filter's clauses, one per field in the order the statement
+   * ANDs them, and the search. The clip's tags, its scene's tags and its
+   * scene's performers take Has ANY, Has ALL and Has NONE; the studio is
+   * single-valued (INCLUDES or EXCLUDES, which keeps a scene without one).
+   * The tags, scene tags and studio take a depth (their sub-tags and
+   * sub-studios). A scene tag is one the scene holds (SceneTag) or inherits
+   * (SceneInheritedTag), in every modifier, as on the scene list. The
+   * duration is the end less the start (a clip without an end matches no
+   * comparison), the dates the clip's epoch columns in the viewer's day.
+   *
+   * Has ANY and Has ALL on a junction (the clip's tag list, its scene's tags
+   * and performers) match the list of parents the junction's ref index
+   * names (`sortedByIndex: false`), which SQLite drives from when it is
+   * short (the primary tag's index beside it: MULTI-INDEX OR) and builds
+   * once and probes when it is long, where a correlated EXISTS probed the
+   * junction for every clip (a clip tag: 50 ms to 0.7 at 207k clips). A
+   * studio or scenes it includes name few clips and drive the statement
+   * themselves; beside one each other filter probes those clips (EXISTS),
+   * which is cheaper than reading a common tag's whole list first (a studio
+   * and a clip tag: 10 ms, against 13 with the list). Has NONE keeps its NOT
+   * EXISTS per clip. Whether a studio or scenes drive is a fact of the top
+   * level (the filter and the root rows of an "all" where), which
+   * `leafContextFor` hands each clause as `lists`; a leaf under an any group
+   * reads its list whatever drives (an OR cannot probe a driver's clips
+   * alone). The CTE names stay the ones the statement always had; a field's
+   * excludes take their leaf's (`cteName`), a where row's its own
+   * (`w<n>_<field>`).
    */
-  private buildInstanceFilter(allowedInstanceIds: string[] | undefined): FilterClause {
-    if (!allowedInstanceIds || allowedInstanceIds.length === 0) {
-      return { sql: "", params: [] };
-    }
-
-    const placeholders = allowedInstanceIds.map(() => "?").join(", ");
-    return {
-      sql: `(c.stashInstanceId IN (${placeholders}) OR c.stashInstanceId IS NULL)`,
-      params: allowedInstanceIds,
-    };
-  }
-
-  /**
-   * Build isGenerated filter
-   */
-  private buildGeneratedFilter(isGenerated: boolean | undefined): FilterClause {
-    if (isGenerated === undefined) {
-      return { sql: "", params: [] };
-    }
-    return {
+  protected override readonly fieldClauses: FieldClauses<"clip"> = {
+    is_generated: (isGenerated) => ({
       sql: "c.isGenerated = ?",
       params: [isGenerated ? 1 : 0],
-    };
-  }
+    }),
+    scenes: (c, ctx) =>
+      refClause(
+        CLIP_SCENE,
+        c.refs,
+        c.modifier,
+        refOptions(ctx, cteName(ctx, "scenes", "scene"))
+      ),
+    tags: (c, ctx) => clipTagClause(c, ctx),
+    scene_tags: (c, ctx) =>
+      hierarchicalRefClause("tag", SCENE_TAGS, c, ctx, {
+        name: cteName(ctx, "scene_tags", "scene_tags"),
+        inheritedJunction: SCENE_INHERITED_TAGS,
+        ...(ctx.lists === true ? { sortedByIndex: false } : {}),
+      }),
+    performers: (c, ctx) =>
+      refClause(
+        SCENE_PERFORMERS,
+        c.refs,
+        c.modifier,
+        refOptions(ctx, cteName(ctx, "performers", "performers"))
+      ),
+    studios: (c, ctx) =>
+      hierarchicalRefClause("studio", SCENE_STUDIO, c, ctx, {
+        name: cteName(ctx, "studios", "studio"),
+        ...(ctx.lists === true ? { sortedByIndex: false } : {}),
+      }),
+    duration: (c) => buildNumericFilter(c, "(c.endSeconds - c.seconds)"),
+    created_at: (c, ctx) =>
+      buildInstantFilter(c, "c.stashCreatedAt", ctx.timeZone),
+    updated_at: (c, ctx) =>
+      buildInstantFilter(c, "c.stashUpdatedAt", ctx.timeZone),
+    // Comparisons read the shown name; set / not set read the clip's own title
+    title: (c) =>
+      buildTextFilter(
+        c,
+        c.modifier === "IS_NULL" || c.modifier === "NOT_NULL"
+          ? "c.title"
+          : CLIP_NAME_SQL
+      ),
+  };
 
   /**
-   * Build scene ID filter
+   * No studio and no scenes include at the top level (the filter, or a root
+   * row of an "all" where): the clauses list by their junctions' indexes. A
+   * studio inside an any group drives nothing.
    */
-  private buildSceneIdFilter(sceneId: string | undefined): FilterClause {
-    if (!sceneId) {
-      return { sql: "", params: [] };
-    }
+  protected override leafContextFor(
+    top: readonly Leaf<"clip">[],
+    ctx: LeafContext
+  ): LeafContext {
     return {
-      sql: "c.sceneId = ?",
-      params: [sceneId],
+      ...ctx,
+      lists: !top.some(
+        (leaf) =>
+          (leaf.field === "studios" || leaf.field === "scenes") &&
+          drives(leaf.criterion)
+      ),
     };
   }
 
-  /**
-   * Build text search filter
-   */
-  private buildSearchFilter(q: string | undefined): FilterClause {
-    if (!q) {
-      return { sql: "", params: [] };
-    }
+  /** The search across the shown name: every word must match (`searchAll`) */
+  protected override searchClause(q: string): FilterClause {
+    return searchAll(searchTerms(q), (pattern) => ({
+      sql: `${CLIP_NAME_SQL} LIKE ? ESCAPE '\\'`,
+      params: [pattern],
+    }));
+  }
+
+  protected transformRow(row: ClipRow): ClipWithRelations {
     return {
-      sql: "c.title LIKE ?",
-      params: [`%${q}%`],
+      id: row.id,
+      instanceId: row.stashInstanceId,
+      sceneId: row.sceneId,
+      title: row.title,
+      seconds: row.seconds,
+      endSeconds: row.endSeconds,
+      primaryTagId: row.primaryTagId,
+      screenshotPath: row.screenshotPath,
+      isGenerated: row.isGenerated,
+      stashCreatedAt: row.stashCreatedAt,
+      stashUpdatedAt: row.stashUpdatedAt,
+      // Filled by populateRelations
+      primaryTag: null,
+      tags: [],
+      scene: {
+        id: row.sceneId,
+        title: row.sceneTitle,
+        pathScreenshot: row.scenePathScreenshot,
+        studioId: row.sceneStudioId,
+        stashInstanceId: row.sceneInstanceId,
+      },
     };
   }
 
   /**
-   * Build clip tag filter (matches clips with ANY of these tags on the clip itself).
-   * Hybrid: checks both primaryTagId direct column AND ClipTag junction table.
+   * Each clip's primary tag and tag list, only the tags the viewer may see
+   * (`query/nestedRefs.ts`: a deleted tag, or one held for a pending
+   * recompute, is no chip): one statement each for the page, driven from
+   * its (id, instance) pairs
    */
-  private buildTagFilter(tagIds: string[] | undefined): FilterClause {
-    if (!tagIds || tagIds.length === 0) {
-      return { sql: "", params: [] };
-    }
+  protected async populateRelations(
+    clips: ClipWithRelations[],
+    ctx: QueryContext
+  ): Promise<void> {
+    if (clips.length === 0) return;
 
-    const { parsed, hasInstanceIds } = parseCompositeFilterValues(tagIds);
-    const bareIds = parsed.map((p) => p.id);
-
-    // ClipTag junction filter (instance-aware)
-    const junctionFilter = buildJunctionFilter(
-      coerceEntityRefs(tagIds), "ClipTag", "clipId", "clipInstanceId",
-      "tagId", "tagInstanceId", "c", "INCLUDES"
-    );
-
-    if (!hasInstanceIds) {
-      // Bare IDs: simple IN for primaryTagId + junction EXISTS
-      const placeholders = bareIds.map(() => "?").join(", ");
-      return {
-        sql: `(c.primaryTagId IN (${placeholders}) OR ${junctionFilter.sql})`,
-        params: [...bareIds, ...junctionFilter.params],
-      };
-    }
-
-    // Composite IDs: pair conditions for primaryTagId + junction EXISTS
-    const primaryPairConditions = parsed.map((p) => {
-      if (p.instanceId) {
-        return "(c.primaryTagId = ? AND c.primaryTagInstanceId = ?)";
-      }
-      return "(c.primaryTagId = ?)";
-    });
-    const primaryParams: string[] = [];
-    for (const p of parsed) {
-      primaryParams.push(p.id);
-      if (p.instanceId) primaryParams.push(p.instanceId);
-    }
-
-    return {
-      sql: `(${primaryPairConditions.join(" OR ")} OR ${junctionFilter.sql})`,
-      params: [...primaryParams, ...junctionFilter.params],
-    };
-  }
-
-  /**
-   * Build scene tag filter (matches clips from scenes with ANY of these tags).
-   * Note: parent alias is "c" (clip) — joins via c.sceneId/c.sceneInstanceId.
-   */
-  private buildSceneTagFilter(sceneTagIds: string[] | undefined): FilterClause {
-    if (!sceneTagIds || sceneTagIds.length === 0) {
-      return { sql: "", params: [] };
-    }
-
-    // SceneTag junction uses sceneId/sceneInstanceId as parent columns,
-    // but the parent here is the clip table (c), not scenes (s).
-    // buildJunctionFilter joins on parentAlias.id / parentAlias.stashInstanceId,
-    // but clips use c.sceneId / c.sceneInstanceId. Build manually with composite support.
-    const { parsed, hasInstanceIds } = parseCompositeFilterValues(sceneTagIds);
-    const bareIds = parsed.map((p) => p.id);
-
-    if (!hasInstanceIds) {
-      const placeholders = bareIds.map(() => "?").join(", ");
-      return {
-        sql: `EXISTS (
-          SELECT 1 FROM SceneTag st
-          WHERE st.sceneId = c.sceneId AND st.sceneInstanceId = c.sceneInstanceId
-          AND st.tagId IN (${placeholders})
-        )`,
-        params: bareIds,
-      };
-    }
-
-    // Instance-aware pair conditions
-    const pairConditions = parsed.map((p) => {
-      if (p.instanceId) {
-        return "(st.tagId = ? AND st.tagInstanceId = ?)";
-      }
-      return "(st.tagId = ?)";
-    });
-    const pairParams: string[] = [];
-    for (const p of parsed) {
-      pairParams.push(p.id);
-      if (p.instanceId) pairParams.push(p.instanceId);
-    }
-
-    return {
-      sql: `EXISTS (
-        SELECT 1 FROM SceneTag st
-        WHERE st.sceneId = c.sceneId AND st.sceneInstanceId = c.sceneInstanceId
-        AND (${pairConditions.join(" OR ")})
-      )`,
-      params: pairParams,
-    };
-  }
-
-  /**
-   * Build performer filter (matches clips from scenes with ANY of these performers).
-   * Joins via c.sceneId/c.sceneInstanceId → ScenePerformer.
-   */
-  private buildPerformerFilter(performerIds: string[] | undefined): FilterClause {
-    if (!performerIds || performerIds.length === 0) {
-      return { sql: "", params: [] };
-    }
-
-    const { parsed, hasInstanceIds } = parseCompositeFilterValues(performerIds);
-    const bareIds = parsed.map((p) => p.id);
-
-    if (!hasInstanceIds) {
-      const placeholders = bareIds.map(() => "?").join(", ");
-      return {
-        sql: `EXISTS (
-          SELECT 1 FROM ScenePerformer sp
-          WHERE sp.sceneId = c.sceneId AND sp.sceneInstanceId = c.sceneInstanceId
-          AND sp.performerId IN (${placeholders})
-        )`,
-        params: bareIds,
-      };
-    }
-
-    const pairConditions = parsed.map((p) => {
-      if (p.instanceId) {
-        return "(sp.performerId = ? AND sp.performerInstanceId = ?)";
-      }
-      return "(sp.performerId = ?)";
-    });
-    const pairParams: string[] = [];
-    for (const p of parsed) {
-      pairParams.push(p.id);
-      if (p.instanceId) pairParams.push(p.instanceId);
-    }
-
-    return {
-      sql: `EXISTS (
-        SELECT 1 FROM ScenePerformer sp
-        WHERE sp.sceneId = c.sceneId AND sp.sceneInstanceId = c.sceneInstanceId
-        AND (${pairConditions.join(" OR ")})
-      )`,
-      params: pairParams,
-    };
-  }
-
-  /**
-   * Build studio filter (direct FK on the joined scene table)
-   */
-  private buildStudioFilter(studioId: string | undefined): FilterClause {
-    if (!studioId) {
-      return { sql: "", params: [] };
-    }
-    return buildDirectFilter(coerceEntityRefs([studioId]), "s.studioId", "s.stashInstanceId", "INCLUDES");
-  }
-
-  /**
-   * Build ORDER BY clause
-   */
-  private buildOrderBy(sortBy: string, sortDir: "asc" | "desc", randomSeed?: number): string {
-    const direction = sortDir.toUpperCase();
-    const seed = randomSeed || 12345;
-
-    const validColumns: Record<string, string> = {
-      stashCreatedAt: "c.stashCreatedAt",
-      stashUpdatedAt: "c.stashUpdatedAt",
-      title: "c.title",
-      seconds: "c.seconds",
-      sceneTitle: "s.title",
-      duration: "(c.endSeconds - c.seconds)",
-      // Random - seeded formula matching Stash's algorithm, prevents SQLite integer overflow
-      random: `(((((c.id + ${seed}) % 2147483647) * ((c.id + ${seed}) % 2147483647) % 2147483647) * 52959209 % 2147483647 + ((c.id + ${seed}) * 1047483763 % 2147483647)) % 2147483647)`,
-    };
-
-    const column = validColumns[sortBy] || "c.stashCreatedAt";
-
-    return `ORDER BY ${column} ${direction}`;
-  }
-
-  /**
-   * Combine filter clauses
-   */
-  private combineFilters(filters: FilterClause[]): FilterClause {
-    const validFilters = filters.filter((f) => f.sql.length > 0);
-    if (validFilters.length === 0) {
-      return { sql: "", params: [] };
-    }
-
-    return {
-      sql: validFilters.map((f) => `(${f.sql})`).join(" AND "),
-      params: validFilters.flatMap((f) => f.params),
-    };
-  }
-
-  /**
-   * Fetch tags for clips
-   */
-  private async fetchClipTags(clipIds: Array<{ id: string; instanceId: string }>): Promise<Map<string, Array<{ id: string; name: string; color: string | null }>>> {
-    if (clipIds.length === 0) {
-      return new Map();
-    }
-
-    // Build query to get all tags for these clips
-    const conditions = clipIds.map(() => "(ct.clipId = ? AND ct.clipInstanceId = ?)").join(" OR ");
-    const params = clipIds.flatMap((c) => [c.id, c.instanceId]);
-
-    const tags = await prisma.$queryRawUnsafe<Array<{
-      clipId: string;
-      clipInstanceId: string;
-      tagId: string;
-      tagName: string;
-      tagColor: string | null;
-    }>>(
-      `SELECT ct.clipId, ct.clipInstanceId, t.id AS tagId, t.name AS tagName, t.color AS tagColor
-       FROM ClipTag ct
-       INNER JOIN StashTag t ON ct.tagId = t.id AND ct.tagInstanceId = t.stashInstanceId
-       WHERE ${conditions}`,
-      ...params
-    );
-
-    const tagMap = new Map<string, Array<{ id: string; name: string; color: string | null }>>();
-    for (const tag of tags) {
-      const key = `${tag.clipId}:${tag.clipInstanceId}`;
-      if (!tagMap.has(key)) {
-        tagMap.set(key, []);
-      }
-      tagMap.get(key)?.push({
-        id: tag.tagId,
-        name: tag.tagName,
-        color: tag.tagColor,
-      });
-    }
-
-    return tagMap;
-  }
-
-  /**
-   * Transform raw rows to ClipWithRelations
-   */
-  private transformRows(
-    rows: ClipRow[],
-    tagMap: Map<string, Array<{ id: string; name: string; color: string | null }>>
-  ): ClipWithRelations[] {
-    return rows.map((row) => {
-      const key = `${row.id}:${row.stashInstanceId}`;
-      return {
-        id: row.id,
-        sceneId: row.sceneId,
-        title: row.title,
-        seconds: row.seconds,
-        endSeconds: row.endSeconds,
-        primaryTagId: row.primaryTagId,
-        // SQLite via Prisma raw queries may return number or string for boolean columns
-        isGenerated: Number(row.isGenerated) === 1,
-        stashCreatedAt: row.stashCreatedAt ? new Date(row.stashCreatedAt) : null,
-        stashUpdatedAt: row.stashUpdatedAt ? new Date(row.stashUpdatedAt) : null,
-        primaryTag: row.primaryTagId
-          ? { id: row.primaryTagId, name: row.primaryTagName || "", color: row.primaryTagColor }
-          : null,
-        tags: tagMap.get(key) || [],
-        scene: {
-          id: row.sceneId,
-          title: row.sceneTitle,
-          pathScreenshot: row.scenePathScreenshot,
-          studioId: row.sceneStudioId,
-          stashInstanceId: row.sceneInstanceId,
-        },
-      };
-    });
-  }
-
-  /**
-   * Execute query and return clips with pagination
-   */
-  async getClips(options: ClipQueryOptions): Promise<{ clips: ClipWithRelations[]; total: number }> {
-    const {
-      userId,
-      page = 1,
-      perPage = 24,
-      sortBy = "stashCreatedAt",
-      sortDir = "desc",
-      isGenerated,
-      sceneId,
-      tagIds,
-      sceneTagIds,
-      performerIds,
-      studioId,
-      q,
-      allowedInstanceIds,
-      randomSeed,
-    } = options;
-
-    // Build query components
-    const fromClause = this.buildFromClause(userId);
-    const baseWhere = this.buildBaseWhere();
-
-    const filters = this.combineFilters([
-      baseWhere,
-      this.buildInstanceFilter(allowedInstanceIds),
-      this.buildGeneratedFilter(isGenerated),
-      this.buildSceneIdFilter(sceneId),
-      this.buildSearchFilter(q),
-      this.buildTagFilter(tagIds),
-      this.buildSceneTagFilter(sceneTagIds),
-      this.buildPerformerFilter(performerIds),
-      this.buildStudioFilter(studioId),
+    const [primaryTags, tags] = await Promise.all([
+      loadNestedRefs(CLIP_TAG_REF, PRIMARY_TAG_LINK, clips, ctx),
+      loadNestedRefs(CLIP_TAG_REF, CLIP_TAGS, clips, ctx),
     ]);
-
-    const whereClause = filters.sql ? `WHERE ${filters.sql}` : "";
-    const orderBy = this.buildOrderBy(sortBy, sortDir, randomSeed);
-    const offset = (page - 1) * perPage;
-
-    // Build full queries
-    const dataQuery = `
-      SELECT ${this.SELECT_COLUMNS}
-      ${fromClause.sql}
-      ${whereClause}
-      ${orderBy}
-      LIMIT ? OFFSET ?
-    `;
-
-    const countQuery = `
-      SELECT COUNT(*) as total
-      ${fromClause.sql}
-      ${whereClause}
-    `;
-
-    const queryParams = [...fromClause.params, ...filters.params];
-
-    try {
-      // Execute queries in parallel
-      const [rows, countResult] = await Promise.all([
-        prisma.$queryRawUnsafe<ClipRow[]>(dataQuery, ...queryParams, perPage, offset),
-        prisma.$queryRawUnsafe<[{ total: bigint }]>(countQuery, ...queryParams),
-      ]);
-
-      // Fetch tags for all clips
-      const clipIds = rows.map((r) => ({ id: r.id, instanceId: r.stashInstanceId }));
-      const tagMap = await this.fetchClipTags(clipIds);
-
-      return {
-        clips: this.transformRows(rows, tagMap),
-        total: Number(countResult[0]?.total || 0),
-      };
-    } catch (error) {
-      logger.error("ClipQueryBuilder.getClips failed", { error, options });
-      throw error;
+    for (const clip of clips) {
+      const key = entityKey(clip.id, clip.instanceId);
+      clip.primaryTag = primaryTags.get(key)?.[0] ?? null;
+      clip.tags = tags.get(key) ?? [];
     }
   }
 
-  /**
-   * Get clips for a specific scene (simpler query, no pagination)
-   */
+  /** A scene's clips the viewer can see, by time, every one (no page, no count) */
   async getClipsForScene(
-    sceneId: string,
-    userId: number,
-    includeUngenerated = false,
-    allowedInstanceIds?: string[]
+    options: SceneClipsOptions
   ): Promise<ClipWithRelations[]> {
-    const fromClause = this.buildFromClause(userId);
-    const baseWhere = this.buildBaseWhere();
-
-    const filters = this.combineFilters([
-      baseWhere,
-      this.buildInstanceFilter(allowedInstanceIds),
-      { sql: "c.sceneId = ?", params: [sceneId] },
-      includeUngenerated ? { sql: "", params: [] } : this.buildGeneratedFilter(true),
-    ]);
-
-    const whereClause = filters.sql ? `WHERE ${filters.sql}` : "";
-
-    const query = `
-      SELECT ${this.SELECT_COLUMNS}
-      ${fromClause.sql}
-      ${whereClause}
-      ORDER BY c.seconds ASC
-    `;
-
-    const queryParams = [...fromClause.params, ...filters.params];
-
-    try {
-      const rows = await prisma.$queryRawUnsafe<ClipRow[]>(query, ...queryParams);
-
-      // Fetch tags for all clips
-      const clipIds = rows.map((r) => ({ id: r.id, instanceId: r.stashInstanceId }));
-      const tagMap = await this.fetchClipTags(clipIds);
-
-      return this.transformRows(rows, tagMap);
-    } catch (error) {
-      logger.error("ClipQueryBuilder.getClipsForScene failed", { error, sceneId, userId });
-      throw error;
-    }
+    return this.readAll({
+      userId: options.userId,
+      allowedInstanceIds: options.allowedInstanceIds,
+      request: {
+        page: 1,
+        perPage: 1,
+        q: undefined,
+        sort: { field: "seconds", direction: "ASC", seed: undefined },
+        filter: {
+          scenes: { refs: [options.scene], modifier: "INCLUDES", depth: 0 },
+          ...(options.includeUngenerated ? {} : { is_generated: true }),
+        },
+        specificInstanceId: undefined,
+      },
+    });
   }
 
   /**
-   * Get a single clip by ID
+   * The clips a ref names, with the viewer's exclusions and allowed
+   * instances applied (invariant 3): one when the ref names its instance,
+   * one per allowed instance holding the id when it is bare (the caller
+   * refuses that as ambiguous)
    */
-  async getClipById(
-    clipId: string,
-    userId: number,
-    allowedInstanceIds?: string[]
-  ): Promise<ClipWithRelations | null> {
-    const fromClause = this.buildFromClause(userId);
-    const baseWhere = this.buildBaseWhere();
-
-    const filters = this.combineFilters([
-      baseWhere,
-      this.buildInstanceFilter(allowedInstanceIds),
-      { sql: "c.id = ?", params: [clipId] },
-    ]);
-
-    const whereClause = filters.sql ? `WHERE ${filters.sql}` : "";
-
-    const query = `
-      SELECT ${this.SELECT_COLUMNS}
-      ${fromClause.sql}
-      ${whereClause}
-      LIMIT 1
-    `;
-
-    const queryParams = [...fromClause.params, ...filters.params];
-
-    try {
-      const rows = await prisma.$queryRawUnsafe<ClipRow[]>(query, ...queryParams);
-
-      if (rows.length === 0) {
-        return null;
-      }
-
-      // Fetch tags for this clip
-      const firstRow = rows[0] as (typeof rows)[number];
-      const clipIds = [{ id: firstRow.id, instanceId: firstRow.stashInstanceId }];
-      const tagMap = await this.fetchClipTags(clipIds);
-
-      return this.transformRows(rows, tagMap)[0] ?? null;
-    } catch (error) {
-      logger.error("ClipQueryBuilder.getClipById failed", { error, clipId, userId });
-      throw error;
-    }
+  async getClipById(options: ClipByIdOptions): Promise<ClipWithRelations[]> {
+    return this.getByRefs({
+      userId: options.userId,
+      allowedInstanceIds: options.allowedInstanceIds,
+      refs: [options.ref],
+    });
   }
 }
 

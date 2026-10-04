@@ -1,7 +1,6 @@
 import { useState } from "react";
-import * as LucideIcons from "lucide-react";
 import { Search, X } from "lucide-react";
-import { CAROUSEL_ICONS } from "./carouselIcons";
+import { CAROUSEL_ICONS, CAROUSEL_ICON_COMPONENTS } from "./carouselIcons";
 
 interface Props {
   selectedIcon: string;
@@ -75,8 +74,7 @@ const IconPicker = ({ selectedIcon, onSelect, onClose }: Props) => {
         style={{ scrollbarWidth: "thin" }}
       >
         {filteredIcons.map((iconName) => {
-          const IconComponent = (LucideIcons as unknown as Record<string, React.ComponentType<{ className?: string }>>)[iconName];
-          if (!IconComponent) return null;
+          const IconComponent = CAROUSEL_ICON_COMPONENTS[iconName];
 
           const isSelected = selectedIcon === iconName;
 
@@ -89,16 +87,18 @@ const IconPicker = ({ selectedIcon, onSelect, onClose }: Props) => {
                 hover:scale-110 flex items-center justify-center
                 ${isSelected ? "ring-2 ring-offset-2" : ""}
               `}
-              style={{
-                backgroundColor: isSelected
-                  ? "var(--accent-primary)"
-                  : "var(--bg-secondary)",
-                color: isSelected
-                  ? "var(--text-on-accent)"
-                  : "var(--text-primary)",
-                "--tw-ring-color": "var(--accent-primary)",
-                "--tw-ring-offset-color": "var(--bg-card)",
-              } as React.CSSProperties}
+              style={
+                {
+                  backgroundColor: isSelected
+                    ? "var(--accent-primary)"
+                    : "var(--bg-secondary)",
+                  color: isSelected
+                    ? "var(--text-on-accent)"
+                    : "var(--text-primary)",
+                  "--tw-ring-color": "var(--accent-primary)",
+                  "--tw-ring-offset-color": "var(--bg-card)",
+                } as React.CSSProperties
+              }
               title={iconName}
             >
               <IconComponent className="w-5 h-5" />

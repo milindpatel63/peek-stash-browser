@@ -1,12 +1,16 @@
 import express from "express";
 import {
+  findTagTree,
   findTags,
   findTagsMinimal,
-  findTagsForScenes,
-  updateTag,
+  getTagCounts,
 } from "../../controllers/library/tags.js";
-import { authenticate, requireCacheReady } from "../../middleware/auth.js";
-import { authenticated } from "../../utils/routeHelpers.js";
+import {
+  authenticate,
+  requireCacheReady,
+  requirePickerReady,
+} from "../../middleware/auth.js";
+import { libraryHandler } from "../../utils/routeHelpers.js";
 
 const router = express.Router();
 
@@ -14,15 +18,19 @@ const router = express.Router();
 router.use(authenticate);
 
 // Find tags with filters
-router.post("/tags", requireCacheReady, authenticated(findTags));
+router.post("/tags", requireCacheReady, libraryHandler(findTags));
 
 // Minimal data for filter dropdowns
-router.post("/tags/minimal", requireCacheReady, authenticated(findTagsMinimal));
+router.post(
+  "/tags/minimal",
+  requirePickerReady,
+  libraryHandler(findTagsMinimal)
+);
 
-// Tags filtered by scene criteria (for folder view)
-router.post("/tags/for-scenes", requireCacheReady, authenticated(findTagsForScenes));
+// The compact tag tree (hierarchy and folder views), optionally scoped
+router.post("/tags/tree", requireCacheReady, libraryHandler(findTagTree));
 
-// Update tag
-router.put("/tags/:id", authenticated(updateTag));
+// The detail page's tab counts, as the viewer sees them
+router.get("/tags/:id/counts", requireCacheReady, libraryHandler(getTagCounts));
 
 export default router;

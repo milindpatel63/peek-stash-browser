@@ -1,20 +1,12 @@
 // client/src/components/pages/UserStats/components/EngagementTotals.tsx
-
-import { Clock, Play, Heart } from "lucide-react";
+import type { EngagementStats } from "@peek/shared-types";
+import { Clock, Heart, Play } from "lucide-react";
 import { ENTITY_ICONS } from "../../../../constants/entityIcons";
-import StatCard from "./StatCard";
 import { formatDurationHumanReadable } from "../../../../utils/format";
-
-interface EngagementData {
-  totalWatchTime: number;
-  totalPlayCount: number;
-  totalOCount: number;
-  uniqueScenesWatched: number;
-  totalImagesViewed: number;
-}
+import StatCard from "./StatCard";
 
 interface Props {
-  engagement: EngagementData;
+  engagement: EngagementStats;
   librarySceneCount: number;
 }
 

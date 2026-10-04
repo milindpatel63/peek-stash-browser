@@ -1,8 +1,14 @@
 // client/tests/components/ui/CardComponents.density.test.jsx
-import { render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
-import { describe, it, expect, vi } from "vitest";
-import { CardContainer, CardTitle, CardIndicators, CardRatingRow } from "../../../src/components/ui/CardComponents";
+import { render, screen } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
+import {
+  CardContainer,
+  CardIndicators,
+  CardRatingRow,
+  CardTitle,
+} from "../../../src/components/ui/CardComponents";
+import { createQueryWrapper } from "../../testUtils";
 
 // Mock hooks used by CardRatingRow
 vi.mock("../../../src/hooks/useHiddenEntities", () => ({
@@ -61,13 +67,16 @@ describe("CardComponents density", () => {
         <CardRatingRow
           entityType="scene"
           entityId="123"
+          instanceId="inst-1"
           initialRating={null}
           initialFavorite={false}
           initialOCounter={null}
           showRating={false}
           showFavorite={false}
           showOCounter={false}
-        />
+        />,
+        // A scene's rating row offers Remove last O, a TanStack mutation
+        { wrapper: createQueryWrapper() }
       );
       const menuButton = screen.getByRole("button", { name: /more options/i });
       // Find the row container (parent of parent - button > div.relative > div.flex > div.flex (row))

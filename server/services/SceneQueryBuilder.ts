@@ -1,1270 +1,886 @@
 /**
- * SceneQueryBuilder - SQL-native scene querying
+ * SceneQueryBuilder: the scene list in SQL.
  *
- * Builds parameterized SQL queries for scene filtering, sorting, and pagination.
- * Eliminates the need to load all scenes into memory.
+ * The scene builder on the base (`query/EntityQueryBuilder.ts`): this file
+ * declares the scene's spec (table, per-user joins, columns), its filter
+ * clauses (a table with one function per field, and the search), its sort
+ * map, its row transform and its relations. The instance filter, the exclusion join, the `ids` filter, the
+ * random sort, the primary key ending every order and the count are the
+ * base's.
  */
-import type { PeekSceneFilter, NormalizedScene, PerformerRef, TagRef, StudioRef, GroupRef, GalleryRef } from "../types/index.js";
-import type { SceneQueryRow } from "../types/internal/queryRows.js";
-import prisma from "../prisma/singleton.js";
-import { logger } from "../utils/logger.js";
-import { expandStudioIds, expandTagIds } from "../utils/hierarchyUtils.js";
+import type { SortDirection } from "@peek/shared-types/filters/index.js";
+import type {
+  GalleryRef,
+  GroupRef,
+  NormalizedScene,
+  PerformerRef,
+  StudioRef,
+  TagRef,
+} from "../types/index.js";
+import type {
+  GroupRefRow,
+  SceneQueryRow,
+} from "../types/internal/queryRows.js";
+import type {
+  ParsedFilter,
+  PlaylistCriterion,
+  RefCriterion,
+  RefFieldCriterion,
+  TextCriterion,
+} from "../types/parsedFilters.js";
+import { type EntityRef, entityKey } from "../utils/entityRef.js";
+import {
+  ownPlaylistSql,
+  viewablePlaylistSql,
+} from "../utils/playlistAccessSql.js";
+import { toProxyUrl } from "../utils/proxyUrl.js";
+import {
+  type ColumnTarget,
+  type FilterClause,
+  type JunctionTarget,
+  type ParentKey,
+  type PerformerAgeSource,
+  type SqlFragment,
+  allOf,
+  buildDayFilter,
+  buildFavoriteFilter,
+  buildInstantFilter,
+  buildNumericFilter,
+  buildTextFilter,
+  exclusionJoin,
+  instanceClause,
+  matchedSetClause,
+  noClause,
+  orientationClause,
+  performerAgeExists,
+  performerAgeSort,
+  performerTagsFieldClause,
+  refClause,
+  resolutionClause,
+  sceneUntaggedSql,
+  searchAll,
+} from "../utils/sqlClauses.js";
+import {
+  emptyToNull,
+  parseJsonArray,
+  searchTerms,
+} from "../utils/sqlHelpers.js";
+import { jsonListOrEmpty } from "../utils/sqlJson.js";
 import { getSceneFallbackTitle } from "../utils/titleUtils.js";
-import { parseJsonArray } from "../utils/sqlHelpers.js";
-import { type FilterClause, buildNumericFilter, buildDateFilter, buildFavoriteFilter, buildJunctionFilter, buildDirectFilter, parseCompositeFilterValues } from "../utils/sqlFilterBuilders.js";
-import { coerceEntityRefs } from "@peek/shared-types/instanceAwareId.js";
+import {
+  COMPLETED_SQL,
+  IN_PROGRESS_SQL,
+  watchStateClause,
+} from "../utils/watchStateSql.js";
+import {
+  EntityQueryBuilder,
+  type EntitySpec,
+  type FieldClauses,
+  type LeafContext,
+  type QueryContext,
+  type SortExpr,
+  exclusionLookup,
+  favoriteRefs,
+  hierarchicalRefClause,
+  refFieldClause,
+  refOptionsOf,
+} from "./query/EntityQueryBuilder.js";
+import {
+  GALLERY_REF,
+  GROUP_REF,
+  type NestedEntity,
+  PERFORMER_REF,
+  STUDIO_REF,
+  TAG_REF,
+  groupRef,
+  loadNestedRefs,
+  loadRefsByKey,
+} from "./query/nestedRefs.js";
 
-// Query builder options
-export interface SceneQueryOptions {
-  userId: number;
-  filters?: PeekSceneFilter;
-  applyExclusions?: boolean;  // Default true - use pre-computed exclusions
-  allowedInstanceIds?: string[];  // Multi-instance filtering - array of instances the user can access
-  specificInstanceId?: string;  // Single instance filter for disambiguation on detail pages
-  sort: string;
-  sortDirection: "ASC" | "DESC";
-  page: number;
-  perPage: number;
-  randomSeed?: number;
-  searchQuery?: string;  // Text search query - searches title, details, path, performer names, studio name, tag names
-}
+export type {
+  ByRefsOptions,
+  ListQueryOptions,
+  ListResult,
+} from "./query/EntityQueryBuilder.js";
 
-// Query result
-export interface SceneQueryResult {
-  scenes: NormalizedScene[];
-  total: number;
-}
-
-// Query by IDs options
-export interface SceneByIdsOptions {
-  userId: number;
-  ids: string[];
-  allowedInstanceIds?: string[];  // Multi-instance filtering
-}
-
-/**
- * Builds and executes SQL queries for scene filtering
- */
-class SceneQueryBuilder {
-  // Column list for SELECT - all StashScene fields plus user data
-  private readonly SELECT_COLUMNS = `
+// Column list for SELECT - all StashScene fields plus user data
+const SELECT_COLUMNS = `
     s.id, s.stashInstanceId, s.title, s.code, s.date, s.studioId, s.rating100 AS stashRating100,
     s.duration, s.organized, s.details, s.director, s.urls, s.filePath, s.fileBitRate,
     s.fileFrameRate, s.fileWidth, s.fileHeight, s.fileVideoCodec,
     s.fileAudioCodec, s.fileSize, s.pathScreenshot, s.pathPreview,
     s.pathSprite, s.pathVtt, s.pathChaptersVtt, s.pathStream, s.pathCaption, s.captions,
-    s.streams, s.inheritedTagIds,
+    s.inheritedTagIds,
     s.oCounter AS stashOCounter, s.playCount AS stashPlayCount,
     s.playDuration AS stashPlayDuration, s.stashCreatedAt, s.stashUpdatedAt,
     r.rating AS userRating, r.favorite AS userFavorite,
     w.playCount AS userPlayCount, w.playDuration AS userPlayDuration,
     w.lastPlayedAt AS userLastPlayedAt, w.oCount AS userOCount,
-    w.resumeTime AS userResumeTime, w.oHistory AS userOHistory,
-    w.playHistory AS userPlayHistory
+    w.resumeTime AS userResumeTime,
+    (SELECT MAX(j.value) FROM json_each(w.oHistory) j) AS userLastOAt
   `.trim();
 
-  // Base FROM clause with user data JOINs
-  private buildFromClause(userId: number, applyExclusions: boolean = true): { sql: string; params: number[] } {
-    const baseJoins = `
-        FROM StashScene s
-        LEFT JOIN SceneRating r ON s.id = r.sceneId AND s.stashInstanceId = r.instanceId AND r.userId = ?
-        LEFT JOIN WatchHistory w ON s.id = w.sceneId AND s.stashInstanceId = w.instanceId AND w.userId = ?
-    `.trim();
+/**
+ * The sorts a page reads from an index, the browse indexes (L6): the page
+ * walks the index and stops at the page. The others (the viewer's rating,
+ * plays and O count, random, the file columns) read every match and sort it.
+ */
+const INDEXED_SORTS: ReadonlySet<string> = new Set([
+  "created_at",
+  "updated_at",
+  "date",
+  "title",
+  "duration",
+  "performer_count",
+  "tag_count",
+]);
 
-    if (applyExclusions) {
-      return {
-        sql: `${baseJoins}
-        LEFT JOIN UserExcludedEntity e ON e.userId = ? AND e.entityType = 'scene' AND e.entityId = s.id AND (e.instanceId = '' OR e.instanceId = s.stashInstanceId)`,
-        params: [userId, userId, userId],
-      };
+const SCENE_SPEC: EntitySpec = {
+  table: "StashScene",
+  alias: "s",
+  entityType: "scene",
+  userJoins: [
+    { table: "SceneRating", alias: "r", entityIdCol: "sceneId" },
+    { table: "WatchHistory", alias: "w", entityIdCol: "sceneId" },
+  ],
+  selectColumns: () => ({ sql: SELECT_COLUMNS, params: [] }),
+  defaultSort: "created_at",
+};
+
+/** A scene's junction to another entity, for the ref filters */
+const junction = (
+  table: string,
+  alias: string,
+  refIdCol: string,
+  refInstanceCol: string
+): JunctionTarget => ({
+  kind: "junction",
+  table,
+  alias,
+  parentAlias: "s",
+  parentIdCol: "sceneId",
+  parentInstanceCol: "sceneInstanceId",
+  refIdCol,
+  refInstanceCol,
+});
+const SCENE_PERFORMERS = junction(
+  "ScenePerformer",
+  "sp",
+  "performerId",
+  "performerInstanceId"
+);
+const SCENE_TAGS = junction("SceneTag", "st", "tagId", "tagInstanceId");
+/** The scene's inherited tags, written by scene tag inheritance */
+const SCENE_INHERITED_TAGS = junction(
+  "SceneInheritedTag",
+  "sit",
+  "tagId",
+  "tagInstanceId"
+);
+const SCENE_GROUPS = junction("SceneGroup", "sg", "groupId", "groupInstanceId");
+const SCENE_GALLERIES = junction(
+  "SceneGallery",
+  "sg",
+  "galleryId",
+  "galleryInstanceId"
+);
+
+/** A scene's collection with the scene's place in it (`SceneGroup.sceneIndex`) */
+const SCENE_GROUP_REF: NestedEntity<
+  GroupRefRow & { sceneIndex: number | null },
+  GroupRef & { scene_index: number | null }
+> = {
+  ...GROUP_REF,
+  columns: `${GROUP_REF.columns}, j.sceneIndex`,
+  toRef: (row) => ({
+    ...groupRef(row, row.stashInstanceId),
+    scene_index: row.sceneIndex,
+  }),
+};
+
+/** A scene's studio is a column of its own row, on the scene's instance */
+const SCENE_STUDIO: ColumnTarget = {
+  kind: "column",
+  parentTable: "StashScene",
+  parentAlias: "s",
+  idCol: "studioId",
+  instanceCol: "stashInstanceId",
+};
+
+/** The junction Performer Age reads a scene's performers from */
+const SCENE_PERFORMER_AGE: PerformerAgeSource = {
+  junction: {
+    table: "ScenePerformer",
+    itemId: "sceneId",
+    itemInstance: "sceneInstanceId",
+    performerId: "performerId",
+    performerInstance: "performerInstanceId",
+  },
+  item: { id: "s.id", instance: "s.stashInstanceId", date: "s.date" },
+};
+
+/** The scene's key, as a playlist item names it (`PlaylistItem.sceneId`, `instanceId`) */
+const SCENE_KEY: ParentKey = ["s.id", "s.stashInstanceId"];
+
+/**
+ * The items of the playlists `access` lets through (a condition on `p`),
+ * of these playlists only when `ids` is given: the FROM and WHERE of a
+ * statement selecting `pi.sceneId, pi.instanceId`. With ids, SQLite reads
+ * each playlist's items from PlaylistItem's unique key (playlistId,
+ * instanceId, sceneId).
+ */
+function playlistItems(
+  access: SqlFragment,
+  ids?: readonly number[]
+): SqlFragment {
+  const only =
+    ids === undefined
+      ? ""
+      : `pi.playlistId IN (${ids.map(() => "?").join(", ")}) AND `;
+  return {
+    sql: `FROM PlaylistItem pi JOIN Playlist p ON p.id = pi.playlistId WHERE ${only}${access.sql}`,
+    params: [...(ids ?? []), ...access.params],
+  };
+}
+
+/** Scenes among the items: a row-value IN on the scene's key, read once */
+function inPlaylists(items: SqlFragment): FilterClause {
+  return {
+    sql: `(${SCENE_KEY[0]}, ${SCENE_KEY[1]}) IN (SELECT pi.sceneId, pi.instanceId ${items.sql})`,
+    params: items.params,
+  };
+}
+
+/**
+ * Scenes in none of the items: the items' distinct scenes as a materialized
+ * set, matched by the scene's key (`matchedSetClause`). At 215k scenes "in
+ * none of my playlists" (2,549 items) adds about 40 ms to the count (150
+ * against 112 ms unfiltered), where a correlated NOT EXISTS took 850 ms and
+ * a row-value NOT IN 6 s (PlaylistItem has no scene index).
+ */
+function notInPlaylists(items: SqlFragment, name: string): FilterClause {
+  const setName = `${name}_set`;
+  return matchedSetClause(SCENE_KEY, setName, "EXCLUDES", [
+    {
+      name: setName,
+      sql: `${setName}(id, inst) AS MATERIALIZED (SELECT DISTINCT pi.sceneId, pi.instanceId ${items.sql})`,
+      params: items.params,
+    },
+  ]);
+}
+
+/**
+ * Builds and executes SQL queries for scene filtering
+ */
+class SceneQueryBuilder extends EntityQueryBuilder<
+  SceneQueryRow,
+  NormalizedScene,
+  "scene"
+> {
+  protected readonly spec = SCENE_SPEC;
+
+  /**
+   * A scene sort's order for rows of `s` read outside the list statement (a
+   * playlist's items): the viewer's rating and history joins on `s`, bound
+   * to `userId` as the list writes them, then the sort's own joins; and the
+   * expression the Scenes page sorts by, from the same sort map with an
+   * empty filter (random through the list's seeded order). Without a
+   * filter `scene_index` has no expression and gives the default sort's;
+   * the playlist parser never sends it. The order holds no tiebreak: the
+   * caller ends it with its own.
+   */
+  sortTerms(
+    userId: number,
+    sort: {
+      field: string;
+      direction: SortDirection;
+      seed: number | undefined;
     }
-
+  ): { joins: SqlFragment[]; order: SqlFragment } {
+    const ctx: QueryContext = {
+      userId,
+      applyExclusions: true,
+      allowedInstanceIds: [],
+      specificInstanceId: undefined,
+      sortField: sort.field,
+      ranked: false,
+      // No sort reads it, nor the lookup, which asks only when called
+      timeZone: "UTC",
+      hasExclusionsOf: exclusionLookup(userId, true),
+    };
+    const expr = this.sortExpr(sort.field, sort.direction, sort.seed, {}, ctx);
     return {
-      sql: baseJoins,
-      params: [userId, userId],
+      joins: [...this.userJoinFragments(userId), ...(expr.joins ?? [])],
+      order: { sql: expr.sql, params: expr.params },
     };
   }
 
-  // Base WHERE clause (always filter deleted, optionally filter excluded)
-  private buildBaseWhere(applyExclusions: boolean = true): FilterClause {
-    if (applyExclusions) {
+  /**
+   * The sort expressions. title, performer_count and tag_count read the
+   * columns sync stores (SCENE_DERIVED_COLUMNS_SQL in StashSyncService):
+   * titleSort is the displayed title with ASCII lower-cased, so its BINARY
+   * order is the case-insensitive title order. Each has a (deletedAt,
+   * column, id, stashInstanceId) index, which serves the whole order with
+   * the base's key (created_at, updated_at, date and duration too, DESC).
+   * last_o_at is the viewer's latest O time (the newest string of
+   * WatchHistory.oHistory, stored as ISO text), scenes with none last in
+   * either direction; it scans the viewer's history rows, like o_counter.
+   * resolution is the shorter side of the file; studio the studio's name,
+   * case-insensitive, scenes with none (or whose studio is deleted or hidden
+   * from the viewer) last in both directions; performer_age Stash's: the
+   * youngest performer's age ascending, the oldest's descending, at the
+   * scene's date, a scene with no date or no performer the viewer can see
+   * (with a birthdate) last in both directions (`performerAgeSort`). None
+   * reads an index: each reads the filtered scenes and sorts them, as
+   * rating does.
+   * scene_index is the scene's number in the collection the request filters
+   * by, and has an expression only with one (INCLUDES or INCLUDES_ALL):
+   * without it the key falls back to the default sort. playlist_position is
+   * the same for the one playlist the request filters by. recommended is the
+   * rank, only for a list within ranked refs (`QueryContext.ranked`).
+   */
+  protected sortMap(
+    dir: SortDirection,
+    filter: ParsedFilter<"scene">,
+    ctx: QueryContext
+  ): Record<string, SortExpr> {
+    const column = (sql: string): SortExpr => ({
+      sql: `${sql} ${dir}`,
+      params: [],
+    });
+    return {
+      // Scene metadata
+      created_at: column("s.stashCreatedAt"),
+      updated_at: column("s.stashUpdatedAt"),
+      date: column("s.date"),
+      title: column("s.titleSort"),
+      duration: column("s.duration"),
+      filesize: column("s.fileSize"),
+      bitrate: column("s.fileBitRate"),
+      framerate: column("s.fileFrameRate"),
+      path: column("s.filePath"),
+      performer_count: column("s.performerCount"),
+      tag_count: column("s.tagCount"),
+      resolution: column("MIN(s.fileWidth, s.fileHeight)"),
+      code: column("s.code"),
+      organized: column("s.organized"),
+      studio: this.studioNameSort(dir, ctx),
+      performer_age: this.performerAgeOrder(dir, ctx),
+
+      // The viewer's rating (SceneRating)
+      rating: column("COALESCE(r.rating, 0)"),
+      user_rating: column("COALESCE(r.rating, 0)"),
+
+      // The viewer's history (WatchHistory)
+      last_played_at: column("w.lastPlayedAt"),
+      play_count: column("COALESCE(w.playCount, 0)"),
+      play_duration: column("COALESCE(w.playDuration, 0)"),
+      o_counter: column("COALESCE(w.oCount, 0)"),
+      resume_time: column("COALESCE(w.resumeTime, 0)"),
+      last_o_at: {
+        sql: `(SELECT MAX(j.value) FROM json_each(w.oHistory) j) IS NULL, (SELECT MAX(j.value) FROM json_each(w.oHistory) j) ${dir}`,
+        params: [],
+      },
+      ...this.sceneIndexSort(dir, filter),
+      ...this.playlistPositionSort(dir, filter),
+      // Recommended's rank, only within ranked refs (`ranked_refs k`): best
+      // (position 0) first on DESC
+      ...(ctx.ranked
+        ? {
+            recommended: {
+              sql: `k.pos ${dir === "DESC" ? "ASC" : "DESC"}`,
+              params: [],
+            },
+          }
+        : {}),
+    };
+  }
+
+  /**
+   * The studio's name, case-insensitive: a scalar subquery on the studio's
+   * key (the scene's own instance), so no join reaches the count. A studio
+   * that is deleted, or that the viewer cannot see (`UserExcludedEntity`,
+   * the every-instance arm too), counts as none, as the row's studio ref
+   * does, so a hidden name never orders the list. Scenes with none list
+   * last in both directions.
+   */
+  private studioNameSort(dir: SortDirection, ctx: QueryContext): SortExpr {
+    const hidden = ctx.applyExclusions
+      ? " AND NOT EXISTS (SELECT 1 FROM UserExcludedEntity ssx WHERE ssx.userId = ? AND ssx.entityType = 'studio' AND ssx.entityId = sso.id AND (ssx.instanceId = '' OR ssx.instanceId = sso.stashInstanceId))"
+      : "";
+    return {
+      sql: `(SELECT sso.name FROM StashStudio sso WHERE sso.id = s.studioId AND sso.stashInstanceId = s.stashInstanceId AND sso.deletedAt IS NULL${hidden}) COLLATE NOCASE ${dir} NULLS LAST`,
+      params: ctx.applyExclusions ? [ctx.userId] : [],
+    };
+  }
+
+  /** The performer age the sort reads, the viewer's hidden performers left out */
+  private performerAgeOrder(dir: SortDirection, ctx: QueryContext): SortExpr {
+    const age = performerAgeSort(
+      SCENE_PERFORMER_AGE,
+      ctx.applyExclusions ? ctx.userId : null,
+      dir
+    );
+    return { sql: `${age.sql} ${dir} NULLS LAST`, params: age.params };
+  }
+
+  /**
+   * Playlist order: the scene's position in the one playlist the filter
+   * includes. The filter already keeps only that playlist's scenes, and only
+   * when the viewer may read it, so the INNER JOIN keeps the count; it
+   * matches at most one row (PlaylistItem's key is playlist, instance and
+   * scene). Without exactly one included playlist the key has no expression
+   * and the default sort applies (the parser refuses it first).
+   */
+  private playlistPositionSort(
+    dir: SortDirection,
+    filter: ParsedFilter<"scene">
+  ): Record<string, SortExpr> {
+    const criterion = filter.playlists;
+    const id = criterion?.ids[0];
+    if (
+      criterion === undefined ||
+      id === undefined ||
+      criterion.ids.length !== 1 ||
+      (criterion.modifier !== "INCLUDES" &&
+        criterion.modifier !== "INCLUDES_ALL")
+    ) {
+      return {};
+    }
+    return {
+      playlist_position: {
+        sql: `pip.position ${dir}`,
+        params: [],
+        joins: [
+          {
+            sql: "JOIN PlaylistItem pip ON pip.playlistId = ? AND pip.sceneId = s.id AND pip.instanceId = s.stashInstanceId",
+            params: [id],
+          },
+        ],
+      },
+    };
+  }
+
+  /**
+   * Scene Number: the number of the scene in the filter's first collection,
+   * scenes without one last. One ref without sub-collections joins the
+   * sort's group as an INNER JOIN (the filter already keeps only its scenes,
+   * so the count is unchanged); several refs, or a depth that adds the
+   * sub-collections' scenes, LEFT JOIN the first, so a scene only in a
+   * sub-collection stays, last; no scene matches the join twice
+   * (SceneGroup's key is scene and group, and the join names the scene's
+   * instance). A bare ref matches that id on the scene's own instance.
+   */
+  private sceneIndexSort(
+    dir: SortDirection,
+    filter: ParsedFilter<"scene">
+  ): Record<string, SortExpr> {
+    const criterion = filter.groups;
+    const first = criterion?.refs[0];
+    // Only an including criterion names a collection; presence names none
+    if (
+      criterion === undefined ||
+      first === undefined ||
+      (criterion.modifier !== "INCLUDES" &&
+        criterion.modifier !== "INCLUDES_ALL")
+    ) {
+      return {};
+    }
+    const inner = criterion.refs.length === 1 && criterion.depth === 0;
+    const instance =
+      first.instanceId === undefined ? "" : " AND sgi.groupInstanceId = ?";
+    return {
+      scene_index: {
+        sql: `sgi.sceneIndex IS NULL, sgi.sceneIndex ${dir}`,
+        params: [],
+        joins: [
+          {
+            sql: `${inner ? "JOIN" : "LEFT JOIN"} SceneGroup sgi ON sgi.sceneId = s.id AND sgi.sceneInstanceId = s.stashInstanceId AND sgi.groupId = ?${instance}`,
+            params: [
+              first.id,
+              ...(first.instanceId === undefined ? [] : [first.instanceId]),
+            ],
+          },
+        ],
+      },
+    };
+  }
+
+  /**
+   * The scene filter's clauses, one per field, in the order the statement
+   * ANDs them. A ref field's CTEs are named from the leaf (`ctx.name`).
+   */
+  protected override readonly fieldClauses: FieldClauses<"scene"> = {
+    // Metadata
+    duration: (c) => buildNumericFilter(c, "s.duration"),
+    resolution: (c) => resolutionClause(c, "s.fileWidth", "s.fileHeight"),
+    // No tag, own or inherited (the folder view's Untagged), or some tag
+    tagged: (tagged) => {
+      const untagged = sceneUntaggedSql("s");
+      return { sql: tagged ? `NOT ${untagged}` : untagged, params: [] };
+    },
+    organized: (organized) => ({
+      sql: "s.organized = ?",
+      params: [organized ? 1 : 0],
+    }),
+
+    // Related entities
+    // "Has any" and "has none" count only related rows the viewer can see
+    performers: (c, ctx) =>
+      refFieldClause(SCENE_PERFORMERS, c, ctx, {
+        table: "StashPerformer",
+        entityType: "performer",
+      }),
+    tags: (c, ctx) => this.tagClause(c, ctx),
+    studios: (c, ctx) => this.studioClause(c, ctx),
+    // With a depth, a collection's sub-collections too
+    groups: (c, ctx) =>
+      hierarchicalRefClause("group", SCENE_GROUPS, c, ctx, {
+        name: ctx.name,
+        related: { table: "StashGroup", entityType: "group" },
+      }),
+    galleries: (c, ctx) =>
+      refFieldClause(SCENE_GALLERIES, c, ctx, {
+        table: "StashGallery",
+        entityType: "gallery",
+      }),
+    // Through the tags of the scene's performers
+    performer_tags: (c, ctx) => this.performerTagsClause(c, ctx),
+    // Peek's playlists: the viewer's own and shared ones by id, "any of my
+    // playlists" their own only (owner answer 13)
+    playlists: (c, ctx) => this.playlistClause(c, ctx),
+    in_any_playlist: (inAny, ctx) => {
+      const items = playlistItems(ownPlaylistSql("p", ctx.userId));
+      return inAny ? inPlaylists(items) : notInPlaylists(items, ctx.name);
+    },
+
+    // The viewer's own data
+    favorite: (favorite) => buildFavoriteFilter(favorite),
+    rating100: (c) => buildNumericFilter(c, "r.rating"),
+    play_count: (c) => buildNumericFilter(c, "COALESCE(w.playCount, 0)"),
+    o_counter: (c) => buildNumericFilter(c, "COALESCE(w.oCount, 0)"),
+    // The History page's rules (utils/watchStateSql.ts), over the viewer's row
+    watched: (on) => ({ sql: watchStateClause(COMPLETED_SQL, on), params: [] }),
+    in_progress: (on) => ({
+      sql: watchStateClause(IN_PROGRESS_SQL, on),
+      params: [],
+    }),
+
+    // Text
+    title: (c) => buildTextFilter(c, "s.title"),
+    details: (c) => buildTextFilter(c, "s.details"),
+    director: (c) => buildTextFilter(c, "s.director"),
+    // The primary file's path only, as Peek stores it
+    path: (c) => buildTextFilter(c, "s.filePath"),
+    // Each URL on its own text, not the JSON list's
+    url: (c) => buildTextFilter(c, null, { lists: ["s.urls"] }),
+    code: (c) => buildTextFilter(c, "s.code"),
+    captions: (c) => this.captionsClause(c),
+    has_markers: (on, ctx) => this.markersClause(on, ctx),
+    duplicated: (on, ctx) => this.duplicatedClause(on, ctx),
+
+    // Dates
+    date: (c) => buildDayFilter(c, "s.date"),
+    created_at: (c, ctx) =>
+      buildInstantFilter(c, "s.stashCreatedAt", ctx.timeZone),
+    updated_at: (c, ctx) =>
+      buildInstantFilter(c, "s.stashUpdatedAt", ctx.timeZone),
+    last_played_at: (c, ctx) =>
+      buildInstantFilter(c, "w.lastPlayedAt", ctx.timeZone),
+
+    // Numbers
+    bitrate: (c) => buildNumericFilter(c, "s.fileBitRate"),
+    framerate: (c) => buildNumericFilter(c, "s.fileFrameRate"),
+    play_duration: (c) => buildNumericFilter(c, "COALESCE(w.playDuration, 0)"),
+
+    // Counts, stored by sync (SCENE_DERIVED_COLUMNS_SQL): the scene's
+    // ScenePerformer and SceneTag rows
+    performer_count: (c) => buildNumericFilter(c, "s.performerCount"),
+    tag_count: (c) => buildNumericFilter(c, "s.tagCount"),
+    performer_age: (c, ctx) =>
+      performerAgeExists(
+        c,
+        SCENE_PERFORMER_AGE,
+        ctx.applyExclusions ? ctx.userId : null
+      ),
+
+    // Enums
+    orientation: (c) => orientationClause(c, "s.fileWidth", "s.fileHeight"),
+    video_codec: (c) => buildTextFilter(c, "s.fileVideoCodec"),
+    audio_codec: (c) => buildTextFilter(c, "s.fileAudioCodec"),
+
+    // The viewer's favorite entities; false is the negation of true
+    performer_favorite: (on, ctx) => this.favoriteClause("performer", on, ctx),
+    studio_favorite: (on, ctx) => this.favoriteClause("studio", on, ctx),
+    tag_favorite: (on, ctx) => this.favoriteClause("tag", on, ctx),
+  };
+
+  /**
+   * Scenes by playlist: INCLUDES any of the playlists, INCLUDES_ALL each
+   * (one INCLUDES per id, AND-ed), EXCLUDES none. Only playlists the viewer
+   * may read count (`viewablePlaylistSql`); any other id holds no scenes,
+   * so it is never refused and a count reveals nothing about it (INCLUDES
+   * matches nothing, EXCLUDES the whole list, as for an id that does not
+   * exist). The viewer's exclusions apply to the scenes as on every list.
+   */
+  private playlistClause(
+    criterion: PlaylistCriterion,
+    ctx: LeafContext
+  ): FilterClause {
+    const viewable = viewablePlaylistSql("p", ctx.userId);
+    switch (criterion.modifier) {
+      case "INCLUDES":
+        return inPlaylists(playlistItems(viewable, criterion.ids));
+      case "INCLUDES_ALL":
+        return allOf(
+          criterion.ids.map((id) => inPlaylists(playlistItems(viewable, [id])))
+        );
+      case "EXCLUDES":
+        return notInPlaylists(playlistItems(viewable, criterion.ids), ctx.name);
+    }
+  }
+
+  /**
+   * Captions: each element's `language_code`, compared whole (a language code
+   * is lowercase as Stash stores it). A NULL or damaged list, or an element
+   * that is not an object, holds no code, so IS_NULL lists it and NOT_EQUALS
+   * keeps it.
+   */
+  private captionsClause(criterion: TextCriterion): FilterClause {
+    const code =
+      "CASE WHEN j.type = 'object' THEN json_extract(j.value, '$.language_code') END";
+    const codes = `SELECT 1 FROM json_each(${jsonListOrEmpty("s.captions")}) j WHERE ${code}`;
+    switch (criterion.modifier) {
+      case "EQUALS":
+        return { sql: `EXISTS (${codes} = ?)`, params: [criterion.value] };
+      case "NOT_EQUALS":
+        return { sql: `NOT EXISTS (${codes} = ?)`, params: [criterion.value] };
+      case "IS_NULL":
+        return { sql: `NOT EXISTS (${codes} IS NOT NULL)`, params: [] };
+      case "NOT_NULL":
+        return { sql: `EXISTS (${codes} IS NOT NULL)`, params: [] };
+      // Not offered: the parser refuses them
+      case "INCLUDES":
+      case "EXCLUDES":
+      case "STARTS_WITH":
+        return noClause();
+    }
+  }
+
+  /**
+   * Scenes with (true) or without (false) a live clip the viewer can see: not
+   * deleted and, when exclusions apply, not hidden as a clip (the scene's own
+   * exclusion is the statement's). The clip is on the scene's instance, and
+   * the anti-join carries its every-instance arm.
+   */
+  private markersClause(on: boolean, ctx: LeafContext): FilterClause {
+    const viewer = ctx.applyExclusions;
+    const clause: FilterClause = {
+      sql: `EXISTS (SELECT 1 FROM StashClip c${viewer ? ` ${exclusionJoin("ce", "clip", "c.id", "c.stashInstanceId")}` : ""} WHERE c.sceneId = s.id AND c.sceneInstanceId = s.stashInstanceId AND c.deletedAt IS NULL${viewer ? " AND ce.id IS NULL" : ""})`,
+      params: viewer ? [ctx.userId] : [],
+    };
+    return on ? clause : { sql: `NOT ${clause.sql}`, params: clause.params };
+  }
+
+  /**
+   * Scenes with (true) or without (false) another live scene the viewer can
+   * see with the same primary phash, on the scene's own instance (a hash
+   * shared with another server's scene is no duplicate: owner answer 15). A
+   * scene without a hash, or with an empty one, has no duplicate, so false
+   * lists it.
+   */
+  private duplicatedClause(on: boolean, ctx: LeafContext): FilterClause {
+    const viewer = ctx.applyExclusions;
+    const allowed = instanceClause("d", ctx.allowedInstanceIds);
+    const twin: FilterClause = {
+      sql: `(s.phash IS NOT NULL AND s.phash != '' AND EXISTS (SELECT 1 FROM StashScene d${viewer ? ` ${exclusionJoin("de", "scene", "d.id", "d.stashInstanceId")}` : ""} WHERE d.phash = s.phash AND d.deletedAt IS NULL AND ${allowed.sql} AND d.stashInstanceId = s.stashInstanceId AND NOT (d.id = s.id AND d.stashInstanceId = s.stashInstanceId)${viewer ? " AND de.id IS NULL" : ""}))`,
+      params: [...(viewer ? [ctx.userId] : []), ...allowed.params],
+    };
+    return on ? twin : { sql: `NOT ${twin.sql}`, params: twin.params };
+  }
+
+  /** A ref filter on one of the scene's junctions, its CTEs named from the leaf */
+  private refs(
+    target: JunctionTarget,
+    criterion: RefCriterion,
+    ctx: LeafContext
+  ): FilterClause {
+    return refClause(
+      target,
+      criterion.refs,
+      criterion.modifier,
+      refOptionsOf(ctx)
+    );
+  }
+
+  /**
+   * The tag filter: the scene's own tags (SceneTag) and its inherited tags
+   * (SceneInheritedTag), each arm in the same shape, read by index. With a
+   * depth, INCLUDES_ALL is one clause per selected tag, each with its own
+   * descendants (QUERIES-08). Under a sort with an index the page walks it
+   * and probes each scene's tags by the junctions' keys (above 64 refs,
+   * against the scenes the junctions' tag indexes list for the refs); under
+   * one without, the tagged scenes are read from the junctions' tag indexes
+   * (above 64 refs, the matched set). The count reads every match in no
+   * order, so it takes the second form whatever the sort (`sortedByIndex`,
+   * L8, L9). "Has none" is the folder view's Untagged (`tagged: false`: no
+   * own or inherited tag row, the stored count read by its browse index),
+   * "has any" its negation.
+   */
+  private async tagClause(
+    criterion: RefFieldCriterion,
+    ctx: LeafContext
+  ): Promise<FilterClause> {
+    if (criterion.modifier === "IS_NULL" || criterion.modifier === "NOT_NULL") {
+      const untagged = sceneUntaggedSql("s");
       return {
-        sql: "s.deletedAt IS NULL AND e.id IS NULL",
+        sql: criterion.modifier === "IS_NULL" ? untagged : `NOT ${untagged}`,
         params: [],
       };
     }
-    return {
-      sql: "s.deletedAt IS NULL",
-      params: [],
+    return hierarchicalRefClause("tag", SCENE_TAGS, criterion, ctx, {
+      name: ctx.name,
+      inheritedJunction: SCENE_INHERITED_TAGS,
+      sortedByIndex: INDEXED_SORTS.has(ctx.sortField) && !ctx.underAny,
+    });
+  }
+
+  /**
+   * Performer tags: the scene has a live performer the viewer can see that
+   * holds one of the tags, expanded to their descendants to the depth
+   * (`performerTagsFieldClause`). INCLUDES_ALL is one clause per chosen tag, each
+   * with its own descendants, AND-ed: each on some performer of the scene.
+   * A page under a sort with an index walks it (`sortedByIndex`).
+   */
+  private async performerTagsClause(
+    criterion: RefCriterion,
+    ctx: LeafContext
+  ): Promise<FilterClause> {
+    return performerTagsFieldClause(SCENE_PERFORMERS, criterion, {
+      ...refOptionsOf(ctx),
+      viewerId: ctx.applyExclusions ? ctx.userId : null,
+      sortedByIndex: INDEXED_SORTS.has(ctx.sortField) && !ctx.underAny,
+    });
+  }
+
+  /** The studio filter, with the studios' descendants to the depth */
+  private async studioClause(
+    criterion: RefFieldCriterion,
+    ctx: LeafContext
+  ): Promise<FilterClause> {
+    return hierarchicalRefClause("studio", SCENE_STUDIO, criterion, ctx, {
+      name: ctx.name,
+    });
+  }
+
+  /**
+   * `tag_favorite`, `studio_favorite` and `performer_favorite`: the scene
+   * has (`true`) or lacks (`false`) one of the viewer's favourites, through
+   * the same shapes as the tag, studio and performer filters. Tags count
+   * the scene's own and inherited tags and every sub-tag, studios their
+   * sub-studios (depth -1, as the Tags and Studios filters take it). With
+   * no favourites `true` matches nothing and `false` is no filter.
+   */
+  private async favoriteClause(
+    kind: "tag" | "studio" | "performer",
+    on: boolean,
+    ctx: LeafContext
+  ): Promise<FilterClause> {
+    const refs = await favoriteRefs(kind, ctx);
+    if (refs.length === 0) {
+      return on ? { sql: "1 = 0", params: [] } : noClause();
+    }
+    const criterion: RefCriterion = {
+      refs,
+      modifier: on ? "INCLUDES" : "EXCLUDES",
+      depth: -1,
     };
+    if (kind === "tag") return this.tagClause(criterion, ctx);
+    if (kind === "studio") return this.studioClause(criterion, ctx);
+    return this.refs(SCENE_PERFORMERS, { ...criterion, depth: 0 }, ctx);
   }
 
   /**
-   * Build instance filter clause for multi-instance support
-   * Filters scenes to only those from allowed Stash instances
+   * The search across the title, details, path, performers, studio and
+   * tags: every word must match (`searchAll`), a word found in any of the
+   * six places, each as `likeContains` with `ESCAPE '\'`, so a `%`, `_` or
+   * `\` in the text matches itself. No `LOWER()`: SQLite's LIKE folds ASCII
+   * case, and a non-ASCII letter matches as typed.
    */
-  private buildInstanceFilter(allowedInstanceIds: string[] | undefined): FilterClause {
-    if (!allowedInstanceIds || allowedInstanceIds.length === 0) {
-      // No instance filter - return all scenes
-      return { sql: "", params: [] };
-    }
-
-    const placeholders = allowedInstanceIds.map(() => "?").join(", ");
-    return {
-      sql: `(s.stashInstanceId IN (${placeholders}) OR s.stashInstanceId IS NULL)`,
-      params: allowedInstanceIds,
-    };
-  }
-
-  /**
-   * Build filter for a specific instance ID (for disambiguation on detail pages)
-   * This is different from allowedInstanceIds - it filters to exactly one instance.
-   */
-  private buildSpecificInstanceFilter(instanceId: string | undefined): FilterClause {
-    if (!instanceId) {
-      return { sql: "", params: [] };
-    }
-    return {
-      sql: `s.stashInstanceId = ?`,
-      params: [instanceId],
-    };
-  }
-
-  /**
-   * Build performer filter clause
-   * Supports INCLUDES, INCLUDES_ALL, EXCLUDES modifiers
-   * Handles composite "id:instanceId" values for multi-instance filtering
-   */
-  private buildPerformerFilter(
-    filter: { value?: string[] | null; modifier?: string | null } | undefined | null
+  protected override searchClause(
+    searchQuery: string,
+    ctx: QueryContext
   ): FilterClause {
-    if (!filter || !filter.value || filter.value.length === 0) {
-      return { sql: "", params: [] };
-    }
+    // A name matches only through a live entity the viewer can see, on its
+    // own instance, as the lists show it
+    const visible = (excl: string, entityType: string, alias: string) =>
+      ctx.applyExclusions
+        ? `AND NOT EXISTS (SELECT 1 FROM UserExcludedEntity ${excl} WHERE ${excl}.userId = ? AND ${excl}.entityType = '${entityType}' AND ${excl}.entityId = ${alias}.id AND (${excl}.instanceId = '' OR ${excl}.instanceId = ${alias}.stashInstanceId))`
+        : "";
+    const visibleParams = ctx.applyExclusions ? [ctx.userId] : [];
+    const like = "LIKE ? ESCAPE '\\'";
 
-    const ids = coerceEntityRefs(filter.value);
-    const modifier = filter.modifier || "INCLUDES";
-
-    return buildJunctionFilter(
-      ids, "ScenePerformer", "sceneId", "sceneInstanceId",
-      "performerId", "performerInstanceId", "s", modifier
-    );
-  }
-
-  /**
-   * Build tag filter clause
-   * Handles composite "id:instanceId" values for multi-instance filtering
-   */
-  private buildTagFilter(
-    filter: { value?: string[] | null; modifier?: string | null } | undefined | null
-  ): FilterClause {
-    if (!filter || !filter.value || filter.value.length === 0) {
-      return { sql: "", params: [] };
-    }
-
-    const ids = coerceEntityRefs(filter.value);
-    const modifier = filter.modifier || "INCLUDES";
-
-    return buildJunctionFilter(
-      ids, "SceneTag", "sceneId", "sceneInstanceId",
-      "tagId", "tagInstanceId", "s", modifier
-    );
-  }
-
-  /**
-   * Build studio filter clause
-   * Studios use a direct FK (studioId) on the scene — no junction table.
-   * Instance is implied by scene's stashInstanceId.
-   */
-  private buildStudioFilter(
-    filter: { value?: string[] | null; modifier?: string | null } | undefined | null
-  ): FilterClause {
-    if (!filter || !filter.value || filter.value.length === 0) {
-      return { sql: "", params: [] };
-    }
-
-    const ids = coerceEntityRefs(filter.value);
-    const modifier = filter.modifier || "INCLUDES";
-
-    return buildDirectFilter(ids, "s.studioId", "s.stashInstanceId", modifier);
-  }
-
-  /**
-   * Build group filter clause
-   * Handles composite "id:instanceId" values for multi-instance filtering
-   */
-  private buildGroupFilter(
-    filter: { value?: string[] | null; modifier?: string | null } | undefined | null
-  ): FilterClause {
-    if (!filter || !filter.value || filter.value.length === 0) {
-      return { sql: "", params: [] };
-    }
-
-    const ids = coerceEntityRefs(filter.value);
-    const modifier = filter.modifier || "INCLUDES";
-
-    return buildJunctionFilter(
-      ids, "SceneGroup", "sceneId", "sceneInstanceId",
-      "groupId", "groupInstanceId", "s", modifier
-    );
-  }
-
-  /**
-   * Build galleries filter clause
-   * Handles composite "id:instanceId" values for multi-instance filtering
-   */
-  private buildGalleriesFilter(
-    filter: { value?: string[] | null; modifier?: string | null } | undefined | null
-  ): FilterClause {
-    if (!filter || !filter.value || filter.value.length === 0) {
-      return { sql: "", params: [] };
-    }
-
-    const ids = coerceEntityRefs(filter.value);
-    const modifier = filter.modifier || "INCLUDES";
-
-    return buildJunctionFilter(
-      ids, "SceneGallery", "sceneId", "sceneInstanceId",
-      "galleryId", "galleryInstanceId", "s", modifier
-    );
-  }
-
-
-  /**
-   * Build ID filter clause (for specific scene IDs)
-   */
-  private buildIdFilter(
-    filter: { value?: string[] | null; modifier?: string | null } | string[] | undefined | null
-  ): FilterClause {
-    // Handle both array and object formats
-    const ids = Array.isArray(filter) ? filter : filter?.value;
-    if (!ids || ids.length === 0) {
-      return { sql: "", params: [] };
-    }
-
-    const modifier = Array.isArray(filter) ? "INCLUDES" : filter?.modifier || "INCLUDES";
-    const placeholders = ids.map(() => "?").join(", ");
-
-    switch (modifier) {
-      case "INCLUDES":
-        return { sql: `s.id IN (${placeholders})`, params: ids };
-      case "EXCLUDES":
-        return { sql: `s.id NOT IN (${placeholders})`, params: ids };
-      default:
-        return { sql: `s.id IN (${placeholders})`, params: ids };
-    }
-  }
-
-  /**
-   * Build resolution filter clause
-   */
-  private buildResolutionFilter(
-    filter: { value?: string | null; modifier?: string | null } | undefined | null
-  ): FilterClause {
-    if (!filter || !filter.value) {
-      return { sql: "", params: [] };
-    }
-
-    // Resolution values map enum names to pixel heights
-    const resolutionMap: Record<string, number> = {
-      // Lowercase with 'p' suffix (e.g., "720p")
-      "144p": 144,
-      "240p": 240,
-      "360p": 360,
-      "480p": 480,
-      "540p": 540,
-      "720p": 720,
-      "1080p": 1080,
-      "1440p": 1440,
-      "4k": 2160,
-      "5k": 2880,
-      "6k": 3240,
-      "8k": 4320,
-      // Stash enum values (e.g., "STANDARD_HD")
-      very_low: 144,
-      low: 240,
-      r360p: 360,
-      standard: 480,
-      web_hd: 540,
-      standard_hd: 720,
-      full_hd: 1080,
-      quad_hd: 1440,
-      vr_hd: 1920,
-      four_k: 2160,
-      five_k: 2880,
-      six_k: 3240,
-      eight_k: 4320,
-    };
-
-    const height = resolutionMap[filter.value.toLowerCase()];
-    if (!height) {
-      return { sql: "", params: [] };
-    }
-
-    const { modifier = "EQUALS" } = filter;
-    const col = "COALESCE(s.fileHeight, 0)";
-
-    switch (modifier) {
-      case "EQUALS":
-        return { sql: `${col} = ?`, params: [height] };
-      case "NOT_EQUALS":
-        return { sql: `${col} != ?`, params: [height] };
-      case "GREATER_THAN":
-        return { sql: `${col} > ?`, params: [height] };
-      case "LESS_THAN":
-        return { sql: `${col} < ?`, params: [height] };
-      default:
-        return { sql: `${col} >= ?`, params: [height] };
-    }
-  }
-
-  /**
-   * Build title filter clause (text search)
-   */
-  private buildTitleFilter(
-    filter: { value?: string | null; modifier?: string | null } | undefined | null
-  ): FilterClause {
-    if (!filter || !filter.value) {
-      return { sql: "", params: [] };
-    }
-
-    const { value, modifier = "INCLUDES" } = filter;
-
-    switch (modifier) {
-      case "INCLUDES":
-        return { sql: "LOWER(s.title) LIKE LOWER(?)", params: [`%${value}%`] };
-      case "EXCLUDES":
-        return {
-          sql: "(s.title IS NULL OR LOWER(s.title) NOT LIKE LOWER(?))",
-          params: [`%${value}%`],
-        };
-      case "EQUALS":
-        return { sql: "LOWER(s.title) = LOWER(?)", params: [value] };
-      case "NOT_EQUALS":
-        return {
-          sql: "(s.title IS NULL OR LOWER(s.title) != LOWER(?))",
-          params: [value],
-        };
-      case "IS_NULL":
-        return { sql: "(s.title IS NULL OR s.title = '')", params: [] };
-      case "NOT_NULL":
-        return { sql: "(s.title IS NOT NULL AND s.title != '')", params: [] };
-      default:
-        return { sql: "", params: [] };
-    }
-  }
-
-  /**
-   * Build details filter clause (text search)
-   */
-  private buildDetailsFilter(
-    filter: { value?: string | null; modifier?: string | null } | undefined | null
-  ): FilterClause {
-    if (!filter || !filter.value) {
-      return { sql: "", params: [] };
-    }
-
-    const { value, modifier = "INCLUDES" } = filter;
-
-    switch (modifier) {
-      case "INCLUDES":
-        return { sql: "LOWER(s.details) LIKE LOWER(?)", params: [`%${value}%`] };
-      case "EXCLUDES":
-        return {
-          sql: "(s.details IS NULL OR LOWER(s.details) NOT LIKE LOWER(?))",
-          params: [`%${value}%`],
-        };
-      case "EQUALS":
-        return { sql: "LOWER(s.details) = LOWER(?)", params: [value] };
-      case "NOT_EQUALS":
-        return {
-          sql: "(s.details IS NULL OR LOWER(s.details) != LOWER(?))",
-          params: [value],
-        };
-      case "IS_NULL":
-        return { sql: "(s.details IS NULL OR s.details = '')", params: [] };
-      case "NOT_NULL":
-        return { sql: "(s.details IS NOT NULL AND s.details != '')", params: [] };
-      default:
-        return { sql: "", params: [] };
-    }
-  }
-
-  /**
-   * Build text search filter clause (searches across title, details, path, performers, studio, tags)
-   * Uses LIKE with wildcard for broad text matching
-   */
-  private buildSearchQueryFilter(searchQuery: string | undefined): FilterClause {
-    if (!searchQuery || searchQuery.trim() === "") {
-      return { sql: "", params: [] };
-    }
-
-    const query = searchQuery.trim();
-    const likeParam = `%${query}%`;
-
-    // Build OR clause that searches across multiple fields including relations via subqueries
-    // Using LOWER() for case-insensitive matching
     const sql = `(
-      LOWER(s.title) LIKE LOWER(?) OR
-      LOWER(s.details) LIKE LOWER(?) OR
-      LOWER(s.filePath) LIKE LOWER(?) OR
+      s.title ${like} OR
+      s.details ${like} OR
+      s.filePath ${like} OR
       EXISTS (
         SELECT 1 FROM ScenePerformer sp
         INNER JOIN StashPerformer p ON sp.performerId = p.id AND sp.performerInstanceId = p.stashInstanceId
         WHERE sp.sceneId = s.id AND sp.sceneInstanceId = s.stashInstanceId
-        AND LOWER(p.name) LIKE LOWER(?)
+        AND p.deletedAt IS NULL
+        ${visible("xp", "performer", "p")}
+        AND p.name ${like}
       ) OR
       EXISTS (
         SELECT 1 FROM StashStudio st
         WHERE st.id = s.studioId AND st.stashInstanceId = s.stashInstanceId
-        AND LOWER(st.name) LIKE LOWER(?)
+        AND st.deletedAt IS NULL
+        ${visible("xs", "studio", "st")}
+        AND st.name ${like}
       ) OR
       EXISTS (
         SELECT 1 FROM SceneTag stag
         INNER JOIN StashTag t ON stag.tagId = t.id AND stag.tagInstanceId = t.stashInstanceId
         WHERE stag.sceneId = s.id AND stag.sceneInstanceId = s.stashInstanceId
-        AND LOWER(t.name) LIKE LOWER(?)
+        AND t.deletedAt IS NULL
+        ${visible("xt", "tag", "t")}
+        AND t.name ${like}
       )
     )`;
 
-    return {
+    return searchAll(searchTerms(searchQuery), (pattern) => ({
       sql,
-      params: [likeParam, likeParam, likeParam, likeParam, likeParam, likeParam],
-    };
-  }
-
-  /**
-   * Build orientation filter clause
-   */
-  private buildOrientationFilter(
-    filter: { value?: string[] | null } | undefined | null
-  ): FilterClause {
-    if (!filter || !filter.value || filter.value.length === 0) {
-      return { sql: "", params: [] };
-    }
-
-    const orientations = filter.value.map((o) => o.toUpperCase());
-    const conditions: string[] = [];
-
-    for (const orientation of orientations) {
-      switch (orientation) {
-        case "LANDSCAPE":
-          conditions.push("(s.fileWidth > s.fileHeight)");
-          break;
-        case "PORTRAIT":
-          conditions.push("(s.fileWidth < s.fileHeight)");
-          break;
-        case "SQUARE":
-          conditions.push("(s.fileWidth = s.fileHeight AND s.fileWidth > 0)");
-          break;
-      }
-    }
-
-    if (conditions.length === 0) {
-      return { sql: "", params: [] };
-    }
-
-    return { sql: `(${conditions.join(" OR ")})`, params: [] };
-  }
-
-  /**
-   * Build video codec filter clause
-   */
-  private buildVideoCodecFilter(
-    filter: { value?: string | null; modifier?: string | null } | undefined | null
-  ): FilterClause {
-    if (!filter || !filter.value) {
-      return { sql: "", params: [] };
-    }
-
-    const { value, modifier = "INCLUDES" } = filter;
-
-    switch (modifier) {
-      case "INCLUDES":
-        return {
-          sql: "LOWER(s.fileVideoCodec) LIKE LOWER(?)",
-          params: [`%${value}%`],
-        };
-      case "EXCLUDES":
-        return {
-          sql: "(s.fileVideoCodec IS NULL OR LOWER(s.fileVideoCodec) NOT LIKE LOWER(?))",
-          params: [`%${value}%`],
-        };
-      case "EQUALS":
-        return { sql: "LOWER(s.fileVideoCodec) = LOWER(?)", params: [value] };
-      case "NOT_EQUALS":
-        return {
-          sql: "(s.fileVideoCodec IS NULL OR LOWER(s.fileVideoCodec) != LOWER(?))",
-          params: [value],
-        };
-      case "IS_NULL":
-        return {
-          sql: "(s.fileVideoCodec IS NULL OR s.fileVideoCodec = '')",
-          params: [],
-        };
-      case "NOT_NULL":
-        return {
-          sql: "(s.fileVideoCodec IS NOT NULL AND s.fileVideoCodec != '')",
-          params: [],
-        };
-      default:
-        return { sql: "", params: [] };
-    }
-  }
-
-  /**
-   * Build audio codec filter clause
-   */
-  private buildAudioCodecFilter(
-    filter: { value?: string | null; modifier?: string | null } | undefined | null
-  ): FilterClause {
-    if (!filter || !filter.value) {
-      return { sql: "", params: [] };
-    }
-
-    const { value, modifier = "INCLUDES" } = filter;
-
-    switch (modifier) {
-      case "INCLUDES":
-        return {
-          sql: "LOWER(s.fileAudioCodec) LIKE LOWER(?)",
-          params: [`%${value}%`],
-        };
-      case "EXCLUDES":
-        return {
-          sql: "(s.fileAudioCodec IS NULL OR LOWER(s.fileAudioCodec) NOT LIKE LOWER(?))",
-          params: [`%${value}%`],
-        };
-      case "EQUALS":
-        return { sql: "LOWER(s.fileAudioCodec) = LOWER(?)", params: [value] };
-      case "NOT_EQUALS":
-        return {
-          sql: "(s.fileAudioCodec IS NULL OR LOWER(s.fileAudioCodec) != LOWER(?))",
-          params: [value],
-        };
-      case "IS_NULL":
-        return {
-          sql: "(s.fileAudioCodec IS NULL OR s.fileAudioCodec = '')",
-          params: [],
-        };
-      case "NOT_NULL":
-        return {
-          sql: "(s.fileAudioCodec IS NOT NULL AND s.fileAudioCodec != '')",
-          params: [],
-        };
-      default:
-        return { sql: "", params: [] };
-    }
-  }
-
-  /**
-   * Build performer count filter clause
-   */
-  private buildPerformerCountFilter(
-    filter:
-      | { value?: number | null; value2?: number | null; modifier?: string | null }
-      | undefined
-      | null
-  ): FilterClause {
-    if (!filter || filter.value === undefined || filter.value === null) {
-      return { sql: "", params: [] };
-    }
-
-    const { value, value2, modifier = "EQUALS" } = filter;
-    const subquery =
-      "(SELECT COUNT(*) FROM ScenePerformer sp WHERE sp.sceneId = s.id AND sp.sceneInstanceId = s.stashInstanceId)";
-
-    switch (modifier) {
-      case "EQUALS":
-        return { sql: `${subquery} = ?`, params: [value] };
-      case "NOT_EQUALS":
-        return { sql: `${subquery} != ?`, params: [value] };
-      case "GREATER_THAN":
-        return { sql: `${subquery} > ?`, params: [value] };
-      case "LESS_THAN":
-        return { sql: `${subquery} < ?`, params: [value] };
-      case "BETWEEN":
-        if (value2 !== undefined && value2 !== null) {
-          return { sql: `${subquery} BETWEEN ? AND ?`, params: [value, value2] };
-        }
-        return { sql: `${subquery} >= ?`, params: [value] };
-      default:
-        return { sql: "", params: [] };
-    }
-  }
-
-  /**
-   * Build tag count filter clause
-   */
-  private buildTagCountFilter(
-    filter:
-      | { value?: number | null; value2?: number | null; modifier?: string | null }
-      | undefined
-      | null
-  ): FilterClause {
-    if (!filter || filter.value === undefined || filter.value === null) {
-      return { sql: "", params: [] };
-    }
-
-    const { value, value2, modifier = "EQUALS" } = filter;
-    const subquery = "(SELECT COUNT(*) FROM SceneTag st WHERE st.sceneId = s.id AND st.sceneInstanceId = s.stashInstanceId)";
-
-    switch (modifier) {
-      case "EQUALS":
-        return { sql: `${subquery} = ?`, params: [value] };
-      case "NOT_EQUALS":
-        return { sql: `${subquery} != ?`, params: [value] };
-      case "GREATER_THAN":
-        return { sql: `${subquery} > ?`, params: [value] };
-      case "LESS_THAN":
-        return { sql: `${subquery} < ?`, params: [value] };
-      case "BETWEEN":
-        if (value2 !== undefined && value2 !== null) {
-          return { sql: `${subquery} BETWEEN ? AND ?`, params: [value, value2] };
-        }
-        return { sql: `${subquery} >= ?`, params: [value] };
-      default:
-        return { sql: "", params: [] };
-    }
-  }
-
-  /**
-   * Build performer favorite filter clause
-   * Returns scenes that have at least one favorite performer
-   */
-  private buildPerformerFavoriteFilter(userId: number): FilterClause {
-    return {
-      sql: `EXISTS (
-        SELECT 1 FROM ScenePerformer sp
-        JOIN PerformerRating pr ON sp.performerId = pr.performerId AND sp.performerInstanceId = pr.instanceId AND pr.userId = ?
-        WHERE sp.sceneId = s.id AND sp.sceneInstanceId = s.stashInstanceId AND pr.favorite = 1
-      )`,
-      params: [userId],
-    };
-  }
-
-  /**
-   * Build studio favorite filter clause
-   * Returns scenes that have a favorite studio
-   */
-  private buildStudioFavoriteFilter(userId: number): FilterClause {
-    return {
-      sql: `EXISTS (
-        SELECT 1 FROM StudioRating sr
-        WHERE sr.studioId = s.studioId AND sr.instanceId = s.stashInstanceId AND sr.userId = ? AND sr.favorite = 1
-      )`,
-      params: [userId],
-    };
-  }
-
-  /**
-   * Build tag favorite filter clause
-   * Returns scenes that have at least one favorite tag
-   */
-  private buildTagFavoriteFilter(userId: number): FilterClause {
-    return {
-      sql: `EXISTS (
-        SELECT 1 FROM SceneTag st
-        JOIN TagRating tr ON st.tagId = tr.tagId AND st.tagInstanceId = tr.instanceId AND tr.userId = ?
-        WHERE st.sceneId = s.id AND st.sceneInstanceId = s.stashInstanceId AND tr.favorite = 1
-      )`,
-      params: [userId],
-    };
-  }
-
-  /**
-   * Build performer age filter clause
-   * Filters by performer age at time of scene date
-   */
-  private buildPerformerAgeFilter(
-    filter:
-      | { value?: number | null; value2?: number | null; modifier?: string | null }
-      | undefined
-      | null
-  ): FilterClause {
-    if (!filter || filter.value === undefined || filter.value === null) {
-      return { sql: "", params: [] };
-    }
-
-    const { value, value2, modifier = "EQUALS" } = filter;
-    // Calculate age: (scene_date - birthdate) in years
-    // SQLite: (julianday(scene_date) - julianday(birthdate)) / 365.25
-    const ageSubquery = `(
-      SELECT MAX(
-        CAST((julianday(COALESCE(s.date, date('now'))) - julianday(p.birthdate)) / 365.25 AS INTEGER)
-      )
-      FROM ScenePerformer sp
-      JOIN StashPerformer p ON sp.performerId = p.id AND sp.performerInstanceId = p.stashInstanceId
-      WHERE sp.sceneId = s.id AND sp.sceneInstanceId = s.stashInstanceId AND p.birthdate IS NOT NULL
-    )`;
-
-    switch (modifier) {
-      case "EQUALS":
-        return { sql: `${ageSubquery} = ?`, params: [value] };
-      case "NOT_EQUALS":
-        return { sql: `${ageSubquery} != ?`, params: [value] };
-      case "GREATER_THAN":
-        return { sql: `${ageSubquery} > ?`, params: [value] };
-      case "LESS_THAN":
-        return { sql: `${ageSubquery} < ?`, params: [value] };
-      case "BETWEEN":
-        if (value2 !== undefined && value2 !== null) {
-          return { sql: `${ageSubquery} BETWEEN ? AND ?`, params: [value, value2] };
-        }
-        return { sql: `${ageSubquery} >= ?`, params: [value] };
-      default:
-        return { sql: "", params: [] };
-    }
-  }
-
-  /**
-   * Build studio filter with hierarchy support
-   */
-  private async buildStudioFilterWithHierarchy(
-    filter:
-      | { value?: string[] | null; modifier?: string | null; depth?: number | null }
-      | undefined
-      | null
-  ): Promise<FilterClause> {
-    if (!filter || !filter.value || filter.value.length === 0) {
-      return { sql: "", params: [] };
-    }
-
-    // Parse composite keys ("5:instance-1" -> "5") since UI sends composite format
-    // but StashScene.studioId stores bare IDs
-    const { parsed } = parseCompositeFilterValues(filter.value);
-    let ids = parsed.map(p => p.id);
-    const { modifier = "INCLUDES", depth } = filter;
-
-    // Expand IDs if depth is specified and not 0
-    if (depth !== undefined && depth !== null && depth !== 0) {
-      ids = await expandStudioIds(ids, depth);
-    }
-
-    const placeholders = ids.map(() => "?").join(", ");
-
-    switch (modifier) {
-      case "INCLUDES":
-        return {
-          sql: `s.studioId IN (${placeholders})`,
-          params: ids,
-        };
-
-      case "EXCLUDES":
-        return {
-          sql: `(s.studioId IS NULL OR s.studioId NOT IN (${placeholders}))`,
-          params: ids,
-        };
-
-      default:
-        return { sql: "", params: [] };
-    }
-  }
-
-  /**
-   * Build tag filter with hierarchy support
-   * Searches both direct scene tags (SceneTag) and inherited tags (inheritedTagIds JSON)
-   */
-  private async buildTagFilterWithHierarchy(
-    filter:
-      | { value?: string[] | null; modifier?: string | null; depth?: number | null }
-      | undefined
-      | null
-  ): Promise<FilterClause> {
-    if (!filter || !filter.value || filter.value.length === 0) {
-      return { sql: "", params: [] };
-    }
-
-    // Parse composite keys ("284:instance-1" -> "284") since UI sends composite format
-    // but SceneTag.tagId and inheritedTagIds store bare IDs
-    const { parsed } = parseCompositeFilterValues(filter.value);
-    let ids = parsed.map(p => p.id);
-    const { modifier = "INCLUDES", depth } = filter;
-
-    // Expand IDs if depth is specified and not 0
-    if (depth !== undefined && depth !== null && depth !== 0) {
-      ids = await expandTagIds(ids, depth);
-    }
-
-    const placeholders = ids.map(() => "?").join(", ");
-
-    // Build inherited tag check using json_each to search the JSON array
-    // inheritedTagIds is stored as JSON string like '["284","313"]'
-    // IMPORTANT: Also verify the tag exists in the scene's instance to prevent cross-instance pollution
-    // Different instances can have different tags with the same ID
-    const inheritedTagCheck = ids.map(() =>
-      `EXISTS (SELECT 1 FROM json_each(s.inheritedTagIds) je WHERE je.value = ? AND EXISTS (SELECT 1 FROM StashTag t WHERE t.id = je.value AND t.stashInstanceId = s.stashInstanceId AND t.deletedAt IS NULL))`
-    ).join(" OR ");
-
-    switch (modifier) {
-      case "INCLUDES":
-        // Match if tag is in direct tags OR in inherited tags
-        return {
-          sql: `(EXISTS (SELECT 1 FROM SceneTag st WHERE st.sceneId = s.id AND st.sceneInstanceId = s.stashInstanceId AND st.tagId IN (${placeholders})) OR (${inheritedTagCheck}))`,
-          params: [...ids, ...ids],
-        };
-
-      case "INCLUDES_ALL": {
-        // Match if ALL tags are present (in direct tags OR inherited tags)
-        // For each tag, check if it's in SceneTag OR in inheritedTagIds (with instance validation)
-        const allTagChecks = ids.map(() =>
-          `(EXISTS (SELECT 1 FROM SceneTag st WHERE st.sceneId = s.id AND st.sceneInstanceId = s.stashInstanceId AND st.tagId = ?) OR EXISTS (SELECT 1 FROM json_each(s.inheritedTagIds) je WHERE je.value = ? AND EXISTS (SELECT 1 FROM StashTag t WHERE t.id = je.value AND t.stashInstanceId = s.stashInstanceId AND t.deletedAt IS NULL)))`
-        ).join(" AND ");
-        // Flatten params: for each id, we need it twice (once for SceneTag, once for json_each)
-        const allTagParams = ids.flatMap(id => [id, id]);
-        return {
-          sql: `(${allTagChecks})`,
-          params: allTagParams,
-        };
-      }
-
-      case "EXCLUDES":
-        // Exclude if tag is in direct tags OR in inherited tags
-        return {
-          sql: `(NOT EXISTS (SELECT 1 FROM SceneTag st WHERE st.sceneId = s.id AND st.sceneInstanceId = s.stashInstanceId AND st.tagId IN (${placeholders})) AND NOT (${inheritedTagCheck}))`,
-          params: [...ids, ...ids],
-        };
-
-      default:
-        return { sql: "", params: [] };
-    }
-  }
-
-  /**
-   * Build ORDER BY clause
-   */
-  private buildSortClause(
-    sort: string,
-    direction: "ASC" | "DESC",
-    randomSeed?: number
-  ): string {
-    const dir = direction === "ASC" ? "ASC" : "DESC";
-
-    // Extract filename from path: '/videos/My Scene.mp4' -> 'My Scene.mp4'
-    // This matches the display logic in getSceneFallbackTitle which uses basename
-    // Note: handles forward slashes; backslashes are uncommon in Stash paths
-    const filenameExpr = `REPLACE(s.filePath, RTRIM(s.filePath, REPLACE(s.filePath, '/', '')), '')`;
-
-    // Map sort field names to SQL expressions
-    const sortMap: Record<string, string> = {
-      // Scene metadata
-      created_at: `s.stashCreatedAt ${dir}`,
-      updated_at: `s.stashUpdatedAt ${dir}`,
-      date: `s.date ${dir}`,
-      title: `COALESCE(NULLIF(s.title, ''), ${filenameExpr}) COLLATE NOCASE ${dir}`,
-      duration: `s.duration ${dir}`,
-      filesize: `s.fileSize ${dir}`,
-      bitrate: `s.fileBitRate ${dir}`,
-      framerate: `s.fileFrameRate ${dir}`,
-      path: `s.filePath ${dir}`,
-      performer_count: `(SELECT COUNT(*) FROM ScenePerformer sp WHERE sp.sceneId = s.id AND sp.sceneInstanceId = s.stashInstanceId) ${dir}`,
-      tag_count: `(SELECT COUNT(*) FROM SceneTag st WHERE st.sceneId = s.id AND st.sceneInstanceId = s.stashInstanceId) ${dir}`,
-
-      // User ratings (from SceneRating table)
-      rating: `COALESCE(r.rating, 0) ${dir}`,
-
-      // User data - prefer user values
-      last_played_at: `w.lastPlayedAt ${dir}`,
-      play_count: `COALESCE(w.playCount, 0) ${dir}`,
-      play_duration: `COALESCE(w.playDuration, 0) ${dir}`,
-      o_counter: `COALESCE(w.oCount, 0) ${dir}`,
-      // last_o_at: SQL sort not supported - lastOAt column doesn't exist in WatchHistory
-      // The last O timestamp is derived from oHistory JSON and can only be sorted in JS
-      user_rating: `COALESCE(r.rating, 0) ${dir}`,
-      resume_time: `COALESCE(w.resumeTime, 0) ${dir}`,
-
-      // Random with deterministic seed for stable pagination
-      // Uses Stash's formula with modulo at each step to prevent SQLite integer overflow
-      // Without intermediate modulo, large seeds cause overflow to float which breaks ordering
-      random: `(((((s.id + ${randomSeed || 12345}) % 2147483647) * ((s.id + ${randomSeed || 12345}) % 2147483647) % 2147483647) * 52959209 % 2147483647 + ((s.id + ${randomSeed || 12345}) * 1047483763 % 2147483647)) % 2147483647) ${dir}`,
-    };
-
-    const sortExpr = sortMap[sort] || sortMap["created_at"];
-
-    // Add secondary sort by id for stable ordering
-    return `${sortExpr}, s.id ${dir}`;
-  }
-
-  async execute(options: SceneQueryOptions): Promise<SceneQueryResult> {
-    const startTime = Date.now();
-    const { userId, page, perPage, applyExclusions = true, allowedInstanceIds, specificInstanceId, filters } = options;
-
-    // Build FROM clause with optional exclusion JOIN
-    const fromClause = this.buildFromClause(userId, applyExclusions);
-
-    // Build WHERE clauses
-    const whereClauses: FilterClause[] = [this.buildBaseWhere(applyExclusions)];
-
-    // Instance filter (multi-instance support)
-    const instanceFilter = this.buildInstanceFilter(allowedInstanceIds);
-    if (instanceFilter.sql) {
-      whereClauses.push(instanceFilter);
-    }
-
-    // Specific instance filter (for disambiguation on detail pages)
-    if (specificInstanceId) {
-      const specificFilter = this.buildSpecificInstanceFilter(specificInstanceId);
-      if (specificFilter.sql) {
-        whereClauses.push(specificFilter);
-      }
-    }
-
-    // ID filter
-    if (filters?.ids) {
-      const idFilter = this.buildIdFilter(filters.ids);
-      if (idFilter.sql) {
-        whereClauses.push(idFilter);
-      }
-    }
-
-    // Metadata filters
-    if (filters?.duration) {
-      const durationFilter = buildNumericFilter(filters.duration, "COALESCE(s.duration, 0)");
-      if (durationFilter.sql) {
-        whereClauses.push(durationFilter);
-      }
-    }
-
-    if (filters?.resolution) {
-      const resolutionFilter = this.buildResolutionFilter(filters.resolution);
-      if (resolutionFilter.sql) {
-        whereClauses.push(resolutionFilter);
-      }
-    }
-
-    // Add entity filters
-    if (filters?.performers) {
-      const performerFilter = this.buildPerformerFilter(filters.performers);
-      if (performerFilter.sql) {
-        whereClauses.push(performerFilter);
-      }
-    }
-
-    if (filters?.tags) {
-      // Use hierarchy-aware filter that supports depth parameter
-      const tagFilter = await this.buildTagFilterWithHierarchy(filters.tags);
-      if (tagFilter.sql) {
-        whereClauses.push(tagFilter);
-      }
-    }
-
-    if (filters?.studios) {
-      // Use hierarchy-aware filter that supports depth parameter
-      const studioFilter = await this.buildStudioFilterWithHierarchy(filters.studios);
-      if (studioFilter.sql) {
-        whereClauses.push(studioFilter);
-      }
-    }
-
-    if (filters?.groups) {
-      const groupFilter = this.buildGroupFilter(filters.groups);
-      if (groupFilter.sql) {
-        whereClauses.push(groupFilter);
-      }
-    }
-
-    if (filters?.galleries) {
-      const galleriesFilter = this.buildGalleriesFilter(filters.galleries);
-      if (galleriesFilter.sql) {
-        whereClauses.push(galleriesFilter);
-      }
-    }
-
-    // User data filters
-    const favoriteFilter = buildFavoriteFilter(filters?.favorite);
-    if (favoriteFilter.sql) {
-      whereClauses.push(favoriteFilter);
-    }
-
-    if (filters?.rating100) {
-      const ratingFilter = buildNumericFilter(filters.rating100, "COALESCE(r.rating, 0)");
-      if (ratingFilter.sql) {
-        whereClauses.push(ratingFilter);
-      }
-    }
-
-    if (filters?.play_count) {
-      const playCountFilter = buildNumericFilter(filters.play_count, "COALESCE(w.playCount, 0)");
-      if (playCountFilter.sql) {
-        whereClauses.push(playCountFilter);
-      }
-    }
-
-    if (filters?.o_counter) {
-      const oCounterFilter = buildNumericFilter(filters.o_counter, "COALESCE(w.oCount, 0)");
-      if (oCounterFilter.sql) {
-        whereClauses.push(oCounterFilter);
-      }
-    }
-
-    // Text filters
-    if (filters?.title) {
-      const titleFilter = this.buildTitleFilter(filters.title);
-      if (titleFilter.sql) {
-        whereClauses.push(titleFilter);
-      }
-    }
-
-    if (filters?.details) {
-      const detailsFilter = this.buildDetailsFilter(filters.details);
-      if (detailsFilter.sql) {
-        whereClauses.push(detailsFilter);
-      }
-    }
-
-    // Date filters
-    if (filters?.date) {
-      const dateFilter = buildDateFilter(filters.date, "s.date");
-      if (dateFilter.sql) {
-        whereClauses.push(dateFilter);
-      }
-    }
-
-    if (filters?.created_at) {
-      const createdFilter = buildDateFilter(filters.created_at, "s.stashCreatedAt");
-      if (createdFilter.sql) {
-        whereClauses.push(createdFilter);
-      }
-    }
-
-    if (filters?.updated_at) {
-      const updatedFilter = buildDateFilter(filters.updated_at, "s.stashUpdatedAt");
-      if (updatedFilter.sql) {
-        whereClauses.push(updatedFilter);
-      }
-    }
-
-    if (filters?.last_played_at) {
-      const lastPlayedFilter = buildDateFilter(filters.last_played_at, "w.lastPlayedAt");
-      if (lastPlayedFilter.sql) {
-        whereClauses.push(lastPlayedFilter);
-      }
-    }
-
-    // Numeric filters
-    if (filters?.bitrate) {
-      const bitrateFilter = buildNumericFilter(filters.bitrate, "COALESCE(s.fileBitRate, 0)");
-      if (bitrateFilter.sql) {
-        whereClauses.push(bitrateFilter);
-      }
-    }
-
-    if (filters?.framerate) {
-      const framerateFilter = buildNumericFilter(filters.framerate, "COALESCE(s.fileFrameRate, 0)");
-      if (framerateFilter.sql) {
-        whereClauses.push(framerateFilter);
-      }
-    }
-
-    if (filters?.play_duration) {
-      const playDurationFilter = buildNumericFilter(
-        filters.play_duration,
-        "COALESCE(w.playDuration, 0)"
-      );
-      if (playDurationFilter.sql) {
-        whereClauses.push(playDurationFilter);
-      }
-    }
-
-    // Count filters
-    if (filters?.performer_count) {
-      const performerCountFilter = this.buildPerformerCountFilter(filters.performer_count);
-      if (performerCountFilter.sql) {
-        whereClauses.push(performerCountFilter);
-      }
-    }
-
-    if (filters?.tag_count) {
-      const tagCountFilter = this.buildTagCountFilter(filters.tag_count);
-      if (tagCountFilter.sql) {
-        whereClauses.push(tagCountFilter);
-      }
-    }
-
-    if (filters?.performer_age) {
-      const performerAgeFilter = this.buildPerformerAgeFilter(filters.performer_age);
-      if (performerAgeFilter.sql) {
-        whereClauses.push(performerAgeFilter);
-      }
-    }
-
-    // Enum/select filters
-    if (filters?.orientation) {
-      const orientationFilter = this.buildOrientationFilter(filters.orientation);
-      if (orientationFilter.sql) {
-        whereClauses.push(orientationFilter);
-      }
-    }
-
-    if (filters?.video_codec) {
-      const videoCodecFilter = this.buildVideoCodecFilter(filters.video_codec);
-      if (videoCodecFilter.sql) {
-        whereClauses.push(videoCodecFilter);
-      }
-    }
-
-    if (filters?.audio_codec) {
-      const audioCodecFilter = this.buildAudioCodecFilter(filters.audio_codec);
-      if (audioCodecFilter.sql) {
-        whereClauses.push(audioCodecFilter);
-      }
-    }
-
-    // Favorite entity filters
-    if (filters?.performer_favorite === true) {
-      whereClauses.push(this.buildPerformerFavoriteFilter(userId));
-    }
-
-    if (filters?.studio_favorite === true) {
-      whereClauses.push(this.buildStudioFavoriteFilter(userId));
-    }
-
-    if (filters?.tag_favorite === true) {
-      whereClauses.push(this.buildTagFavoriteFilter(userId));
-    }
-
-    // Text search query (searches across title, details, path, performers, studio, tags)
-    if (options.searchQuery) {
-      const searchFilter = this.buildSearchQueryFilter(options.searchQuery);
-      if (searchFilter.sql) {
-        whereClauses.push(searchFilter);
-      }
-    }
-
-    // Combine WHERE clauses
-    const whereSQL = whereClauses.map((c) => c.sql).filter(Boolean).join(" AND ");
-    const whereParams = whereClauses.flatMap((c) => c.params);
-
-    // Build sort clause
-    const sortClause = this.buildSortClause(
-      options.sort,
-      options.sortDirection,
-      options.randomSeed
-    );
-
-    // Build full query
-    const offset = (page - 1) * perPage;
-    const sql = `
-      SELECT ${this.SELECT_COLUMNS}
-      ${fromClause.sql}
-      WHERE ${whereSQL}
-      ORDER BY ${sortClause}
-      LIMIT ? OFFSET ?
-    `;
-
-    const params = [...fromClause.params, ...whereParams, perPage, offset];
-
-    logger.info("SceneQueryBuilder.execute", {
-      whereClauseCount: whereClauses.length,
-      applyExclusions,
-      sort: options.sort,
-      sortDirection: options.sortDirection,
-      paramCount: params.length,
-    });
-
-    // Execute query
-    const queryStart = Date.now();
-    const rows = await prisma.$queryRawUnsafe<SceneQueryRow[]>(sql, ...params);
-    const queryMs = Date.now() - queryStart;
-
-    // Count query - use simplified count without JOINs when possible
-    // The JOINs are only needed for user data filtering or exclusions, not for basic count
-    const countStart = Date.now();
-    let total: number;
-
-    // Check if we have any user-data filters that require the JOINs
-    const hasUserDataFilters =
-      filters?.favorite !== undefined ||
-      filters?.rating100 !== undefined ||
-      filters?.play_count !== undefined ||
-      filters?.o_counter !== undefined ||
-      filters?.last_played_at !== undefined ||
-      filters?.play_duration !== undefined ||
-      filters?.performer_favorite === true ||
-      filters?.studio_favorite === true ||
-      filters?.tag_favorite === true;
-
-    // Need full JOINs if user data filters OR exclusions are applied
-    if (hasUserDataFilters || applyExclusions) {
-      // Need full JOINs for accurate count with user data filters or exclusions
-      const countSql = `
-        SELECT COUNT(DISTINCT s.id || ':' || s.stashInstanceId) as total
-        ${fromClause.sql}
-        WHERE ${whereSQL}
-      `;
-      const countParams = [...fromClause.params, ...whereParams];
-      const countResult = await prisma.$queryRawUnsafe<{ total: number }[]>(
-        countSql,
-        ...countParams
-      );
-      total = Number(countResult[0]?.total || 0);
-    } else {
-      // Fast path: count without JOINs (no user data filters and no exclusions)
-      // Build WHERE clause without user data conditions
-      const baseWhereClauses = whereClauses.filter(
-        (c) => !c.sql.includes("r.") && !c.sql.includes("w.")
-      );
-      const baseWhereSQL = baseWhereClauses
-        .map((c) => c.sql)
-        .filter(Boolean)
-        .join(" AND ");
-      const baseWhereParams = baseWhereClauses.flatMap((c) => c.params);
-
-      const countSql = `
-        SELECT COUNT(*) as total
-        FROM StashScene s
-        WHERE ${baseWhereSQL || "1=1"}
-      `;
-      const countResult = await prisma.$queryRawUnsafe<{ total: number }[]>(
-        countSql,
-        ...baseWhereParams
-      );
-      total = Number(countResult[0]?.total || 0);
-    }
-    const countMs = Date.now() - countStart;
-
-    const transformStart = Date.now();
-    const scenes = rows.map((row) => this.transformRow(row));
-    const transformMs = Date.now() - transformStart;
-
-    // Populate relations
-    const relationsStart = Date.now();
-    await this.populateRelations(scenes);
-    const relationsMs = Date.now() - relationsStart;
-
-    logger.info("SceneQueryBuilder.execute complete", {
-      queryTimeMs: Date.now() - startTime,
-      breakdown: { queryMs, countMs, transformMs, relationsMs },
-      resultCount: scenes.length,
-      total,
-    });
-
-    return { scenes, total };
+      params: [
+        pattern,
+        pattern,
+        pattern,
+        ...visibleParams,
+        pattern,
+        ...visibleParams,
+        pattern,
+        ...visibleParams,
+        pattern,
+      ],
+    }));
   }
 
   /**
    * Transform a raw database row into a NormalizedScene
    */
-  private transformRow(row: SceneQueryRow): NormalizedScene {
-    // Parse JSON fields
-    const oHistory = parseJsonArray(row.userOHistory);
-    const playHistory = parseJsonArray(row.userPlayHistory);
-
-    // Determine last_o_at from o_history
-    const lastOAt = oHistory.length > 0 ? oHistory[oHistory.length - 1] : null;
-
+  protected transformRow(row: SceneQueryRow): NormalizedScene {
     // Create scene object with studioId preserved for population
     const scene = {
       id: row.id,
       instanceId: row.stashInstanceId,
-      title: row.title || getSceneFallbackTitle(row.filePath),
-      code: row.code || null,
-      date: row.date || null,
-      details: row.details || null,
-      director: row.director || null,
-      organized: row.organized === 1,
-      created_at: row.stashCreatedAt || null,
-      updated_at: row.stashUpdatedAt || null,
+      title: emptyToNull(row.title) ?? getSceneFallbackTitle(row.filePath),
+      code: emptyToNull(row.code),
+      date: emptyToNull(row.date),
+      details: emptyToNull(row.details),
+      director: emptyToNull(row.director),
+      organized: row.organized,
+      created_at: row.stashCreatedAt?.toISOString() ?? null,
+      updated_at: row.stashUpdatedAt?.toISOString() ?? null,
 
       // URLs
       urls: parseJsonArray(row.urls),
@@ -1277,46 +893,59 @@ class SceneQueryBuilder {
       // not the Peek user. Each Peek user starts at 0 for these fields.
       rating: row.userRating ?? null,
       rating100: row.userRating ?? null,
-      favorite: Boolean(row.userFavorite),
+      favorite: row.userFavorite ?? false,
       o_counter: row.userOCount ?? 0,
       play_count: row.userPlayCount ?? 0,
       play_duration: row.userPlayDuration ?? 0,
       resume_time: row.userResumeTime ?? 0,
-      play_history: playHistory,
-      o_history: oHistory.map((ts: string) => new Date(ts)),
-      last_played_at: row.userLastPlayedAt || null,
-      last_o_at: lastOAt,
+      last_played_at: row.userLastPlayedAt?.toISOString() ?? null,
+      last_o_at: row.userLastOAt,
 
       // File data - build from individual columns
-      files: row.filePath ? [{
-        path: row.filePath,
-        basename: row.filePath.split('/').pop()?.split('\\').pop() || row.filePath,
-        duration: row.duration,
-        bit_rate: row.fileBitRate,
-        frame_rate: row.fileFrameRate,
-        width: row.fileWidth,
-        height: row.fileHeight,
-        video_codec: row.fileVideoCodec,
-        audio_codec: row.fileAudioCodec,
-        size: row.fileSize ? Number(row.fileSize) : null,
-      }] : [],
+      files: row.filePath
+        ? [
+            {
+              path: row.filePath,
+              basename:
+                emptyToNull(row.filePath.split("/").pop()?.split("\\").pop()) ??
+                row.filePath,
+              duration: row.duration,
+              bit_rate: row.fileBitRate,
+              frame_rate: row.fileFrameRate,
+              width: row.fileWidth,
+              height: row.fileHeight,
+              video_codec: row.fileVideoCodec,
+              audio_codec: row.fileAudioCodec,
+              size: row.fileSize ? Number(row.fileSize) : null,
+            },
+          ]
+        : [],
 
       // Paths - transform to proxy URLs with instanceId for multi-instance routing
       paths: {
-        screenshot: this.transformUrl(row.pathScreenshot, row.stashInstanceId),
-        preview: this.transformUrl(row.pathPreview, row.stashInstanceId),
-        stream: this.transformUrl(row.pathStream, row.stashInstanceId),
-        sprite: this.transformUrl(row.pathSprite, row.stashInstanceId),
-        vtt: this.transformUrl(row.pathVtt, row.stashInstanceId),
-        chapters_vtt: this.transformUrl(row.pathChaptersVtt, row.stashInstanceId),
-        caption: this.transformUrl(row.pathCaption, row.stashInstanceId),
+        screenshot: toProxyUrl(row.pathScreenshot, row.stashInstanceId),
+        preview: toProxyUrl(row.pathPreview, row.stashInstanceId),
+        // Always null: Peek serves streams and captions through its own
+        // routes, and the media proxy refuses both Stash routes
+        stream: null,
+        sprite: toProxyUrl(
+          row.pathSprite ? `/scene/${row.id}/vtt/sprite` : null,
+          row.stashInstanceId
+        ),
+        vtt: toProxyUrl(
+          row.pathVtt ? `/scene/${row.id}/vtt/thumbs` : null,
+          row.stashInstanceId
+        ),
+        chapters_vtt: toProxyUrl(row.pathChaptersVtt, row.stashInstanceId),
+        caption: null,
       },
 
-      // Parse sceneStreams from JSON
-      sceneStreams: this.parseSceneStreams(row.streams),
+      // Lists carry no streams; single-scene lookups add them
+      // (StashEntityService.getPlaybackStreams)
+      sceneStreams: [],
 
       // Caption metadata for multi-language subtitle support
-      captions: row.captions ? JSON.parse(row.captions) as unknown[] : [],
+      captions: parseJsonArray<unknown>(row.captions),
 
       // Relations - populated separately after query
       studio: null as StudioRef | null,
@@ -1334,377 +963,53 @@ class SceneQueryBuilder {
   }
 
   /**
-   * Populate scene relations (performers, tags, studio, groups, galleries)
-   * Called after main query with just the scene IDs we need
-   *
-   * Multi-instance aware: Uses composite keys (id:instanceId) throughout to
-   * correctly associate relations when same IDs exist across different instances.
+   * Each scene's performers, tags, inherited tags, collections (with the
+   * scene's place in each), galleries and studio, only those the viewer may
+   * see (`query/nestedRefs.ts`): one statement per relation for the page,
+   * driven from its (id, instance) pairs. A scene's studio and inherited
+   * tags are on the scene's own instance.
    */
-  async populateRelations(scenes: NormalizedScene[]): Promise<void> {
+  protected async populateRelations(
+    scenes: NormalizedScene[],
+    ctx: QueryContext
+  ): Promise<void> {
     if (scenes.length === 0) return;
 
-    // Build scene keys with instanceId for multi-instance support
-    // All scenes should have valid instanceIds after migration
-    const normalizeInstanceId = (id: string | null | undefined): string => {
-      if (!id) {
-        throw new Error('Scene has null/undefined instanceId - this should not happen after migration');
-      }
-      return id;
-    };
-
-    const sceneIds = scenes.map((s) => s.id);
-    const sceneInstanceIds = [...new Set(scenes.map((s) => normalizeInstanceId(s.instanceId)))];
-    // Collect unique (studioId, instanceId) pairs - each scene's studio comes from its own instance
-    const studioKeys = [...new Map(
-      scenes
-        .flatMap((s) => s.studioId ? [[`${s.studioId}:${normalizeInstanceId(s.instanceId)}`, { id: s.studioId, instanceId: normalizeInstanceId(s.instanceId) }] as const] : [])
-    ).values()];
-
-    // Batch load all relations in parallel
-    // Filter by both sceneId AND sceneInstanceId for multi-instance correctness
-    const [
-      performerJunctions,
-      tagJunctions,
-      groupJunctions,
-      galleryJunctions,
-    ] = await Promise.all([
-      prisma.scenePerformer.findMany({
-        where: {
-          sceneId: { in: sceneIds },
-          sceneInstanceId: { in: sceneInstanceIds },
-        },
-      }),
-      prisma.sceneTag.findMany({
-        where: {
-          sceneId: { in: sceneIds },
-          sceneInstanceId: { in: sceneInstanceIds },
-        },
-      }),
-      prisma.sceneGroup.findMany({
-        where: {
-          sceneId: { in: sceneIds },
-          sceneInstanceId: { in: sceneInstanceIds },
-        },
-      }),
-      prisma.sceneGallery.findMany({
-        where: {
-          sceneId: { in: sceneIds },
-          sceneInstanceId: { in: sceneInstanceIds },
-        },
-      }),
-    ]);
-
-    // Collect unique entity keys (id:instanceId) from junction tables
-    const performerKeys = [...new Map(
-      performerJunctions.map((j) => [`${j.performerId}:${j.performerInstanceId}`, { id: j.performerId, instanceId: j.performerInstanceId }])
-    ).values()];
-    const tagKeys = [...new Map(
-      tagJunctions.map((j) => [`${j.tagId}:${j.tagInstanceId}`, { id: j.tagId, instanceId: j.tagInstanceId }])
-    ).values()];
-    const groupKeys = [...new Map(
-      groupJunctions.map((j) => [`${j.groupId}:${j.groupInstanceId}`, { id: j.groupId, instanceId: j.groupInstanceId }])
-    ).values()];
-    const galleryKeys = [...new Map(
-      galleryJunctions.map((j) => [`${j.galleryId}:${j.galleryInstanceId}`, { id: j.galleryId, instanceId: j.galleryInstanceId }])
-    ).values()];
-
-    // Collect inherited tag IDs (these may not be in tagJunctions since they come from performers/studios/groups)
-    // For inherited tags, we use just ID since they're pre-computed and stored without instance info
-    const inheritedTagIdSet = new Set<string>();
-    for (const scene of scenes) {
-      if (scene.inheritedTagIds && scene.inheritedTagIds.length > 0) {
-        for (const tagId of scene.inheritedTagIds) {
-          inheritedTagIdSet.add(tagId);
-        }
-      }
-    }
-
-    // Build OR conditions for entity queries (need to match on composite keys)
-    const performerOrConditions = performerKeys.map((k) => ({
-      id: k.id,
-      stashInstanceId: k.instanceId,
-    }));
-    const tagOrConditions = tagKeys.map((k) => ({
-      id: k.id,
-      stashInstanceId: k.instanceId,
-    }));
-    // Add inherited tags - these use scene's instance since they're from the same Stash
-    const inheritedTagOrConditions = [...inheritedTagIdSet].map((tagId) => ({
-      id: tagId,
-      stashInstanceId: { in: sceneInstanceIds },
-    }));
-    const allTagOrConditions = [...tagOrConditions, ...inheritedTagOrConditions];
-    const groupOrConditions = groupKeys.map((k) => ({
-      id: k.id,
-      stashInstanceId: k.instanceId,
-    }));
-    const galleryOrConditions = galleryKeys.map((k) => ({
-      id: k.id,
-      stashInstanceId: k.instanceId,
-    }));
-    const studioOrConditions = studioKeys.map((k) => ({
-      id: k.id,
-      stashInstanceId: k.instanceId,
-    }));
-
-    // Load actual entities (only those that exist) using composite key lookups
-    const [performers, tags, groups, galleries, studios] = await Promise.all([
-      performerOrConditions.length > 0
-        ? prisma.stashPerformer.findMany({
-            where: { OR: performerOrConditions },
-          })
-        : Promise.resolve([]),
-      allTagOrConditions.length > 0
-        ? prisma.stashTag.findMany({
-            where: { OR: allTagOrConditions },
-          })
-        : Promise.resolve([]),
-      groupOrConditions.length > 0
-        ? prisma.stashGroup.findMany({
-            where: { OR: groupOrConditions },
-          })
-        : Promise.resolve([]),
-      galleryOrConditions.length > 0
-        ? prisma.stashGallery.findMany({
-            where: { OR: galleryOrConditions },
-          })
-        : Promise.resolve([]),
-      studioOrConditions.length > 0
-        ? prisma.stashStudio.findMany({
-            where: { OR: studioOrConditions },
-          })
-        : Promise.resolve([]),
-    ]);
-
-    // Build entity lookup maps by composite key (id:instanceId)
-    const performersByKey = new Map<string, PerformerRef>();
-    for (const performer of performers) {
-      const key = `${performer.id}:${performer.stashInstanceId}`;
-      performersByKey.set(key, this.transformStashPerformer(performer));
-    }
-
-    const tagsByKey = new Map<string, TagRef>();
-    for (const tag of tags) {
-      const key = `${tag.id}:${tag.stashInstanceId}`;
-      tagsByKey.set(key, this.transformStashTag(tag));
-    }
-
-    const groupsByKey = new Map<string, GroupRef>();
-    for (const group of groups) {
-      const key = `${group.id}:${group.stashInstanceId}`;
-      groupsByKey.set(key, this.transformStashGroup(group));
-    }
-
-    const galleriesByKey = new Map<string, GalleryRef>();
-    for (const gallery of galleries) {
-      const key = `${gallery.id}:${gallery.stashInstanceId}`;
-      galleriesByKey.set(key, this.transformStashGallery(gallery));
-    }
-
-    const studiosByKey = new Map<string, StudioRef>();
-    for (const studio of studios) {
-      const key = `${studio.id}:${studio.stashInstanceId}`;
-      studiosByKey.set(key, this.transformStashStudio(studio));
-    }
-
-    // Build scene-to-entities maps using junction tables with composite keys
-    // Key format: sceneId:sceneInstanceId -> entities[]
-    const performersByScene = new Map<string, PerformerRef[]>();
-    for (const junction of performerJunctions) {
-      const performerKey = `${junction.performerId}:${junction.performerInstanceId}`;
-      const performer = performersByKey.get(performerKey);
-      if (!performer) continue; // Skip orphaned junction records
-      const sceneKey = `${junction.sceneId}:${junction.sceneInstanceId}`;
-      const list = performersByScene.get(sceneKey) || [];
-      list.push(performer);
-      performersByScene.set(sceneKey, list);
-    }
-
-    const tagsByScene = new Map<string, TagRef[]>();
-    for (const junction of tagJunctions) {
-      const tagKey = `${junction.tagId}:${junction.tagInstanceId}`;
-      const tag = tagsByKey.get(tagKey);
-      if (!tag) continue; // Skip orphaned junction records
-      const sceneKey = `${junction.sceneId}:${junction.sceneInstanceId}`;
-      const list = tagsByScene.get(sceneKey) || [];
-      list.push(tag);
-      tagsByScene.set(sceneKey, list);
-    }
-
-    const groupsByScene = new Map<string, (GroupRef & { scene_index: number | null })[]>();
-    for (const junction of groupJunctions) {
-      const groupKey = `${junction.groupId}:${junction.groupInstanceId}`;
-      const group = groupsByKey.get(groupKey);
-      if (!group) continue; // Skip orphaned junction records
-      const sceneKey = `${junction.sceneId}:${junction.sceneInstanceId}`;
-      const list = groupsByScene.get(sceneKey) || [];
-      list.push({ ...group, scene_index: junction.sceneIndex });
-      groupsByScene.set(sceneKey, list);
-    }
-
-    const galleriesByScene = new Map<string, GalleryRef[]>();
-    for (const junction of galleryJunctions) {
-      const galleryKey = `${junction.galleryId}:${junction.galleryInstanceId}`;
-      const gallery = galleriesByKey.get(galleryKey);
-      if (!gallery) continue; // Skip orphaned junction records
-      const sceneKey = `${junction.sceneId}:${junction.sceneInstanceId}`;
-      const list = galleriesByScene.get(sceneKey) || [];
-      list.push(gallery);
-      galleriesByScene.set(sceneKey, list);
-    }
-
-    // Populate scenes using composite keys (use normalized instanceId)
-    for (const scene of scenes) {
-      const normalizedSceneInstanceId = normalizeInstanceId(scene.instanceId);
-      const sceneKey = `${scene.id}:${normalizedSceneInstanceId}`;
-      scene.performers = performersByScene.get(sceneKey) || [];
-      scene.tags = tagsByScene.get(sceneKey) || [];
-      scene.groups = groupsByScene.get(sceneKey) || [];
-      scene.galleries = galleriesByScene.get(sceneKey) || [];
-      const studioId = scene.studioId;
-      if (studioId) {
-        const studioKey = `${studioId}:${normalizedSceneInstanceId}`;
-        scene.studio = studiosByKey.get(studioKey) || null;
-      }
-
-      // Hydrate inherited tags with full tag objects
-      // Inherited tags use scene's instanceId since they're from the same Stash instance
-      if (scene.inheritedTagIds && scene.inheritedTagIds.length > 0) {
-        scene.inheritedTags = scene.inheritedTagIds
-          .map((tagId) => tagsByKey.get(`${tagId}:${normalizedSceneInstanceId}`))
-          .filter((tag): tag is TagRef => tag !== undefined);
-      }
-    }
-  }
-
-  // Helper transforms for Stash entities - all image URLs need proxy treatment
-  // Each entity includes its stashInstanceId for multi-instance routing
-  private transformStashPerformer(p: { id: string; stashInstanceId: string; name: string; disambiguation: string | null; gender: string | null; imagePath: string | null; favorite: boolean; rating100: number | null }): PerformerRef {
-    return {
-      id: p.id,
-      instanceId: p.stashInstanceId,
-      name: p.name,
-      disambiguation: p.disambiguation,
-      gender: p.gender,
-      image_path: this.transformUrl(p.imagePath, p.stashInstanceId),
-      favorite: p.favorite,
-      rating100: p.rating100,
-    };
-  }
-
-  private transformStashTag(t: { id: string; stashInstanceId: string; name: string; imagePath: string | null; favorite: boolean }): TagRef {
-    return {
-      id: t.id,
-      instanceId: t.stashInstanceId,
-      name: t.name,
-      image_path: this.transformUrl(t.imagePath, t.stashInstanceId),
-      favorite: t.favorite,
-    };
-  }
-
-  private transformStashStudio(s: { id: string; stashInstanceId: string; name: string; imagePath: string | null; favorite: boolean; parentId: string | null }): StudioRef {
-    return {
-      id: s.id,
-      instanceId: s.stashInstanceId,
-      name: s.name,
-      image_path: this.transformUrl(s.imagePath, s.stashInstanceId),
-      favorite: s.favorite,
-      parent_studio: s.parentId ? { id: s.parentId } : null,
-    };
-  }
-
-  private transformStashGroup(g: { id: string; name: string; frontImagePath: string | null; backImagePath: string | null; stashInstanceId: string }): GroupRef {
-    return {
-      id: g.id,
-      instanceId: g.stashInstanceId,
-      name: g.name,
-      front_image_path: this.transformUrl(g.frontImagePath, g.stashInstanceId),
-      back_image_path: this.transformUrl(g.backImagePath, g.stashInstanceId),
-    };
-  }
-
-  private transformStashGallery(g: { id: string; title: string | null; coverPath: string | null; stashInstanceId: string }): GalleryRef {
-    const coverUrl = g.coverPath ? this.transformUrl(g.coverPath, g.stashInstanceId) : null;
-    return {
-      id: g.id,
-      instanceId: g.stashInstanceId,
-      title: g.title,
-      // Cover as simple string URL for consistency
-      cover: coverUrl,
-    };
-  }
-
-  /**
-   * Parse sceneStreams JSON and keep the raw stream URLs
-   * The frontend will handle URL rewriting to proxy-stream endpoint
-   */
-  private parseSceneStreams(json: string | null): unknown[] {
-    return parseJsonArray<unknown>(json);
-  }
-
-  /**
-   * Transform a Stash URL/path to a proxy URL
-   * @param urlOrPath - The URL or path to transform
-   * @param instanceId - Optional Stash instance ID for multi-instance routing
-   */
-  private transformUrl(urlOrPath: string | null, instanceId?: string | null): string | null {
-    if (!urlOrPath) return null;
-
-    // If it's already a proxy URL, return as-is
-    if (urlOrPath.startsWith("/api/proxy/stash")) {
-      return urlOrPath;
-    }
-
-    // Build base proxy URL
-    let proxyPath: string;
-
-    // If it's a full URL (http://...), extract path + query
-    if (urlOrPath.startsWith("http://") || urlOrPath.startsWith("https://")) {
-      try {
-        const url = new URL(urlOrPath);
-        const pathWithQuery = url.pathname + url.search;
-        proxyPath = `/api/proxy/stash?path=${encodeURIComponent(pathWithQuery)}`;
-      } catch {
-        // If URL parsing fails, treat as path
-        proxyPath = `/api/proxy/stash?path=${encodeURIComponent(urlOrPath)}`;
-      }
-    } else {
-      // Otherwise treat as path and encode it
-      proxyPath = `/api/proxy/stash?path=${encodeURIComponent(urlOrPath)}`;
-    }
-
-    // Add instanceId for multi-instance routing
-    if (instanceId) {
-      proxyPath += `&instanceId=${encodeURIComponent(instanceId)}`;
-    }
-
-    return proxyPath;
-  }
-
-  /**
-   * Get scenes by IDs with full relations
-   * Used after scoring to fetch the final paginated results
-   */
-  async getByIds(options: SceneByIdsOptions): Promise<SceneQueryResult> {
-    const { userId, ids, allowedInstanceIds } = options;
-
-    if (ids.length === 0) {
-      return { scenes: [], total: 0 };
-    }
-
-    // Use execute with ID filter
-    return this.execute({
-      userId,
-      filters: {
-        ids: { value: coerceEntityRefs(ids), modifier: "INCLUDES" },
-      },
-      applyExclusions: false, // IDs already filtered, don't double-exclude
-      allowedInstanceIds, // Pass through for multi-instance filtering
-      sort: "created_at", // Default sort, results will be reordered by caller if needed
-      sortDirection: "DESC",
-      page: 1,
-      perPage: ids.length, // Get all requested IDs
+    const onScene = (id: string, scene: NormalizedScene): EntityRef => ({
+      id,
+      instanceId: scene.instanceId,
     });
+    const studioRefs = scenes.flatMap((scene) =>
+      scene.studioId ? [onScene(scene.studioId, scene)] : []
+    );
+    const inheritedRefs = scenes.flatMap((scene) =>
+      (scene.inheritedTagIds ?? []).map((tagId) => onScene(tagId, scene))
+    );
+
+    const [performers, tags, groups, galleries, studios, inherited] =
+      await Promise.all([
+        loadNestedRefs(PERFORMER_REF, SCENE_PERFORMERS, scenes, ctx),
+        loadNestedRefs(TAG_REF, SCENE_TAGS, scenes, ctx),
+        loadNestedRefs(SCENE_GROUP_REF, SCENE_GROUPS, scenes, ctx),
+        loadNestedRefs(GALLERY_REF, SCENE_GALLERIES, scenes, ctx),
+        loadRefsByKey(STUDIO_REF, studioRefs, ctx),
+        loadRefsByKey(TAG_REF, inheritedRefs, ctx),
+      ]);
+
+    for (const scene of scenes) {
+      const key = entityKey(scene.id, scene.instanceId);
+      scene.performers = performers.get(key) ?? [];
+      scene.tags = tags.get(key) ?? [];
+      scene.groups = groups.get(key) ?? [];
+      scene.galleries = galleries.get(key) ?? [];
+      scene.studio = scene.studioId
+        ? (studios.get(entityKey(scene.studioId, scene.instanceId)) ?? null)
+        : null;
+      scene.inheritedTags = (scene.inheritedTagIds ?? []).flatMap((tagId) => {
+        const tag = inherited.get(entityKey(tagId, scene.instanceId));
+        return tag ? [tag] : [];
+      });
+    }
   }
 }
 

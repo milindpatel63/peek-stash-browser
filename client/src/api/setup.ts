@@ -1,34 +1,61 @@
 /**
  * Setup API — initial setup wizard and user setup endpoints.
  */
-import { apiGet, apiPost } from "./client";
 import type {
-  GetSetupStatusResponse,
+  CompleteSetupResponse,
   CreateFirstAdminResponse,
-  TestStashConnectionResponse,
   CreateFirstStashInstanceResponse,
-  ResetSetupResponse,
+  GetSetupStatusResponse,
+  TestStashConnectionResponse,
 } from "@peek/shared-types";
+import { apiGet, apiPost } from "./client";
 
 export const setupApi = {
-  getSetupStatus: () => apiGet<GetSetupStatusResponse>("/setup/status"),
+  /** Public. Read it through `useSetupStatus`, the one query for it. */
+  getSetupStatus: (signal?: AbortSignal) =>
+    apiGet<GetSetupStatusResponse>("/setup/status", signal),
 
   createFirstAdmin: (username: string, password: string) =>
-    apiPost<CreateFirstAdminResponse>("/setup/create-admin", { username, password }),
+    apiPost<CreateFirstAdminResponse>("/setup/create-admin", {
+      username,
+      password,
+    }),
 
   testStashConnection: (url: string, apiKey: string) =>
-    apiPost<TestStashConnectionResponse>("/setup/test-stash-connection", { url, apiKey }),
+    apiPost<TestStashConnectionResponse>("/setup/test-stash-connection", {
+      url,
+      apiKey,
+    }),
 
-  createFirstStashInstance: (url: string, apiKey: string, name = "Default") =>
-    apiPost<CreateFirstStashInstanceResponse>("/setup/create-stash-instance", { url, apiKey, name }),
-
-  resetSetup: () => apiPost<ResetSetupResponse>("/setup/reset", {}),
+  createFirstStashInstance: (
+    url: string,
+    apiKey: string,
+    name = "Default",
+    uiUrl?: string
+  ) =>
+    apiPost<CreateFirstStashInstanceResponse>("/setup/create-stash-instance", {
+      url,
+      uiUrl: uiUrl || null,
+      apiKey,
+      name,
+    }),
 };
 
 export const userSetupApi = {
   getSetupStatus: () =>
-    apiGet<{ needsSetup: boolean; instances: Array<{ id: string; name: string }> }>("/user/setup-status"),
+    apiGet<{
+      setupCompleted: boolean;
+      instances: Array<{
+        id: string;
+        name: string;
+        description?: string | null;
+      }>;
+      instanceCount: number;
+    }>("/user/setup-status"),
 
+  /** Returns the first recovery key, shown this once (null if setup was already complete). */
   completeSetup: (selectedInstanceIds: string[]) =>
-    apiPost<{ success: boolean; user: Record<string, unknown> }>("/user/complete-setup", { selectedInstanceIds }),
+    apiPost<CompleteSetupResponse>("/user/complete-setup", {
+      selectedInstanceIds,
+    }),
 };

@@ -3,16 +3,24 @@
  */
 
 /**
- * Format file size in bytes to human readable format
+ * Format file size in bytes to human readable format, one decimal above bytes.
+ * Nothing (null, undefined, NaN) gives `empty`.
  */
-export function formatFileSize(bytes: number) {
-  if (!bytes || bytes === 0) return "0 B";
+export function formatFileSize(
+  bytes: number | null | undefined,
+  { empty = "-" }: { empty?: string } = {}
+) {
+  if (bytes === null || bytes === undefined || isNaN(bytes)) return empty;
+  if (bytes <= 0) return "0 B";
 
   const k = 1024;
   const sizes = ["B", "KB", "MB", "GB", "TB"];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  const i = Math.max(
+    0,
+    Math.min(Math.floor(Math.log(bytes) / Math.log(k)), sizes.length - 1)
+  );
 
-  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(2))} ${sizes[i]}`;
+  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(i === 0 ? 0 : 1))} ${sizes[i]}`;
 }
 
 /**
@@ -45,8 +53,9 @@ export function getSceneTitle(scene: SceneTitleInput | null) {
   }
 
   // Fallback to first file basename
-  if (scene.files && scene.files.length > 0 && scene.files[0].basename) {
-    return scene.files[0].basename.replace(/\.[^/.]+$/, ""); // Remove file extension
+  const firstBasename = scene.files?.[0]?.basename;
+  if (firstBasename) {
+    return firstBasename.replace(/\.[^/.]+$/, ""); // Remove file extension
   }
 
   return "Unknown Scene";
@@ -65,14 +74,21 @@ export function getSceneDescription(scene: SceneDetailsInput | null) {
 }
 
 /**
- * Format duration in seconds to human readable format (HH:MM:SS or MM:SS)
+ * Format duration in seconds to H:MM:SS or M:SS. Nothing (null, undefined,
+ * NaN) gives `empty`; zero is a real 0:00.
  */
-export function formatDuration(seconds: number) {
-  if (!seconds) return "0:00";
+export function formatDuration(
+  seconds: number | null | undefined,
+  { empty = "0:00" }: { empty?: string } = {}
+) {
+  if (seconds === null || seconds === undefined || isNaN(seconds)) {
+    return empty;
+  }
 
-  const hours = Math.floor(seconds / 3600);
-  const minutes = Math.floor((seconds % 3600) / 60);
-  const secs = Math.floor(seconds % 60);
+  const total = Math.floor(seconds);
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const secs = total % 60;
 
   if (hours > 0) {
     return `${hours}:${minutes.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
@@ -114,7 +130,10 @@ export function formatDurationCompact(seconds: number) {
  * @param {boolean} options.includeDays - Include days in output (default true)
  * @returns {string} Formatted duration string (e.g., "2d 5h 30m", "3h 45m", "12m")
  */
-export function formatDurationHumanReadable(seconds: number, options: { includeDays?: boolean } = {}) {
+export function formatDurationHumanReadable(
+  seconds: number,
+  options: { includeDays?: boolean } = {}
+) {
   const { includeDays = true } = options;
 
   if (!seconds || seconds === 0) return "0m";

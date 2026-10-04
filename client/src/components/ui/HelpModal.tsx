@@ -1,30 +1,13 @@
 import { useState } from "react";
 import { createPortal } from "react-dom";
 import { useLocation } from "react-router-dom";
+import { getHelpPageForPath } from "../../constants/navigation";
+import { useFocusTrap } from "../../hooks/useFocusTrap";
 import { Button } from "./index";
 
 interface Props {
   onClose: () => void;
 }
-
-// Determine current page from URL
-const getCurrentPage = (location: { pathname: string }) => {
-  const path = location.pathname;
-  if (path.startsWith("/scene/")) return "scene";
-  if (path.startsWith("/scenes")) return "scenes";
-  if (path.startsWith("/performer/")) return "performer";
-  if (path.startsWith("/performers")) return "performers";
-  if (path.startsWith("/studio/")) return "studio";
-  if (path.startsWith("/studios")) return "studios";
-  if (path.startsWith("/tag/")) return "tag";
-  if (path.startsWith("/tags")) return "tags";
-  if (path.startsWith("/gallery/")) return "gallery";
-  if (path.startsWith("/galleries")) return "galleries";
-  if (path.startsWith("/group/")) return "group";
-  if (path.startsWith("/groups")) return "groups";
-  if (path.startsWith("/playlists")) return "playlists";
-  return "global";
-};
 
 /**
  * Help Modal - Shows context-aware help documentation
@@ -35,7 +18,11 @@ const HelpModal = ({ onClose }: Props) => {
   const [activeTab, setActiveTab] = useState("hotkeys");
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
-  const currentPage = getCurrentPage(location);
+  const currentPage = getHelpPageForPath(location.pathname);
+
+  // A modal overlay scope while open: page, player and global keys wait, and
+  // Escape closes the dialog. Focus moves into it and returns on close.
+  const dialogRef = useFocusTrap(true, onClose);
 
   // Keyboard shortcuts organized by page
   const shortcuts = {
@@ -202,7 +189,8 @@ const HelpModal = ({ onClose }: Props) => {
   };
 
   // Get shortcuts for current page (fall back to global if page has no specific shortcuts)
-  const pageShortcuts = shortcuts[currentPage as keyof typeof shortcuts] || shortcuts.global;
+  const pageShortcuts =
+    shortcuts[currentPage as keyof typeof shortcuts] || shortcuts.global;
 
   const renderShortcutKey = (key: string) => {
     return (
@@ -220,7 +208,13 @@ const HelpModal = ({ onClose }: Props) => {
     );
   };
 
-  const renderShortcutRow = ({ keys, description }: { keys: string[]; description: string }) => {
+  const renderShortcutRow = ({
+    keys,
+    description,
+  }: {
+    keys: string[];
+    description: string;
+  }) => {
     return (
       <div
         key={keys.join("+")}
@@ -270,7 +264,13 @@ const HelpModal = ({ onClose }: Props) => {
     );
   };
 
-  const renderShortcutCategory = ({ category, items }: { category: string; items: { keys: string[]; description: string }[] }) => {
+  const renderShortcutCategory = ({
+    category,
+    items,
+  }: {
+    category: string;
+    items: { keys: string[]; description: string }[];
+  }) => {
     return (
       <div key={category} className="mb-6">
         <h4
@@ -280,7 +280,9 @@ const HelpModal = ({ onClose }: Props) => {
           {category}
         </h4>
         <div className="space-y-1">
-          {items.map((item: { keys: string[]; description: string }) => renderShortcutRow(item))}
+          {items.map((item: { keys: string[]; description: string }) =>
+            renderShortcutRow(item)
+          )}
         </div>
       </div>
     );
@@ -303,7 +305,7 @@ const HelpModal = ({ onClose }: Props) => {
       playlists: "Playlists Page Shortcuts",
       global: "Keyboard Shortcuts",
     };
-    return titles[currentPage as keyof typeof titles] || "Keyboard Shortcuts";
+    return titles[currentPage] || "Keyboard Shortcuts";
   };
 
   const modalContent = (
@@ -319,6 +321,10 @@ const HelpModal = ({ onClose }: Props) => {
           border: "1px solid var(--border-color)",
         }}
         onClick={(e) => e.stopPropagation()}
+        ref={dialogRef as React.Ref<HTMLDivElement>}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Help"
       >
         {/* Close button (X) in top right - desktop only */}
         <button
@@ -367,11 +373,11 @@ const HelpModal = ({ onClose }: Props) => {
                 style={{
                   backgroundColor:
                     activeTab === "hotkeys"
-                      ? "rgba(59, 130, 246, 0.1)"
+                      ? "var(--status-info-bg)"
                       : "transparent",
                   color:
                     activeTab === "hotkeys"
-                      ? "rgb(59, 130, 246)"
+                      ? "var(--status-info)"
                       : "var(--text-secondary)",
                 }}
               >
@@ -448,11 +454,11 @@ const HelpModal = ({ onClose }: Props) => {
                   style={{
                     backgroundColor:
                       activeTab === "hotkeys"
-                        ? "rgba(59, 130, 246, 0.1)"
+                        ? "var(--status-info-bg)"
                         : "transparent",
                     color:
                       activeTab === "hotkeys"
-                        ? "rgb(59, 130, 246)"
+                        ? "var(--status-info)"
                         : "var(--text-secondary)",
                   }}
                 >
@@ -490,8 +496,11 @@ const HelpModal = ({ onClose }: Props) => {
                 </div>
 
                 <div>
-                  {pageShortcuts.map((category: { category: string; items: { keys: string[]; description: string }[] }) =>
-                    renderShortcutCategory(category)
+                  {pageShortcuts.map(
+                    (category: {
+                      category: string;
+                      items: { keys: string[]; description: string }[];
+                    }) => renderShortcutCategory(category)
                   )}
                 </div>
 
@@ -514,8 +523,8 @@ const HelpModal = ({ onClose }: Props) => {
                   <div
                     className="mt-6 p-4 rounded-lg text-sm"
                     style={{
-                      backgroundColor: "rgba(59, 130, 246, 0.1)",
-                      border: "1px solid rgba(59, 130, 246, 0.3)",
+                      backgroundColor: "var(--status-info-bg)",
+                      border: "1px solid var(--status-info-border)",
                       color: "var(--text-secondary)",
                     }}
                   >

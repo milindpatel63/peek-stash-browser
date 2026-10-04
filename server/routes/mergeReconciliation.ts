@@ -2,15 +2,30 @@
  * Merge Reconciliation Routes (Admin Only)
  *
  * Handles admin endpoints for managing orphaned scene data:
- * - GET /api/admin/orphaned-scenes - List orphaned scenes with user activity
- * - GET /api/admin/orphaned-scenes/:id/matches - Get phash matches for an orphan
- * - POST /api/admin/orphaned-scenes/:id/reconcile - Transfer data to target scene
- * - POST /api/admin/orphaned-scenes/:id/discard - Delete orphaned user data
- * - POST /api/admin/reconcile-all - Auto-reconcile all with exact phash matches
+ * - GET /api/admin/orphaned-scenes - List orphaned scenes (play history, ratings or playlist entries)
+ * - GET /api/admin/orphaned-scenes/:ref/matches - Phash matches for an orphan
+ * - POST /api/admin/orphaned-scenes/:ref/reconcile - Transfer data to target scene
+ * - POST /api/admin/orphaned-scenes/:ref/discard - Delete orphaned history, ratings and playlist entries
+ * - POST /api/admin/reconcile-all - Reconcile every orphan with exactly one match
+ *
+ * `:ref` is the orphan as "id:instanceId"; a bare id answers 400. A target
+ * is a scene id on the orphan's instance: a merge never crosses instances.
  */
-import express from "express";
-import { authenticate, requireAdmin, type AuthenticatedRequest } from "../middleware/auth.js";
-import { mergeReconciliationService } from "../services/MergeReconciliationService.js";
+import type {
+  DiscardOrphanResponse,
+  OrphanedScenesResponse,
+} from "@peek/shared-types/api/mergeRecovery.js";
+import { parseEntityRef } from "@peek/shared-types/instanceAwareId.js";
+import express, { type Response } from "express";
+import {
+  type AuthenticatedRequest,
+  authenticate,
+  requireAdmin,
+} from "../middleware/auth.js";
+import {
+  type SceneRef,
+  mergeReconciliationService,
+} from "../services/MergeReconciliationService.js";
 import { authenticated } from "../utils/routeHelpers.js";
 
 const router = express.Router();
@@ -20,151 +35,140 @@ router.use(authenticate);
 router.use(requireAdmin);
 
 /**
+ * The orphan named by `:ref`, or null after answering 400 when the ref
+ * carries no instance.
+ */
+function orphanRef(ref: unknown, res: Response): SceneRef | null {
+  const { id, instanceId } = parseEntityRef(typeof ref === "string" ? ref : "");
+  if (!id || !instanceId) {
+    res.status(400).json({ error: 'Scene reference must be "id:instanceId"' });
+    return null;
+  }
+  return { id, instanceId };
+}
+
+/**
  * GET /api/admin/orphaned-scenes
  * List all orphaned scenes with user activity
  */
 router.get(
   "/orphaned-scenes",
   authenticated(async (req, res) => {
-    try {
-      const orphans = await mergeReconciliationService.findOrphanedScenesWithActivity();
-      res.json({
-        scenes: orphans,
-        totalCount: orphans.length,
-      });
-    } catch (error) {
-      res.status(500).json({
-        error: "Failed to fetch orphaned scenes",
-        message: error instanceof Error ? error.message : String(error),
-      });
-    }
+    const orphans =
+      await mergeReconciliationService.findOrphanedScenesWithActivity();
+    const body: OrphanedScenesResponse = {
+      scenes: orphans,
+      totalCount: orphans.length,
+    };
+    res.json(body);
   })
 );
 
 /**
- * GET /api/admin/orphaned-scenes/:id/matches
- * Get potential phash matches for an orphaned scene
+ * GET /api/admin/orphaned-scenes/:ref/matches
+ * Live scenes of the orphan's instance with a matching phash
  */
 router.get(
-  "/orphaned-scenes/:id/matches",
+  "/orphaned-scenes/:ref/matches",
   authenticated(async (req, res) => {
-    try {
-      const { id } = req.params;
-      const matches = await mergeReconciliationService.findPhashMatches(id as string);
-      res.json({ matches });
-    } catch (error) {
-      res.status(500).json({
-        error: "Failed to fetch matches",
-        message: error instanceof Error ? error.message : String(error),
-      });
-    }
+    const orphan = orphanRef(req.params.ref, res);
+    if (!orphan) return;
+
+    const matches = await mergeReconciliationService.findPhashMatches(orphan);
+    res.json({ matches });
   })
 );
 
 /**
- * POST /api/admin/orphaned-scenes/:id/reconcile
- * Transfer user data from orphan to target scene
+ * POST /api/admin/orphaned-scenes/:ref/reconcile
+ * Transfer user data from the orphan to `targetSceneId`, a scene id on the
+ * orphan's instance. A target that is not a live scene there answers 400.
  */
 router.post(
-  "/orphaned-scenes/:id/reconcile",
+  "/orphaned-scenes/:ref/reconcile",
   authenticated(async (req: AuthenticatedRequest, res) => {
-    try {
-      const { id } = req.params;
-      const { targetSceneId } = req.body as { targetSceneId: string };
+    const orphan = orphanRef(req.params.ref, res);
+    if (!orphan) return;
+    const { targetSceneId } = (req.body ?? {}) as { targetSceneId?: unknown };
 
-      if (!targetSceneId) {
-        return res.status(400).json({ error: "targetSceneId is required" });
-      }
-
-      const result = await mergeReconciliationService.reconcileScene(
-        id as string,
-        targetSceneId,
-        null, // Will be looked up if available
-        req.user.id // Admin who initiated
-      );
-
-      res.json({
-        ok: true,
-        ...result,
-      });
-    } catch (error) {
-      res.status(500).json({
-        error: "Failed to reconcile scene",
-        message: error instanceof Error ? error.message : String(error),
-      });
+    if (typeof targetSceneId !== "string" || !targetSceneId) {
+      res.status(400).json({ error: "targetSceneId is required" });
+      return;
     }
+
+    const result = await mergeReconciliationService.reconcileScene(
+      orphan,
+      { id: targetSceneId, instanceId: orphan.instanceId },
+      null, // Chosen by the admin, not matched by phash
+      req.user.id // Admin who initiated
+    );
+
+    res.json({
+      ok: true,
+      ...result,
+    });
   })
 );
 
 /**
- * POST /api/admin/orphaned-scenes/:id/discard
- * Delete orphaned user data for a scene
+ * POST /api/admin/orphaned-scenes/:ref/discard
+ * Delete the orphan's history, ratings and playlist entries (on its
+ * instance only)
  */
 router.post(
-  "/orphaned-scenes/:id/discard",
+  "/orphaned-scenes/:ref/discard",
   authenticated(async (req, res) => {
-    try {
-      const { id } = req.params;
-      const result = await mergeReconciliationService.discardOrphanedData(id as string);
+    const orphan = orphanRef(req.params.ref, res);
+    if (!orphan) return;
 
-      res.json({
-        ok: true,
-        ...result,
-      });
-    } catch (error) {
-      res.status(500).json({
-        error: "Failed to discard orphaned data",
-        message: error instanceof Error ? error.message : String(error),
-      });
-    }
+    const result = await mergeReconciliationService.discardOrphanedData(orphan);
+
+    const body: DiscardOrphanResponse = { ok: true, ...result };
+    res.json(body);
   })
 );
 
 /**
  * POST /api/admin/reconcile-all
- * Auto-reconcile all orphans with exact phash matches
+ * Reconcile every orphan with exactly one phash match on its instance, as
+ * sync does; orphans with several matches are left for the admin to pick.
  */
 router.post(
   "/reconcile-all",
   authenticated(async (req: AuthenticatedRequest, res) => {
-    try {
-      const orphans = await mergeReconciliationService.findOrphanedScenesWithActivity();
-      let reconciled = 0;
-      let skipped = 0;
+    const orphans =
+      await mergeReconciliationService.findOrphanedScenesWithActivity();
+    let reconciled = 0;
+    let skipped = 0;
 
-      for (const orphan of orphans) {
-        if (!orphan.phash) {
-          skipped++;
-          continue;
-        }
-
-        const matches = await mergeReconciliationService.findPhashMatches(orphan.id);
-        const exactMatch = matches.find((m) => m.similarity === "exact");
-
-        if (exactMatch) {
-          await mergeReconciliationService.reconcileScene(
-            orphan.id,
-            exactMatch.sceneId,
-            orphan.phash,
-            req.user.id
-          );
-          reconciled++;
-        } else {
-          skipped++;
-        }
+    for (const orphan of orphans) {
+      if (!orphan.phash) {
+        skipped++;
+        continue;
       }
 
-      res.json({
-        ok: true,
-        reconciled,
-        skipped,
-      });
-    } catch (error) {
-      res.status(500).json({
-        error: "Failed to reconcile all",
-        message: error instanceof Error ? error.message : String(error),
-      });
+      const source = { id: orphan.id, instanceId: orphan.instanceId };
+      const matches = await mergeReconciliationService.findPhashMatches(source);
+      const [only] = matches;
+
+      if (matches.length === 1 && only) {
+        await mergeReconciliationService.reconcileScene(
+          source,
+          { id: only.sceneId, instanceId: orphan.instanceId },
+          orphan.phash,
+          req.user.id
+        );
+        reconciled++;
+      } else {
+        skipped++;
+      }
     }
+
+    res.json({
+      ok: true,
+      reconciled,
+      skipped,
+    });
   })
 );
 

@@ -1,0 +1,353 @@
+{
+  "options": [
+    {
+      "type": "section-header",
+      "label": "Common Filters",
+      "key": "section-common",
+      "collapsible": true,
+      "defaultOpen": true
+    },
+    {
+      "key": "tagIds",
+      "label": "Clip Tags",
+      "type": "searchable-select",
+      "entityType": "tags",
+      "multi": true,
+      "defaultValue": [],
+      "placeholder": "Filter by clip tags...",
+      "modifierOptions": [
+        {
+          "value": "INCLUDES_ALL",
+          "label": "Has ALL of these"
+        },
+        {
+          "value": "INCLUDES",
+          "label": "Has ANY of these"
+        },
+        {
+          "value": "EXCLUDES",
+          "label": "Has NONE of these"
+        }
+      ],
+      "modifierKey": "tagIdsModifier",
+      "defaultModifier": "INCLUDES",
+      "supportsHierarchy": true,
+      "hierarchyKey": "tagIdsDepth",
+      "hierarchyLabel": "Include sub-tags",
+      "excludeKey": "tagIdsExclude"
+    },
+    {
+      "key": "sceneTagIds",
+      "label": "Scene Tags",
+      "type": "searchable-select",
+      "entityType": "tags",
+      "multi": true,
+      "defaultValue": [],
+      "placeholder": "Filter by scene tags...",
+      "modifierOptions": [
+        {
+          "value": "INCLUDES_ALL",
+          "label": "Has ALL of these"
+        },
+        {
+          "value": "INCLUDES",
+          "label": "Has ANY of these"
+        },
+        {
+          "value": "EXCLUDES",
+          "label": "Has NONE of these"
+        }
+      ],
+      "modifierKey": "sceneTagIdsModifier",
+      "defaultModifier": "INCLUDES",
+      "supportsHierarchy": true,
+      "hierarchyKey": "sceneTagIdsDepth",
+      "hierarchyLabel": "Include sub-tags",
+      "excludeKey": "sceneTagIdsExclude"
+    },
+    {
+      "key": "performerIds",
+      "label": "Performers",
+      "type": "searchable-select",
+      "entityType": "performers",
+      "multi": true,
+      "defaultValue": [],
+      "placeholder": "Filter by performers...",
+      "modifierOptions": [
+        {
+          "value": "INCLUDES_ALL",
+          "label": "Has ALL of these"
+        },
+        {
+          "value": "INCLUDES",
+          "label": "Has ANY of these"
+        },
+        {
+          "value": "EXCLUDES",
+          "label": "Has NONE of these"
+        }
+      ],
+      "modifierKey": "performerIdsModifier",
+      "defaultModifier": "INCLUDES",
+      "excludeKey": "performerIdsExclude"
+    },
+    {
+      "key": "studioId",
+      "label": "Studio",
+      "type": "searchable-select",
+      "entityType": "studios",
+      "multi": true,
+      "defaultValue": [],
+      "placeholder": "Filter by studio...",
+      "modifierOptions": [
+        {
+          "value": "INCLUDES",
+          "label": "Has ANY of these"
+        },
+        {
+          "value": "EXCLUDES",
+          "label": "Has NONE of these"
+        }
+      ],
+      "modifierKey": "studioIdModifier",
+      "defaultModifier": "INCLUDES",
+      "supportsHierarchy": true,
+      "hierarchyKey": "studioIdDepth",
+      "hierarchyLabel": "Include sub-studios",
+      "excludeKey": "studioIdExclude"
+    },
+    {
+      "key": "sceneIds",
+      "label": "Scenes",
+      "type": "searchable-select",
+      "entityType": "scenes",
+      "multi": true,
+      "defaultValue": [],
+      "placeholder": "Filter by scenes...",
+      "modifierOptions": [
+        {
+          "value": "INCLUDES",
+          "label": "Has ANY of these"
+        },
+        {
+          "value": "EXCLUDES",
+          "label": "Has NONE of these"
+        }
+      ],
+      "modifierKey": "sceneIdsModifier",
+      "defaultModifier": "INCLUDES"
+    },
+    {
+      "key": "isGenerated",
+      "label": "Has Preview",
+      "type": "select",
+      "defaultValue": "true",
+      "options": [
+        {
+          "value": "true",
+          "label": "With preview only"
+        },
+        {
+          "value": "false",
+          "label": "Without preview only"
+        },
+        {
+          "value": "all",
+          "label": "All clips"
+        }
+      ],
+      "placeholder": "Filter by preview status"
+    },
+    {
+      "key": "duration",
+      "label": "Duration (seconds)",
+      "type": "range",
+      "defaultValue": {},
+      "min": 1,
+      "max": 3600
+    },
+    {
+      "type": "section-header",
+      "label": "Date Ranges",
+      "key": "section-dates",
+      "collapsible": true,
+      "defaultOpen": false
+    },
+    {
+      "key": "createdAt",
+      "label": "Created Date",
+      "type": "date-range",
+      "defaultValue": {}
+    },
+    {
+      "key": "updatedAt",
+      "label": "Updated Date",
+      "type": "date-range",
+      "defaultValue": {}
+    }
+  ],
+  "imperialOptions": "same as the metric options",
+  "locks": [
+    {
+      "field": "tags",
+      "lockedFieldsTop": [
+        "tags"
+      ],
+      "lockedFieldsInner": [
+        "clip_filter",
+        "tags"
+      ],
+      "removedStateKeys": [
+        "tagIds",
+        "tagIdsModifier",
+        "tagIdsDepth"
+      ],
+      "removedOptions": [
+        "searchable-select:tagIds"
+      ],
+      "optionCountAfter": 10
+    },
+    {
+      "field": "scene_tags",
+      "lockedFieldsTop": [
+        "scene_tags"
+      ],
+      "lockedFieldsInner": [
+        "clip_filter",
+        "scene_tags"
+      ],
+      "removedStateKeys": [
+        "sceneTagIds",
+        "sceneTagIdsModifier",
+        "sceneTagIdsDepth"
+      ],
+      "removedOptions": [
+        "searchable-select:sceneTagIds"
+      ],
+      "optionCountAfter": 10
+    },
+    {
+      "field": "performers",
+      "lockedFieldsTop": [
+        "performers"
+      ],
+      "lockedFieldsInner": [
+        "clip_filter",
+        "performers"
+      ],
+      "removedStateKeys": [
+        "performerIds",
+        "performerIdsModifier"
+      ],
+      "removedOptions": [
+        "searchable-select:performerIds"
+      ],
+      "optionCountAfter": 10
+    },
+    {
+      "field": "studios",
+      "lockedFieldsTop": [
+        "studios"
+      ],
+      "lockedFieldsInner": [
+        "clip_filter",
+        "studios"
+      ],
+      "removedStateKeys": [
+        "studioId",
+        "studioIdModifier",
+        "studioIdDepth"
+      ],
+      "removedOptions": [
+        "searchable-select:studioId"
+      ],
+      "optionCountAfter": 10
+    },
+    {
+      "field": "scenes",
+      "lockedFieldsTop": [
+        "scenes"
+      ],
+      "lockedFieldsInner": [
+        "clip_filter",
+        "scenes"
+      ],
+      "removedStateKeys": [
+        "sceneIds",
+        "sceneIdsModifier"
+      ],
+      "removedOptions": [
+        "searchable-select:sceneIds"
+      ],
+      "optionCountAfter": 10
+    },
+    {
+      "field": "is_generated",
+      "lockedFieldsTop": [
+        "is_generated"
+      ],
+      "lockedFieldsInner": [
+        "clip_filter",
+        "is_generated"
+      ],
+      "removedStateKeys": [
+        "isGenerated"
+      ],
+      "removedOptions": [
+        "select:isGenerated"
+      ],
+      "optionCountAfter": 10
+    },
+    {
+      "field": "duration",
+      "lockedFieldsTop": [
+        "duration"
+      ],
+      "lockedFieldsInner": [
+        "clip_filter",
+        "duration"
+      ],
+      "removedStateKeys": [
+        "duration"
+      ],
+      "removedOptions": [
+        "range:duration"
+      ],
+      "optionCountAfter": 10
+    },
+    {
+      "field": "created_at",
+      "lockedFieldsTop": [
+        "created_at"
+      ],
+      "lockedFieldsInner": [
+        "clip_filter",
+        "created_at"
+      ],
+      "removedStateKeys": [
+        "createdAt"
+      ],
+      "removedOptions": [
+        "date-range:createdAt"
+      ],
+      "optionCountAfter": 10
+    },
+    {
+      "field": "updated_at",
+      "lockedFieldsTop": [
+        "updated_at"
+      ],
+      "lockedFieldsInner": [
+        "clip_filter",
+        "updated_at"
+      ],
+      "removedStateKeys": [
+        "updatedAt"
+      ],
+      "removedOptions": [
+        "date-range:updatedAt"
+      ],
+      "optionCountAfter": 10
+    }
+  ]
+}

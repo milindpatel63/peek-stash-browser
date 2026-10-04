@@ -20,14 +20,25 @@ export interface SerializedDownload {
   playlistId: number | null;
   entityType: string | null;
   entityId: string | null;
+  /** The entity's Stash instance; "" for playlist zips. */
+  instanceId: string;
   fileName: string;
   fileSize: string | null;
-  filePath: string | null;
   progress: number;
   error: string | null;
+  /** Playlist zips: scenes left out because they could not be fetched when it was built; 0 otherwise. */
+  skippedItems: number;
   createdAt: Date;
   completedAt: Date | null;
   expiresAt: Date | null;
+}
+
+/**
+ * Body of POST /api/downloads/scene/:sceneId and POST /api/downloads/image/:imageId:
+ * the Stash instance the entity lives on.
+ */
+export interface StartEntityDownloadRequest {
+  instanceId: string;
 }
 
 // =============================================================================
@@ -67,6 +78,17 @@ export interface StartPlaylistDownloadParams extends Record<string, string> {
 
 export interface StartPlaylistDownloadResponse {
   download: SerializedDownload;
+}
+
+/**
+ * The 400 for a playlist whose zip would pass the size cap: the zip's planned
+ * size and the cap, each in MiB rounded up
+ */
+export interface PlaylistTooLargeResponse {
+  error: string;
+  details: string;
+  totalSizeMB: number;
+  maxSizeMB: number;
 }
 
 // =============================================================================

@@ -1,3 +1,4 @@
+import type { GetUserStashInstancesResponse } from "../../types/api/index.js";
 import { TEST_CONFIG } from "./config.js";
 
 interface RequestOptions {
@@ -11,7 +12,7 @@ interface ApiResponse<T> {
 }
 
 export class TestClient {
-  private token?: string;
+  private token?: string | undefined;
   private baseUrl: string;
 
   constructor(baseUrl: string = TEST_CONFIG.baseUrl) {
@@ -26,21 +27,23 @@ export class TestClient {
     });
 
     if (!response.ok) {
-      throw new Error(`Login failed: ${response.status} ${await response.text()}`);
+      throw new Error(
+        `Login failed: ${response.status} ${await response.text()}`
+      );
     }
 
     // Extract token from Set-Cookie header
-    const setCookie = response.headers.get("set-cookie");
-    if (setCookie) {
-      const tokenMatch = setCookie.match(/token=([^;]+)/);
-      if (tokenMatch) {
-        this.token = tokenMatch[1];
-      }
-    }
+    this.captureToken(response);
 
     // Also check response body for token (some auth flows return it there)
-    const data = await response.json();
-    if (data.token) {
+    const data: unknown = await response.json();
+    if (
+      typeof data === "object" &&
+      data !== null &&
+      "token" in data &&
+      typeof data.token === "string" &&
+      data.token
+    ) {
       this.token = data.token;
     }
   }
@@ -51,6 +54,20 @@ export class TestClient {
 
   clearToken(): void {
     this.token = undefined;
+  }
+
+  /**
+   * Keep a `token=` cookie from any response, as a browser would: the server
+   * refreshes the session cookie and issues a new one on password change.
+   * Logout's clear-cookie has an empty value and does not match.
+   */
+  private captureToken(response: Response): void {
+    const tokenMatch = response.headers
+      .get("set-cookie")
+      ?.match(/token=([^;]+)/);
+    if (tokenMatch) {
+      this.token = tokenMatch[1];
+    }
   }
 
   private getHeaders(options?: RequestOptions): Record<string, string> {
@@ -66,13 +83,17 @@ export class TestClient {
     return headers;
   }
 
-  async get<T = unknown>(path: string, options?: RequestOptions): Promise<ApiResponse<T>> {
+  async get<T = unknown>(
+    path: string,
+    options?: RequestOptions
+  ): Promise<ApiResponse<T>> {
     const response = await fetch(`${this.baseUrl}${path}`, {
       method: "GET",
       headers: this.getHeaders(options),
     });
+    this.captureToken(response);
 
-    const data = await response.json().catch(() => ({}));
+    const data: unknown = await response.json().catch(() => ({}));
     return {
       status: response.status,
       data: data as T,
@@ -80,14 +101,19 @@ export class TestClient {
     };
   }
 
-  async post<T = unknown>(path: string, body?: object, options?: RequestOptions): Promise<ApiResponse<T>> {
+  async post<T = unknown>(
+    path: string,
+    body?: object,
+    options?: RequestOptions
+  ): Promise<ApiResponse<T>> {
     const response = await fetch(`${this.baseUrl}${path}`, {
       method: "POST",
       headers: this.getHeaders(options),
-      body: body ? JSON.stringify(body) : undefined,
+      ...(body ? { body: JSON.stringify(body) } : {}),
     });
+    this.captureToken(response);
 
-    const data = await response.json().catch(() => ({}));
+    const data: unknown = await response.json().catch(() => ({}));
     return {
       status: response.status,
       data: data as T,
@@ -95,14 +121,19 @@ export class TestClient {
     };
   }
 
-  async put<T = unknown>(path: string, body?: object, options?: RequestOptions): Promise<ApiResponse<T>> {
+  async put<T = unknown>(
+    path: string,
+    body?: object,
+    options?: RequestOptions
+  ): Promise<ApiResponse<T>> {
     const response = await fetch(`${this.baseUrl}${path}`, {
       method: "PUT",
       headers: this.getHeaders(options),
-      body: body ? JSON.stringify(body) : undefined,
+      ...(body ? { body: JSON.stringify(body) } : {}),
     });
+    this.captureToken(response);
 
-    const data = await response.json().catch(() => ({}));
+    const data: unknown = await response.json().catch(() => ({}));
     return {
       status: response.status,
       data: data as T,
@@ -110,13 +141,37 @@ export class TestClient {
     };
   }
 
-  async delete<T = unknown>(path: string, options?: RequestOptions): Promise<ApiResponse<T>> {
+  async patch<T = unknown>(
+    path: string,
+    body?: object,
+    options?: RequestOptions
+  ): Promise<ApiResponse<T>> {
+    const response = await fetch(`${this.baseUrl}${path}`, {
+      method: "PATCH",
+      headers: this.getHeaders(options),
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+    this.captureToken(response);
+
+    const data: unknown = await response.json().catch(() => ({}));
+    return {
+      status: response.status,
+      data: data as T,
+      ok: response.ok,
+    };
+  }
+
+  async delete<T = unknown>(
+    path: string,
+    options?: RequestOptions
+  ): Promise<ApiResponse<T>> {
     const response = await fetch(`${this.baseUrl}${path}`, {
       method: "DELETE",
       headers: this.getHeaders(options),
     });
+    this.captureToken(response);
 
-    const data = await response.json().catch(() => ({}));
+    const data: unknown = await response.json().catch(() => ({}));
     return {
       status: response.status,
       data: data as T,
@@ -133,76 +188,143 @@ export const guestClient = new TestClient();
 let cachedTestInstanceId: string | null = null;
 
 /**
- * Select only the primary test instance for the current user.
- * This ensures tests that query by ID only get results from the test instance,
- * not from other instances (e.g., production) that may have been added.
- *
- * Call this in beforeAll for tests that filter by specific entity IDs.
+ * The test instance's id: the instance whose URL is the global setup's test
+ * Stash (`TEST_CONFIG.stashUrl`), not the highest priority one, so a second
+ * instance can never be taken for it. Leaves the admin's instance selection as
+ * it is. For a test that names the instance in its refs (`id:instance`)
+ * whatever the selection.
  */
-export async function selectTestInstanceOnly(): Promise<string> {
-  if (cachedTestInstanceId) {
-    await adminClient.put("/api/user/stash-instances", {
-      instanceIds: [cachedTestInstanceId],
-    });
-    return cachedTestInstanceId;
-  }
+export async function findTestInstanceId(): Promise<string> {
+  if (cachedTestInstanceId) return cachedTestInstanceId;
 
-  // Get all instances
   const instancesResponse = await adminClient.get<{
-    instances: Array<{ id: string; name: string; priority: number }>;
+    instances?: Array<{ id: string; url: string }>;
   }>("/api/setup/stash-instances");
 
   if (!instancesResponse.ok || !instancesResponse.data.instances?.length) {
     throw new Error("No Stash instances configured");
   }
 
-  // Find the test instance (highest priority / first configured)
-  const testInstance = instancesResponse.data.instances.reduce((a, b) =>
-    a.priority < b.priority ? a : b
+  const stashUrl = TEST_CONFIG.stashUrl;
+  const { instances } = instancesResponse.data;
+  const testInstance = instances.find(
+    (instance) => normalizeUrl(instance.url) === normalizeUrl(stashUrl)
   );
+  if (!testInstance) {
+    const urls = instances.map((instance) => instance.url).join(", ");
+    throw new Error(
+      `No Stash instance has the test Stash's URL ${stashUrl}; the instances are: ${urls}`
+    );
+  }
 
   cachedTestInstanceId = testInstance.id;
-
-  // Set user's instance selection to only test instance
-  await adminClient.put("/api/user/stash-instances", {
-    instanceIds: [cachedTestInstanceId],
-  });
-
   return cachedTestInstanceId;
 }
 
+function normalizeUrl(url: string): string {
+  return url.trim().replace(/\/+$/, "");
+}
+
+/** The shared admin's selection before this file first changed it */
+let adminSelectionBefore: string[] | undefined;
+
+/** The client's instance selection (an empty list: every enabled instance). */
+export async function readInstanceSelection(
+  client: TestClient = adminClient
+): Promise<string[]> {
+  const response = await client.get<GetUserStashInstancesResponse>(
+    "/api/user/stash-instances"
+  );
+  if (!response.ok) {
+    throw new Error(
+      `GET /api/user/stash-instances answered ${response.status}: ${JSON.stringify(response.data)}`
+    );
+  }
+  return response.data.selectedInstanceIds;
+}
+
+async function putInstanceSelection(
+  client: TestClient,
+  instanceIds: string[]
+): Promise<void> {
+  const response = await client.put("/api/user/stash-instances", {
+    instanceIds,
+  });
+  if (!response.ok) {
+    throw new Error(
+      `PUT /api/user/stash-instances ${JSON.stringify(instanceIds)} answered ${response.status}: ${JSON.stringify(response.data)}`
+    );
+  }
+}
+
 /**
- * Select only the primary test instance for a specific client (non-admin user).
- * Uses the cached test instance ID from a prior selectTestInstanceOnly() call.
+ * Sets the client's instance selection (an empty list: every enabled
+ * instance). Every file runs as the one shared admin, so the admin's first
+ * change in a file remembers the selection it found, and the file restores it
+ * with `afterAll(restoreInstanceSelection)`: no file sees a selection another
+ * file left. Users a file creates for itself need no restore.
+ */
+export async function setInstanceSelection(
+  instanceIds: string[],
+  client: TestClient = adminClient
+): Promise<void> {
+  if (client === adminClient && adminSelectionBefore === undefined) {
+    adminSelectionBefore = await readInstanceSelection();
+  }
+  await putInstanceSelection(client, instanceIds);
+}
+
+/**
+ * Puts back the admin's selection from before this file (or this describe)
+ * first changed it; nothing when it did not change it. Pair every
+ * `setInstanceSelection` or `select*` call on the admin with it in the same
+ * describe's `afterAll`. `helpers/sharedStateAudit.ts` fails a file that
+ * leaves the admin's selection changed.
+ */
+export async function restoreInstanceSelection(): Promise<void> {
+  const before = adminSelectionBefore;
+  if (before === undefined) return;
+  adminSelectionBefore = undefined;
+  await putInstanceSelection(adminClient, before);
+}
+
+/**
+ * Select only the primary test instance for the admin, so a bare id matches
+ * only the test instance's entity (the second library reuses the first's
+ * ids). Restore with `afterAll(restoreInstanceSelection)`.
+ */
+export async function selectTestInstanceOnly(): Promise<string> {
+  const instanceId = await findTestInstanceId();
+  await setInstanceSelection([instanceId]);
+  return instanceId;
+}
+
+/**
+ * Select only the primary test instance for a user the file created.
  *
  * @param client - The TestClient to set instance selection for
  */
-export async function selectTestInstanceForClient(client: TestClient): Promise<string> {
-  if (!cachedTestInstanceId) {
-    // Ensure we discover the test instance first
-    await selectTestInstanceOnly();
-  }
-  await client.put("/api/user/stash-instances", {
-    instanceIds: [cachedTestInstanceId],
-  });
-  return cachedTestInstanceId!;
+export async function selectTestInstanceForClient(
+  client: TestClient
+): Promise<string> {
+  const instanceId = await findTestInstanceId();
+  await setInstanceSelection([instanceId], client);
+  return instanceId;
 }
 
 /**
- * Reset user instance selection to all instances.
- * Call this in afterAll if you need to restore default behavior.
+ * Select every enabled instance for the admin. Restore with
+ * `afterAll(restoreInstanceSelection)`.
  */
 export async function selectAllInstances(): Promise<void> {
-  await adminClient.put("/api/user/stash-instances", {
-    instanceIds: [],
-  });
+  await setInstanceSelection([]);
 }
 
 /**
- * Reset instance selection for a specific client to all instances.
+ * Select every enabled instance for a user the file created.
  */
-export async function selectAllInstancesForClient(client: TestClient): Promise<void> {
-  await client.put("/api/user/stash-instances", {
-    instanceIds: [],
-  });
+export async function selectAllInstancesForClient(
+  client: TestClient
+): Promise<void> {
+  await setInstanceSelection([], client);
 }

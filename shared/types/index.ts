@@ -4,16 +4,19 @@ export type {
   StudioRef,
   GroupRef,
   GalleryRef,
+  GroupRelationRef,
+  RelationTotals,
   SceneFile,
   ScenePaths,
   SceneStream,
   NormalizedScene,
   NormalizedPerformer,
   NormalizedStudio,
+  StashId,
   NormalizedTag,
   NormalizedGroup,
   NormalizedGallery,
-  NormalizedImage,
+  ImageListItem,
   WithInstanceId,
   SceneScoringData,
 } from "./entities.js";
@@ -25,8 +28,28 @@ export {
   parseEntityRef,
   isEntityRef,
   assertEntityRef,
-  coerceEntityRefs,
 } from "./instanceAwareId.js";
+
+// Theme keys
+export {
+  BUILT_IN_THEME_KEYS,
+  isBuiltInThemeKey,
+  customThemeKey,
+  parseCustomThemeKey,
+} from "./themes.js";
+export type { BuiltInThemeKey } from "./themes.js";
+
+// Filter preset contexts
+export {
+  PRESET_CONTEXTS,
+  PRESET_CONTEXT_LABELS,
+  isPresetContext,
+  presetArtifactType,
+} from "./presetContexts.js";
+export type { PresetContext } from "./presetContexts.js";
 
 // API contract types
 export * from "./api/index.js";
+
+// List filter and sort contract
+export * from "./filters/index.js";

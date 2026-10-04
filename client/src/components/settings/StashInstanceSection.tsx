@@ -1,22 +1,49 @@
 import { useCallback, useEffect, useState } from "react";
-import { apiGet, apiPost, apiPut, apiDelete } from "../../api";
-import { Paper, Button } from "../ui/index";
+import type {
+  CreateStashInstanceResponse,
+  DeleteStashInstanceResponse,
+  TestStashConnectionResponse,
+  UpdateStashInstanceResponse,
+} from "@peek/shared-types";
+import { useQueryClient } from "@tanstack/react-query";
+import { apiDelete, apiGet, apiPost, apiPut } from "../../api";
+import { ApiError, getErrorMessage } from "../../api/client";
+import { invalidateInstanceQueries } from "../../api/hooks/useLibraryReady";
 import { useAuth } from "../../hooks/useAuth";
+import { useConfirmDialog } from "../../hooks/useConfirmDialog";
+import { formatDateTime } from "../../utils/date";
+import { showError, showInfo, showSuccess } from "../../utils/toast";
+import { Button, Paper, StatusMessage } from "../ui/index";
 
 interface StashInstance {
   id: string;
   name: string;
   description: string | null;
   url: string;
+  uiUrl: string | null;
   enabled: boolean;
   priority: number;
   createdAt: string;
+  /**
+   * Admins only: when its first sync finished with its users' exclusions
+   * computed; null while that sync runs and the instance is hidden from
+   * every user
+   */
+  firstSyncedAt?: string | null;
 }
+
+/** How often the list refreshes while an instance is on its first sync */
+const FIRST_SYNC_POLL_MS = 5_000;
+
+/** An enabled instance whose first sync has not finished: hidden from users */
+const onFirstSync = (instance: StashInstance) =>
+  instance.enabled && instance.firstSyncedAt === null;
 
 interface InstanceFormData {
   name: string;
   description: string;
   url: string;
+  uiUrl: string;
   apiKey: string;
   enabled: boolean;
   priority: number;
@@ -25,26 +52,64 @@ interface InstanceFormData {
 interface TestResult {
   success: boolean;
   message: string;
+  /** Stash's own error text, when the server sent it */
+  details?: string;
 }
+
+/** Stash's reason for a failure, when the server's answer carries it */
+const errorDetails = (err: unknown): string | undefined =>
+  err instanceof ApiError && typeof err.data.details === "string"
+    ? err.data.details
+    : undefined;
+
+/**
+ * What the form changed on a saved instance: only the keys that differ, so a
+ * rename or a priority change never sends an address or a key. An empty
+ * description or UI address is `null`; the key goes only when typed.
+ */
+const changedFields = (
+  form: InstanceFormData,
+  saved: StashInstance
+): Record<string, unknown> => {
+  const changes: Record<string, unknown> = {};
+  if (form.name !== saved.name) changes.name = form.name;
+  if (form.description !== (saved.description ?? "")) {
+    changes.description = form.description || null;
+  }
+  if (form.url !== saved.url) changes.url = form.url;
+  if (form.uiUrl !== (saved.uiUrl ?? "")) changes.uiUrl = form.uiUrl || null;
+  if (form.apiKey) changes.apiKey = form.apiKey;
+  if (form.enabled !== saved.enabled) changes.enabled = form.enabled;
+  if (form.priority !== saved.priority) changes.priority = form.priority;
+  return changes;
+};
 
 const StashInstanceSection = () => {
   const { user } = useAuth();
   const isAdmin = user?.role === "ADMIN";
+  const queryClient = useQueryClient();
+  const { confirm, dialog: confirmDialog } = useConfirmDialog();
 
   const [instances, setInstances] = useState<StashInstance[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [editingInstance, setEditingInstance] = useState<StashInstance | null>(null);
+  const [editingInstance, setEditingInstance] = useState<StashInstance | null>(
+    null
+  );
   const [showAddForm, setShowAddForm] = useState(false);
   const [formData, setFormData] = useState<InstanceFormData>({
     name: "",
     description: "",
     url: "",
+    uiUrl: "",
     apiKey: "",
     enabled: true,
     priority: 0,
   });
-  const [formError, setFormError] = useState<string | null>(null);
+  const [formError, setFormError] = useState<{
+    message: string;
+    details?: string;
+  } | null>(null);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<TestResult | null>(null);
@@ -55,7 +120,9 @@ const StashInstanceSection = () => {
       setError(null);
 
       // Admin gets all instances, regular users get single instance
-      const endpoint = isAdmin ? "/setup/stash-instances" : "/setup/stash-instance";
+      const endpoint = isAdmin
+        ? "/setup/stash-instances"
+        : "/setup/stash-instance";
       const data = await apiGet<Record<string, unknown>>(endpoint);
 
       if (isAdmin) {
@@ -73,13 +140,23 @@ const StashInstanceSection = () => {
   }, [isAdmin]);
 
   useEffect(() => {
-    loadInstances();
+    void loadInstances();
   }, [loadInstances]);
 
-  const formatDate = (dateString: string | null | undefined) => {
-    if (!dateString) return "N/A";
-    return new Date(dateString).toLocaleString();
-  };
+  // While an instance is on its first sync, refresh the list quietly (no
+  // spinner, errors ignored) while the page is visible, so its badge goes
+  // when the instance shows
+  const firstSyncRunning = isAdmin && instances.some(onFirstSync);
+  useEffect(() => {
+    if (!firstSyncRunning || showAddForm) return;
+    const timer = setInterval(() => {
+      if (document.visibilityState !== "visible") return;
+      apiGet<{ instances?: StashInstance[] }>("/setup/stash-instances")
+        .then((data) => setInstances(data.instances ?? []))
+        .catch(() => {});
+    }, FIRST_SYNC_POLL_MS);
+    return () => clearInterval(timer);
+  }, [firstSyncRunning, showAddForm]);
 
   const getDisplayUrl = (url: string | null | undefined) => {
     if (!url) return "N/A";
@@ -96,6 +173,7 @@ const StashInstanceSection = () => {
       name: "",
       description: "",
       url: "",
+      uiUrl: "",
       apiKey: "",
       enabled: true,
       priority: instances.length,
@@ -111,6 +189,7 @@ const StashInstanceSection = () => {
       name: instance.name,
       description: instance.description || "",
       url: instance.url,
+      uiUrl: instance.uiUrl || "",
       apiKey: "", // Don't show existing key
       enabled: instance.enabled,
       priority: instance.priority,
@@ -130,7 +209,7 @@ const StashInstanceSection = () => {
 
   const handleTestConnection = async () => {
     if (!formData.url) {
-      setFormError("URL is required");
+      setFormError({ message: "URL is required" });
       return;
     }
 
@@ -139,10 +218,25 @@ const StashInstanceSection = () => {
       setTestResult(null);
       setFormError(null);
 
-      const data = await apiPost<{ version?: string }>("/setup/test-stash-connection", {
-        url: formData.url,
-        apiKey: formData.apiKey || undefined,
-      });
+      // A saved instance tests by id with its stored key, which never reaches
+      // the browser: only a changed address or a typed key goes in the body
+      const data = editingInstance
+        ? await apiPost<TestStashConnectionResponse>(
+            `/setup/stash-instance/${editingInstance.id}/test-connection`,
+            {
+              ...(formData.url !== editingInstance.url && {
+                url: formData.url,
+              }),
+              ...(formData.apiKey && { apiKey: formData.apiKey }),
+            }
+          )
+        : await apiPost<TestStashConnectionResponse>(
+            "/setup/test-stash-connection",
+            {
+              url: formData.url,
+              apiKey: formData.apiKey || undefined,
+            }
+          );
 
       setTestResult({
         success: true,
@@ -152,6 +246,7 @@ const StashInstanceSection = () => {
       setTestResult({
         success: false,
         message: (err as Error).message || "Connection failed",
+        details: errorDetails(err),
       });
     } finally {
       setTesting(false);
@@ -160,7 +255,7 @@ const StashInstanceSection = () => {
 
   const handleSave = async () => {
     if (!formData.name || !formData.url) {
-      setFormError("Name and URL are required");
+      setFormError({ message: "Name and URL are required" });
       return;
     }
 
@@ -168,63 +263,113 @@ const StashInstanceSection = () => {
       setSaving(true);
       setFormError(null);
 
+      let result: CreateStashInstanceResponse | UpdateStashInstanceResponse;
       if (editingInstance) {
-        // Update existing instance
-        const updateData: Record<string, unknown> = {
-          name: formData.name,
-          description: formData.description || null,
-          url: formData.url,
-          enabled: formData.enabled,
-          priority: formData.priority,
-        };
-        // Only include apiKey if changed
-        if (formData.apiKey) {
-          updateData.apiKey = formData.apiKey;
+        // Update existing instance: send only what changed
+        const updateData = changedFields(formData, editingInstance);
+        if (Object.keys(updateData).length === 0) {
+          handleCancel();
+          return;
         }
 
-        await apiPut(`/setup/stash-instance/${editingInstance.id}`, updateData);
+        result = await apiPut<UpdateStashInstanceResponse>(
+          `/setup/stash-instance/${editingInstance.id}`,
+          updateData
+        );
       } else {
         // Create new instance
-        await apiPost("/setup/stash-instance", {
-          name: formData.name,
-          description: formData.description || null,
-          url: formData.url,
-          apiKey: formData.apiKey,
-          enabled: formData.enabled,
-          priority: formData.priority,
-        });
+        result = await apiPost<CreateStashInstanceResponse>(
+          "/setup/stash-instance",
+          {
+            name: formData.name,
+            description: formData.description || null,
+            url: formData.url,
+            uiUrl: formData.uiUrl || null,
+            apiKey: formData.apiKey,
+            enabled: formData.enabled,
+            priority: formData.priority,
+          }
+        );
+      }
+
+      // Instance count, names and content change for everyone
+      void invalidateInstanceQueries(queryClient);
+
+      // The instance is saved; its sync waits for the running one
+      if (result.sync === "queued") {
+        showInfo(
+          `Saved. A sync is running; "${formData.name}" syncs right after it.`
+        );
       }
 
       await loadInstances();
       handleCancel();
     } catch (err) {
-      setFormError((err as Error).message || "Failed to save instance");
+      setFormError({
+        message: (err as Error).message || "Failed to save instance",
+        details: errorDetails(err),
+      });
     } finally {
       setSaving(false);
     }
   };
 
   const handleDelete = async (instance: { id: string; name: string }) => {
-    if (!confirm(`Are you sure you want to delete "${instance.name}"? This cannot be undone.`)) {
+    if (
+      !(await confirm({
+        title: `Delete ${instance.name}?`,
+        message:
+          "Peek removes its cached library and every user's ratings, " +
+          "favorites, watch history, playlist entries and hidden items for " +
+          "it. To keep them, disable the instance instead.",
+        confirmText: "Delete instance",
+      }))
+    ) {
       return;
     }
 
     try {
-      await apiDelete(`/setup/stash-instance/${instance.id}`);
+      const result = await apiDelete<DeleteStashInstanceResponse>(
+        `/setup/stash-instance/${instance.id}`
+      );
+      showSuccess(result.message);
+      void invalidateInstanceQueries(queryClient);
       await loadInstances();
     } catch (err) {
-      setError((err as Error).message || "Failed to delete instance");
+      // A toast, so the list stays: a 409 (a sync is running) asks the admin
+      // to delete again once it has finished
+      showError((err as Error).message || "Failed to delete instance");
     }
   };
 
-  const handleToggleEnabled = async (instance: { id: string; enabled: boolean }) => {
+  const handleToggleEnabled = async (instance: {
+    id: string;
+    name: string;
+    enabled: boolean;
+  }) => {
+    if (
+      instance.enabled &&
+      !(await confirm({
+        title: `Disable ${instance.name}?`,
+        message:
+          "Every user stops seeing its content until you enable it again. " +
+          "Ratings, history and playlists are kept.",
+        confirmText: "Disable instance",
+      }))
+    ) {
+      return;
+    }
+
     try {
       await apiPut(`/setup/stash-instance/${instance.id}`, {
         enabled: !instance.enabled,
       });
+      void invalidateInstanceQueries(queryClient);
       await loadInstances();
     } catch (err) {
-      setError((err as Error).message || "Failed to update instance");
+      // A toast, so the list stays: the server refuses to disable the last
+      // enabled instance and says what to do instead
+      showError(getErrorMessage(err, "Failed to update instance"));
     }
   };
 
@@ -235,7 +380,9 @@ const StashInstanceSection = () => {
           <div>
             <Paper.Title>Stash Instances</Paper.Title>
             <Paper.Subtitle className="mt-1">
-              {isAdmin ? "Manage connected Stash servers" : "Connected Stash server"}
+              {isAdmin
+                ? "Manage connected Stash servers"
+                : "Connected Stash server"}
             </Paper.Subtitle>
           </div>
           {isAdmin && !showAddForm && (
@@ -251,31 +398,36 @@ const StashInstanceSection = () => {
             <div className="animate-spin w-6 h-6 border-2 border-blue-500 border-t-transparent rounded-full"></div>
           </div>
         ) : error ? (
-          <div
-            className="p-3 rounded-lg text-sm"
-            style={{
-              backgroundColor: "rgba(239, 68, 68, 0.1)",
-              color: "rgb(239, 68, 68)",
-            }}
-          >
-            {error}
-          </div>
+          <StatusMessage
+            variant="error"
+            title={null}
+            className="text-sm"
+            message={error}
+          />
         ) : showAddForm ? (
           // Add/Edit Form
           <div className="space-y-4">
-            <h3 className="text-lg font-medium" style={{ color: "var(--text-primary)" }}>
+            <h3
+              className="text-lg font-medium"
+              style={{ color: "var(--text-primary)" }}
+            >
               {editingInstance ? "Edit Instance" : "Add New Instance"}
             </h3>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
-                <label className="block text-sm font-medium mb-1" style={{ color: "var(--text-secondary)" }}>
+                <label
+                  className="block text-sm font-medium mb-1"
+                  style={{ color: "var(--text-secondary)" }}
+                >
                   Name *
                 </label>
                 <input
                   type="text"
                   value={formData.name}
-                  onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                  onChange={(e) =>
+                    setFormData({ ...formData, name: e.target.value })
+                  }
                   className="w-full px-3 py-2 rounded-lg border"
                   style={{
                     backgroundColor: "var(--bg-input)",
@@ -286,13 +438,21 @@ const StashInstanceSection = () => {
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium mb-1" style={{ color: "var(--text-secondary)" }}>
+                <label
+                  className="block text-sm font-medium mb-1"
+                  style={{ color: "var(--text-secondary)" }}
+                >
                   Priority
                 </label>
                 <input
                   type="number"
                   value={formData.priority}
-                  onChange={(e) => setFormData({ ...formData, priority: parseInt(e.target.value) || 0 })}
+                  onChange={(e) =>
+                    setFormData({
+                      ...formData,
+                      priority: parseInt(e.target.value) || 0,
+                    })
+                  }
                   className="w-full px-3 py-2 rounded-lg border"
                   style={{
                     backgroundColor: "var(--bg-input)",
@@ -301,20 +461,29 @@ const StashInstanceSection = () => {
                   }}
                   placeholder="0"
                 />
-                <p className="text-xs mt-1" style={{ color: "var(--text-tertiary)" }}>
-                  Lower numbers = higher priority for deduplication
+                <p
+                  className="text-xs mt-1"
+                  style={{ color: "var(--text-tertiary)" }}
+                >
+                  Orders the servers in lists. On a name clash, the lowest
+                  number's items show without a server name
                 </p>
               </div>
             </div>
 
             <div>
-              <label className="block text-sm font-medium mb-1" style={{ color: "var(--text-secondary)" }}>
+              <label
+                className="block text-sm font-medium mb-1"
+                style={{ color: "var(--text-secondary)" }}
+              >
                 Description
               </label>
               <input
                 type="text"
                 value={formData.description}
-                onChange={(e) => setFormData({ ...formData, description: e.target.value })}
+                onChange={(e) =>
+                  setFormData({ ...formData, description: e.target.value })
+                }
                 className="w-full px-3 py-2 rounded-lg border"
                 style={{
                   backgroundColor: "var(--bg-input)",
@@ -326,13 +495,18 @@ const StashInstanceSection = () => {
             </div>
 
             <div>
-              <label className="block text-sm font-medium mb-1" style={{ color: "var(--text-secondary)" }}>
+              <label
+                className="block text-sm font-medium mb-1"
+                style={{ color: "var(--text-secondary)" }}
+              >
                 Stash URL *
               </label>
               <input
                 type="text"
                 value={formData.url}
-                onChange={(e) => setFormData({ ...formData, url: e.target.value })}
+                onChange={(e) =>
+                  setFormData({ ...formData, url: e.target.value })
+                }
                 className="w-full px-3 py-2 rounded-lg border"
                 style={{
                   backgroundColor: "var(--bg-input)",
@@ -341,23 +515,67 @@ const StashInstanceSection = () => {
                 }}
                 placeholder="http://localhost:9999/graphql"
               />
+              <p
+                className="text-xs mt-1"
+                style={{ color: "var(--text-tertiary)" }}
+              >
+                GraphQL endpoint for API access
+              </p>
             </div>
 
             <div>
-              <label className="block text-sm font-medium mb-1" style={{ color: "var(--text-secondary)" }}>
-                API Key {editingInstance ? "(leave blank to keep existing)" : ""}
+              <label
+                className="block text-sm font-medium mb-1"
+                style={{ color: "var(--text-secondary)" }}
+              >
+                Stash UI URL (optional)
               </label>
               <input
-                type="password"
-                value={formData.apiKey}
-                onChange={(e) => setFormData({ ...formData, apiKey: e.target.value })}
+                type="text"
+                value={formData.uiUrl}
+                onChange={(e) =>
+                  setFormData({ ...formData, uiUrl: e.target.value })
+                }
                 className="w-full px-3 py-2 rounded-lg border"
                 style={{
                   backgroundColor: "var(--bg-input)",
                   borderColor: "var(--border-color)",
                   color: "var(--text-primary)",
                 }}
-                placeholder={editingInstance ? "••••••••" : "Your Stash API key"}
+                placeholder="https://stash.example.com"
+              />
+              <p
+                className="text-xs mt-1"
+                style={{ color: "var(--text-tertiary)" }}
+              >
+                Web UI URL for "View in Stash" links. If not set, uses the Stash
+                URL.
+              </p>
+            </div>
+
+            <div>
+              <label
+                className="block text-sm font-medium mb-1"
+                style={{ color: "var(--text-secondary)" }}
+              >
+                API Key{" "}
+                {editingInstance ? "(leave blank to keep existing)" : ""}
+              </label>
+              <input
+                type="password"
+                value={formData.apiKey}
+                onChange={(e) =>
+                  setFormData({ ...formData, apiKey: e.target.value })
+                }
+                className="w-full px-3 py-2 rounded-lg border"
+                style={{
+                  backgroundColor: "var(--bg-input)",
+                  borderColor: "var(--border-color)",
+                  color: "var(--text-primary)",
+                }}
+                placeholder={
+                  editingInstance ? "••••••••" : "Your Stash API key"
+                }
               />
             </div>
 
@@ -366,47 +584,63 @@ const StashInstanceSection = () => {
                 type="checkbox"
                 id="enabled"
                 checked={formData.enabled}
-                onChange={(e) => setFormData({ ...formData, enabled: e.target.checked })}
+                onChange={(e) =>
+                  setFormData({ ...formData, enabled: e.target.checked })
+                }
                 className="rounded"
               />
-              <label htmlFor="enabled" className="text-sm" style={{ color: "var(--text-primary)" }}>
+              <label
+                htmlFor="enabled"
+                className="text-sm"
+                style={{ color: "var(--text-primary)" }}
+              >
                 Enabled
               </label>
             </div>
 
             {/* Test Result */}
             {testResult && (
-              <div
-                className="p-3 rounded-lg text-sm"
-                style={{
-                  backgroundColor: testResult.success ? "rgba(34, 197, 94, 0.1)" : "rgba(239, 68, 68, 0.1)",
-                  color: testResult.success ? "rgb(34, 197, 94)" : "rgb(239, 68, 68)",
-                }}
+              <StatusMessage
+                variant={testResult.success ? "success" : "error"}
+                title={null}
+                className="text-sm"
               >
-                {testResult.message}
-              </div>
+                <div>{testResult.message}</div>
+                {testResult.details && (
+                  <div className="mt-1 text-xs opacity-80">
+                    {testResult.details}
+                  </div>
+                )}
+              </StatusMessage>
             )}
 
             {/* Form Error */}
             {formError && (
-              <div
-                className="p-3 rounded-lg text-sm"
-                style={{
-                  backgroundColor: "rgba(239, 68, 68, 0.1)",
-                  color: "rgb(239, 68, 68)",
-                }}
-              >
-                {formError}
-              </div>
+              <StatusMessage variant="error" title={null} className="text-sm">
+                <div>{formError.message}</div>
+                {formError.details && (
+                  <div className="mt-1 text-xs opacity-80">
+                    {formError.details}
+                  </div>
+                )}
+              </StatusMessage>
             )}
 
             {/* Form Actions */}
             <div className="flex gap-3 pt-2">
-              <Button onClick={handleTestConnection} variant="secondary" disabled={testing || !formData.url}>
+              <Button
+                onClick={() => void handleTestConnection()}
+                variant="secondary"
+                disabled={testing || !formData.url}
+              >
                 {testing ? "Testing..." : "Test Connection"}
               </Button>
-              <Button onClick={handleSave} disabled={saving}>
-                {saving ? "Saving..." : editingInstance ? "Save Changes" : "Add Instance"}
+              <Button onClick={() => void handleSave()} disabled={saving}>
+                {saving
+                  ? "Saving..."
+                  : editingInstance
+                    ? "Save Changes"
+                    : "Add Instance"}
               </Button>
               <Button onClick={handleCancel} variant="tertiary">
                 Cancel
@@ -428,7 +662,10 @@ const StashInstanceSection = () => {
                 <div className="flex items-start justify-between">
                   <div className="flex-1">
                     <div className="flex items-center gap-3">
-                      <h4 className="font-medium" style={{ color: "var(--text-primary)" }}>
+                      <h4
+                        className="font-medium"
+                        style={{ color: "var(--text-primary)" }}
+                      >
                         {instance.name}
                       </h4>
                       <span
@@ -445,33 +682,65 @@ const StashInstanceSection = () => {
                           Primary
                         </span>
                       )}
+                      {isAdmin && onFirstSync(instance) && (
+                        <span
+                          className="px-2 py-0.5 rounded text-xs"
+                          style={{
+                            backgroundColor: "var(--status-info-bg)",
+                            color: "var(--status-info)",
+                          }}
+                          title="Nobody sees this instance's content until its first sync has finished and every user's restrictions cover it"
+                        >
+                          First sync running, hidden from users
+                        </span>
+                      )}
                     </div>
                     {instance.description && (
-                      <p className="text-sm mt-1" style={{ color: "var(--text-secondary)" }}>
+                      <p
+                        className="text-sm mt-1"
+                        style={{ color: "var(--text-secondary)" }}
+                      >
                         {instance.description}
                       </p>
                     )}
-                    <div className="flex items-center gap-4 mt-2 text-sm" style={{ color: "var(--text-tertiary)" }}>
-                      <span className="font-mono">{getDisplayUrl(instance.url)}</span>
+                    <div
+                      className="flex items-center gap-4 mt-2 text-sm"
+                      style={{ color: "var(--text-tertiary)" }}
+                    >
+                      <span className="font-mono">
+                        {getDisplayUrl(instance.url)}
+                      </span>
+                      {instance.uiUrl && (
+                        <span className="font-mono" title="UI URL">
+                          → {getDisplayUrl(instance.uiUrl)}
+                        </span>
+                      )}
                       <span>Priority: {instance.priority}</span>
-                      <span>Added: {formatDate(instance.createdAt)}</span>
+                      <span>
+                        Added:{" "}
+                        {formatDateTime(instance.createdAt, { empty: "N/A" })}
+                      </span>
                     </div>
                   </div>
                   {isAdmin && (
                     <div className="flex items-center gap-2">
                       <Button
-                        onClick={() => handleToggleEnabled(instance)}
+                        onClick={() => void handleToggleEnabled(instance)}
                         variant="tertiary"
                         size="sm"
                       >
                         {instance.enabled ? "Disable" : "Enable"}
                       </Button>
-                      <Button onClick={() => handleEdit(instance)} variant="tertiary" size="sm">
+                      <Button
+                        onClick={() => handleEdit(instance)}
+                        variant="tertiary"
+                        size="sm"
+                      >
                         Edit
                       </Button>
                       {instances.length > 1 && (
                         <Button
-                          onClick={() => handleDelete(instance)}
+                          onClick={() => void handleDelete(instance)}
                           variant="tertiary"
                           size="sm"
                           className="text-red-400 hover:text-red-300"
@@ -486,34 +755,24 @@ const StashInstanceSection = () => {
             ))}
 
             {instances.length > 1 && (
-              <div
-                className="p-3 rounded-lg text-sm"
-                style={{
-                  backgroundColor: "rgba(59, 130, 246, 0.1)",
-                  color: "var(--text-secondary)",
-                }}
-              >
-                Content from all enabled instances is combined in your library. When duplicates are
-                found (via StashDB IDs), the instance with the lowest priority number is used as the
-                primary source.
-              </div>
+              <StatusMessage variant="info" title={null} className="text-sm">
+                Content from all enabled instances is combined in your library.
+                Priority orders the servers in lists. When two servers have an
+                item with the same name, the one from the lowest priority number
+                shows without a server name.
+              </StatusMessage>
             )}
           </div>
         ) : (
-          <div
-            className="p-4 rounded-lg text-center"
-            style={{
-              backgroundColor: "rgba(239, 68, 68, 0.1)",
-              color: "rgb(239, 68, 68)",
-            }}
-          >
+          <StatusMessage variant="error" title={null}>
             <p className="font-medium">No Stash Instance Configured</p>
             <p className="text-sm mt-1 opacity-80">
               Please complete the setup wizard to connect to a Stash server.
             </p>
-          </div>
+          </StatusMessage>
         )}
       </Paper.Body>
+      {confirmDialog}
     </Paper>
   );
 };

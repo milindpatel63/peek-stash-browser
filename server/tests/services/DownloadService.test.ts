@@ -1,30 +1,19 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import * as fs from "fs";
+import * as os from "os";
+import * as path from "path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import prisma from "../../prisma/singleton.js";
 import { DownloadService } from "../../services/DownloadService.js";
+import { userDownloadsDir, zipPath } from "../../utils/downloadPaths.js";
+import { type PlaylistWithItems, downloadRow } from "../helpers/fixtures.js";
+import { must } from "../helpers/must.js";
+import { partialRow } from "../helpers/prismaMock.js";
 
 // Mock prisma
-vi.mock("../../prisma/singleton.js", () => ({
-  default: {
-    download: {
-      create: vi.fn(),
-      findUnique: vi.fn(),
-      findMany: vi.fn(),
-      update: vi.fn(),
-      delete: vi.fn(),
-    },
-    stashScene: {
-      findFirst: vi.fn(), // Changed from findUnique for composite primary key
-      findMany: vi.fn(),
-    },
-    stashImage: {
-      findFirst: vi.fn(), // Changed from findUnique for composite primary key
-    },
-    playlist: {
-      findUnique: vi.fn(),
-    },
-  },
-}));
-
-import prisma from "../../prisma/singleton.js";
+vi.mock(
+  "../../prisma/singleton.js",
+  () => import("../helpers/prismaSingletonMock.js")
+);
 
 describe("DownloadService", () => {
   let service: DownloadService;
@@ -42,38 +31,58 @@ describe("DownloadService", () => {
         fileSize: BigInt(1000000),
       };
 
-      vi.mocked(prisma.stashScene.findFirst).mockResolvedValue(mockScene as any);
-      vi.mocked(prisma.download.create).mockResolvedValue({
-        id: 1,
-        userId: 1,
-        type: "SCENE",
-        status: "COMPLETED",
-        entityType: "scene",
-        entityId: "scene-123",
-        fileName: "Test Scene.mp4",
-        fileSize: BigInt(1000000),
-        progress: 100,
-        createdAt: new Date(),
-        completedAt: new Date(),
-        playlistId: null,
-        filePath: null,
-        error: null,
-        expiresAt: null,
-      } as any);
+      vi.mocked(prisma.stashScene.findFirst).mockResolvedValue(
+        partialRow(mockScene)
+      );
+      vi.mocked(prisma.download.create).mockResolvedValue(
+        downloadRow({
+          id: 1,
+          userId: 1,
+          type: "SCENE",
+          status: "COMPLETED",
+          entityType: "scene",
+          entityId: "scene-123",
+          fileName: "Test Scene.mp4",
+          fileSize: BigInt(1000000),
+          progress: 100,
+          createdAt: new Date(),
+          completedAt: new Date(),
+          playlistId: null,
+          filePath: null,
+          error: null,
+          expiresAt: null,
+        })
+      );
 
-      const result = await service.createSceneDownload(1, "scene-123");
+      const result = await service.createSceneDownload(
+        1,
+        "scene-123",
+        "inst-a"
+      );
 
       expect(result.type).toBe("SCENE");
       expect(result.status).toBe("COMPLETED");
       expect(result.fileName).toBe("Test Scene.mp4");
+      expect(prisma.stashScene.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: {
+            id: "scene-123",
+            stashInstanceId: "inst-a",
+            deletedAt: null,
+          },
+        })
+      );
+      expect(
+        must(vi.mocked(prisma.download.create).mock.calls[0])[0].data.instanceId
+      ).toBe("inst-a");
     });
 
     it("should throw if scene not found", async () => {
       vi.mocked(prisma.stashScene.findFirst).mockResolvedValue(null);
 
-      await expect(service.createSceneDownload(1, "unknown")).rejects.toThrow(
-        "Scene not found"
-      );
+      await expect(
+        service.createSceneDownload(1, "unknown", "inst-a")
+      ).rejects.toThrow("Scene not found");
     });
   });
 
@@ -85,67 +94,89 @@ describe("DownloadService", () => {
         fileSize: BigInt(500000),
       };
 
-      vi.mocked(prisma.stashImage.findFirst).mockResolvedValue(mockImage as any);
-      vi.mocked(prisma.download.create).mockResolvedValue({
-        id: 2,
-        userId: 1,
-        type: "IMAGE",
-        status: "COMPLETED",
-        entityType: "image",
-        entityId: "image-123",
-        fileName: "Test Image.jpg",
-        fileSize: BigInt(500000),
-        progress: 100,
-        createdAt: new Date(),
-        completedAt: new Date(),
-        playlistId: null,
-        filePath: null,
-        error: null,
-        expiresAt: null,
-      } as any);
+      vi.mocked(prisma.stashImage.findFirst).mockResolvedValue(
+        partialRow(mockImage)
+      );
+      vi.mocked(prisma.download.create).mockResolvedValue(
+        downloadRow({
+          id: 2,
+          userId: 1,
+          type: "IMAGE",
+          status: "COMPLETED",
+          entityType: "image",
+          entityId: "image-123",
+          fileName: "Test Image.jpg",
+          fileSize: BigInt(500000),
+          progress: 100,
+          createdAt: new Date(),
+          completedAt: new Date(),
+          playlistId: null,
+          filePath: null,
+          error: null,
+          expiresAt: null,
+        })
+      );
 
-      const result = await service.createImageDownload(1, "image-123");
+      const result = await service.createImageDownload(
+        1,
+        "image-123",
+        "inst-a"
+      );
 
       expect(result.type).toBe("IMAGE");
       expect(result.status).toBe("COMPLETED");
       expect(result.fileName).toBe("Test Image.jpg");
+      expect(prisma.stashImage.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: {
+            id: "image-123",
+            stashInstanceId: "inst-a",
+            deletedAt: null,
+          },
+        })
+      );
+      expect(
+        must(vi.mocked(prisma.download.create).mock.calls[0])[0].data.instanceId
+      ).toBe("inst-a");
     });
 
     it("should throw if image not found", async () => {
       vi.mocked(prisma.stashImage.findFirst).mockResolvedValue(null);
 
-      await expect(service.createImageDownload(1, "unknown")).rejects.toThrow(
-        "Image not found"
-      );
+      await expect(
+        service.createImageDownload(1, "unknown", "inst-a")
+      ).rejects.toThrow("Image not found");
     });
   });
 
   describe("createPlaylistDownload", () => {
     it("should create a PENDING download for a playlist", async () => {
-      const mockPlaylist = {
+      const mockPlaylist = partialRow<PlaylistWithItems>({
         id: 1,
         name: "My Playlist",
-        items: [{ sceneId: "s1" }, { sceneId: "s2" }],
-      };
+        items: [partialRow({ sceneId: "s1" }), partialRow({ sceneId: "s2" })],
+      });
 
-      vi.mocked(prisma.playlist.findUnique).mockResolvedValue(mockPlaylist as any);
-      vi.mocked(prisma.download.create).mockResolvedValue({
-        id: 3,
-        userId: 1,
-        type: "PLAYLIST",
-        status: "PENDING",
-        playlistId: 1,
-        entityType: null,
-        entityId: null,
-        fileName: "My Playlist.zip",
-        fileSize: null,
-        progress: 0,
-        createdAt: new Date(),
-        completedAt: null,
-        filePath: null,
-        error: null,
-        expiresAt: null,
-      } as any);
+      vi.mocked(prisma.playlist.findUnique).mockResolvedValue(mockPlaylist);
+      vi.mocked(prisma.download.create).mockResolvedValue(
+        downloadRow({
+          id: 3,
+          userId: 1,
+          type: "PLAYLIST",
+          status: "PENDING",
+          playlistId: 1,
+          entityType: null,
+          entityId: null,
+          fileName: "My Playlist.zip",
+          fileSize: null,
+          progress: 0,
+          createdAt: new Date(),
+          completedAt: null,
+          filePath: null,
+          error: null,
+          expiresAt: null,
+        })
+      );
 
       const result = await service.createPlaylistDownload(1, 1);
 
@@ -164,83 +195,162 @@ describe("DownloadService", () => {
     });
   });
 
-  describe("calculatePlaylistSize", () => {
-    it("should sum file sizes of all playlist items", async () => {
-      const mockPlaylist = {
-        id: 1,
-        items: [
-          { sceneId: "s1" },
-          { sceneId: "s2" },
-        ],
-      };
+  describe("the file name a download is created with", () => {
+    function createdFileName(): string {
+      return must(vi.mocked(prisma, true).download.create.mock.calls[0])[0].data
+        .fileName;
+    }
 
-      vi.mocked(prisma.playlist.findUnique).mockResolvedValue(mockPlaylist as any);
-      vi.mocked(prisma.stashScene.findMany).mockResolvedValue([
-        { fileSize: BigInt(1000000) },
-        { fileSize: BigInt(2000000) },
-      ] as any);
+    beforeEach(() => {
+      vi.mocked(prisma.download.create).mockResolvedValue(downloadRow());
+    });
 
-      const size = await service.calculatePlaylistSize(1);
+    it("a scene is named by its title made safe", async () => {
+      vi.mocked(prisma.stashScene.findFirst).mockResolvedValue(
+        partialRow({ id: "s1", title: 'Who? What: "This"/That.\n' })
+      );
 
-      expect(size).toBe(BigInt(3000000));
-      expect(prisma.stashScene.findMany).toHaveBeenCalledWith({
-        where: { id: { in: ["s1", "s2"] } },
-        select: { fileSize: true },
+      await service.createSceneDownload(1, "s1", "inst-a");
+
+      expect(createdFileName()).toBe("Who_ What_ _This__That.mp4");
+    });
+
+    it("a scene without a title is named by its file, then by its id", async () => {
+      vi.mocked(prisma.stashScene.findFirst)
+        .mockResolvedValueOnce(
+          partialRow({ id: "s1", title: "", filePath: "/media/My Clip.v2.mkv" })
+        )
+        .mockResolvedValueOnce(
+          partialRow({ id: "s2", title: null, filePath: null })
+        );
+
+      await service.createSceneDownload(1, "s1", "inst-a");
+      await service.createSceneDownload(1, "s2", "inst-a");
+
+      expect(
+        vi
+          .mocked(prisma.download.create)
+          .mock.calls.map(([args]) => args.data.fileName)
+      ).toEqual(["My Clip.v2.mkv", "s2.mp4"]);
+    });
+
+    it("a scene is named with its file's extension", async () => {
+      vi.mocked(prisma.stashScene.findFirst).mockResolvedValue(
+        partialRow({ id: "s1", title: "My Scene", filePath: "/v/Scene.wmv" })
+      );
+
+      await service.createSceneDownload(1, "s1", "inst-a");
+
+      expect(createdFileName()).toBe("My Scene.wmv");
+    });
+
+    it("an image is named with its file's extension, .jpg without a path", async () => {
+      vi.mocked(prisma.stashImage.findFirst)
+        .mockResolvedValueOnce(
+          partialRow({ id: "i1", title: "Pic", filePath: "/i/a.png" })
+        )
+        .mockResolvedValueOnce(
+          partialRow({ id: "i2", title: "Pic2", filePath: null })
+        );
+
+      await service.createImageDownload(1, "i1", "inst-a");
+      await service.createImageDownload(1, "i2", "inst-a");
+
+      expect(
+        vi
+          .mocked(prisma.download.create)
+          .mock.calls.map(([args]) => args.data.fileName)
+      ).toEqual(["Pic.png", "Pic2.jpg"]);
+      const query = must(
+        vi.mocked(prisma, true).stashImage.findFirst.mock.calls[0]
+      )[0];
+      expect(query?.select?.filePath).toBe(true);
+    });
+
+    it("an image titled with a Windows device name is not that device", async () => {
+      vi.mocked(prisma.stashImage.findFirst).mockResolvedValue(
+        partialRow({ id: "i1", title: "NUL" })
+      );
+
+      await service.createImageDownload(1, "i1", "inst-a");
+
+      expect(createdFileName()).toBe("_NUL.jpg");
+    });
+
+    it("a playlist named '..' downloads as download.zip", async () => {
+      vi.mocked(prisma.playlist.findUnique).mockResolvedValue(
+        partialRow<PlaylistWithItems>({ id: 1, name: "..", items: [] })
+      );
+
+      await service.createPlaylistDownload(1, 1);
+
+      expect(createdFileName()).toBe("download.zip");
+    });
+  });
+
+  describe("the active zips of a user", () => {
+    it("finds this user's PENDING or PROCESSING zip of a playlist", async () => {
+      const active = downloadRow({
+        id: 4,
+        type: "PLAYLIST",
+        status: "PENDING",
+      });
+      vi.mocked(prisma.download.findFirst).mockResolvedValue(active);
+
+      expect(await service.findActivePlaylistDownload(7, 5)).toBe(active);
+      expect(prisma.download.findFirst).toHaveBeenCalledWith({
+        where: {
+          userId: 7,
+          type: "PLAYLIST",
+          playlistId: 5,
+          status: { in: ["PENDING", "PROCESSING"] },
+        },
+        orderBy: { createdAt: "asc" },
       });
     });
 
-    it("should return 0 for playlist not found", async () => {
-      vi.mocked(prisma.playlist.findUnique).mockResolvedValue(null);
+    it("counts this user's PENDING and PROCESSING zips", async () => {
+      vi.mocked(prisma.download.count).mockResolvedValue(2);
 
-      const size = await service.calculatePlaylistSize(999);
+      expect(await service.countActivePlaylistDownloads(7)).toBe(2);
+      expect(prisma.download.count).toHaveBeenCalledWith({
+        where: {
+          userId: 7,
+          type: "PLAYLIST",
+          status: { in: ["PENDING", "PROCESSING"] },
+        },
+      });
+    });
+  });
 
-      expect(size).toBe(BigInt(0));
+  describe("requeueFailedDownload", () => {
+    it("sets a FAILED row back to PENDING in one conditional update", async () => {
+      vi.mocked(prisma.download.updateMany).mockResolvedValue({ count: 1 });
+
+      expect(await service.requeueFailedDownload(4)).toBe(true);
+      expect(prisma.download.updateMany).toHaveBeenCalledWith({
+        where: { id: 4, status: "FAILED" },
+        data: { status: "PENDING", progress: 0, error: null, skippedItems: 0 },
+      });
     });
 
-    it("should return 0 for empty playlist", async () => {
-      const mockPlaylist = {
-        id: 1,
-        items: [],
-      };
+    it("reports false when the row is no longer FAILED", async () => {
+      vi.mocked(prisma.download.updateMany).mockResolvedValue({ count: 0 });
 
-      vi.mocked(prisma.playlist.findUnique).mockResolvedValue(mockPlaylist as any);
-
-      const size = await service.calculatePlaylistSize(1);
-
-      expect(size).toBe(BigInt(0));
-    });
-
-    it("should handle items with null fileSize", async () => {
-      const mockPlaylist = {
-        id: 1,
-        items: [
-          { sceneId: "s1" },
-          { sceneId: "s2" },
-        ],
-      };
-
-      vi.mocked(prisma.playlist.findUnique).mockResolvedValue(mockPlaylist as any);
-      vi.mocked(prisma.stashScene.findMany).mockResolvedValue([
-        { fileSize: BigInt(1000000) },
-        { fileSize: null },
-      ] as any);
-
-      const size = await service.calculatePlaylistSize(1);
-
-      expect(size).toBe(BigInt(1000000));
+      expect(await service.requeueFailedDownload(4)).toBe(false);
     });
   });
 
   describe("getDownload", () => {
     it("should return download by id", async () => {
-      const mockDownload = {
+      const mockDownload = downloadRow({
         id: 1,
         userId: 1,
         type: "SCENE",
         status: "COMPLETED",
-      };
+      });
 
-      vi.mocked(prisma.download.findUnique).mockResolvedValue(mockDownload as any);
+      vi.mocked(prisma.download.findUnique).mockResolvedValue(mockDownload);
 
       const result = await service.getDownload(1);
 
@@ -254,11 +364,11 @@ describe("DownloadService", () => {
   describe("getUserDownloads", () => {
     it("should return downloads for user sorted by createdAt desc", async () => {
       const mockDownloads = [
-        { id: 2, createdAt: new Date("2024-01-02") },
-        { id: 1, createdAt: new Date("2024-01-01") },
+        downloadRow({ id: 2, createdAt: new Date("2024-01-02") }),
+        downloadRow({ id: 1, createdAt: new Date("2024-01-01") }),
       ];
 
-      vi.mocked(prisma.download.findMany).mockResolvedValue(mockDownloads as any);
+      vi.mocked(prisma.download.findMany).mockResolvedValue(mockDownloads);
 
       const result = await service.getUserDownloads(1);
 
@@ -285,21 +395,21 @@ describe("DownloadService", () => {
 
   describe("updateProgress", () => {
     it("should update download progress", async () => {
-      const mockDownload = {
-        id: 1,
-        progress: 50,
-        status: "PROCESSING",
-      };
-
-      vi.mocked(prisma.download.update).mockResolvedValue(mockDownload as any);
+      vi.mocked(prisma.download.updateMany).mockResolvedValue({ count: 1 });
 
       const result = await service.updateProgress(1, 50);
 
-      expect(prisma.download.update).toHaveBeenCalledWith({
+      expect(prisma.download.updateMany).toHaveBeenCalledWith({
         where: { id: 1 },
         data: { progress: 50, status: "PROCESSING" },
       });
-      expect(result.progress).toBe(50);
+      expect(result).toBe(true);
+    });
+
+    it("reports false for a deleted row", async () => {
+      vi.mocked(prisma.download.updateMany).mockResolvedValue({ count: 0 });
+
+      expect(await service.updateProgress(1, 50)).toBe(false);
     });
   });
 
@@ -310,58 +420,69 @@ describe("DownloadService", () => {
       vi.setSystemTime(now);
 
       const expectedExpiry = new Date(now.getTime() + 24 * 60 * 60 * 1000);
-      const mockDownload = {
-        id: 1,
+      vi.mocked(prisma.download.updateMany).mockResolvedValue({ count: 1 });
+
+      const result = await service.markCompleted(
+        1,
+        "/tmp/download.zip",
+        BigInt(5000000),
+        2
+      );
+
+      expect(result).toBe(true);
+      const update = must(
+        vi.mocked(prisma, true).download.updateMany.mock.calls[0],
+        "the download update"
+      )[0];
+      expect(update.where).toEqual({ id: 1 });
+      expect(update.data).toEqual({
         status: "COMPLETED",
         progress: 100,
         filePath: "/tmp/download.zip",
         fileSize: BigInt(5000000),
+        skippedItems: 2,
         completedAt: now,
         expiresAt: expectedExpiry,
-      };
-
-      vi.mocked(prisma.download.update).mockResolvedValue(mockDownload as any);
-
-      const result = await service.markCompleted(1, "/tmp/download.zip", BigInt(5000000));
-
-      expect(result.status).toBe("COMPLETED");
-      expect(result.progress).toBe(100);
-      expect(result.filePath).toBe("/tmp/download.zip");
+      });
 
       vi.useRealTimers();
+    });
+
+    it("reports false for a deleted row", async () => {
+      vi.mocked(prisma.download.updateMany).mockResolvedValue({ count: 0 });
+
+      expect(await service.markCompleted(1, "/tmp/download.zip", 5n, 0)).toBe(
+        false
+      );
     });
   });
 
   describe("markFailed", () => {
     it("should mark download as failed with error message", async () => {
-      const mockDownload = {
-        id: 1,
-        status: "FAILED",
-        error: "Something went wrong",
-      };
-
-      vi.mocked(prisma.download.update).mockResolvedValue(mockDownload as any);
+      vi.mocked(prisma.download.updateMany).mockResolvedValue({ count: 1 });
 
       const result = await service.markFailed(1, "Something went wrong");
 
-      expect(prisma.download.update).toHaveBeenCalledWith({
+      expect(prisma.download.updateMany).toHaveBeenCalledWith({
         where: { id: 1 },
         data: { status: "FAILED", error: "Something went wrong" },
       });
-      expect(result.status).toBe("FAILED");
-      expect(result.error).toBe("Something went wrong");
+      expect(result).toBe(true);
+    });
+
+    it("reports false for a deleted row", async () => {
+      vi.mocked(prisma.download.updateMany).mockResolvedValue({ count: 0 });
+
+      expect(await service.markFailed(1, "Something went wrong")).toBe(false);
     });
   });
 
   describe("deleteDownload", () => {
     it("should delete download if user owns it", async () => {
-      const mockDownload = {
-        id: 1,
-        userId: 1,
-      };
+      const mockDownload = downloadRow({ id: 1, userId: 1 });
 
-      vi.mocked(prisma.download.findUnique).mockResolvedValue(mockDownload as any);
-      vi.mocked(prisma.download.delete).mockResolvedValue(mockDownload as any);
+      vi.mocked(prisma.download.findUnique).mockResolvedValue(mockDownload);
+      vi.mocked(prisma.download.delete).mockResolvedValue(mockDownload);
 
       await service.deleteDownload(1, 1);
 
@@ -370,46 +491,137 @@ describe("DownloadService", () => {
       });
     });
 
+    describe("the zip file", () => {
+      const previousConfigDir = process.env.CONFIG_DIR;
+      let configDir: string;
+
+      beforeEach(() => {
+        configDir = fs.mkdtempSync(path.join(os.tmpdir(), "peek-dl-del-"));
+        process.env.CONFIG_DIR = configDir;
+      });
+
+      afterEach(() => {
+        if (previousConfigDir === undefined) delete process.env.CONFIG_DIR;
+        else process.env.CONFIG_DIR = previousConfigDir;
+        fs.rmSync(configDir, { recursive: true, force: true });
+      });
+
+      function writeZip(userId: number, downloadId: number): string {
+        const file = zipPath(userId, downloadId);
+        fs.mkdirSync(userDownloadsDir(userId), { recursive: true });
+        fs.writeFileSync(file, "zip bytes");
+        return file;
+      }
+
+      it("deleting a completed zip removes its file", async () => {
+        const file = writeZip(1, 7);
+        const row = downloadRow({
+          id: 7,
+          userId: 1,
+          type: "PLAYLIST",
+          status: "COMPLETED",
+          filePath: file,
+        });
+        vi.mocked(prisma.download.findUnique).mockResolvedValue(row);
+        vi.mocked(prisma.download.delete).mockResolvedValue(row);
+
+        await service.deleteDownload(7, 1);
+
+        expect(fs.existsSync(file)).toBe(false);
+      });
+
+      it("deleting a zip still being built removes its partial file", async () => {
+        const file = writeZip(1, 8);
+        const row = downloadRow({
+          id: 8,
+          userId: 1,
+          type: "PLAYLIST",
+          status: "PROCESSING",
+          filePath: null,
+        });
+        vi.mocked(prisma.download.findUnique).mockResolvedValue(row);
+        vi.mocked(prisma.download.delete).mockResolvedValue(row);
+
+        await service.deleteDownload(8, 1);
+
+        expect(fs.existsSync(file)).toBe(false);
+      });
+
+      it("a missing file is not an error", async () => {
+        const row = downloadRow({
+          id: 9,
+          userId: 1,
+          type: "PLAYLIST",
+          status: "COMPLETED",
+          filePath: zipPath(1, 9),
+        });
+        vi.mocked(prisma.download.findUnique).mockResolvedValue(row);
+        vi.mocked(prisma.download.delete).mockResolvedValue(row);
+
+        await expect(service.deleteDownload(9, 1)).resolves.toBeUndefined();
+      });
+
+      it("a scene download has no file to remove", async () => {
+        const other = writeZip(1, 10);
+        const row = downloadRow({
+          id: 11,
+          userId: 1,
+          type: "SCENE",
+          status: "COMPLETED",
+        });
+        vi.mocked(prisma.download.findUnique).mockResolvedValue(row);
+        vi.mocked(prisma.download.delete).mockResolvedValue(row);
+
+        await service.deleteDownload(11, 1);
+
+        expect(fs.existsSync(other)).toBe(true);
+      });
+    });
+
     it("should throw if download not found", async () => {
       vi.mocked(prisma.download.findUnique).mockResolvedValue(null);
 
-      await expect(service.deleteDownload(999, 1)).rejects.toThrow(
-        "Download not found"
-      );
+      await expect(service.deleteDownload(999, 1)).rejects.toMatchObject({
+        statusCode: 404,
+        message: "Download not found",
+      });
     });
 
     it("should throw if user does not own the download", async () => {
-      const mockDownload = {
+      const mockDownload = downloadRow({
         id: 1,
         userId: 2, // Different user
-      };
+      });
 
-      vi.mocked(prisma.download.findUnique).mockResolvedValue(mockDownload as any);
+      vi.mocked(prisma.download.findUnique).mockResolvedValue(mockDownload);
 
-      await expect(service.deleteDownload(1, 1)).rejects.toThrow(
-        "Not authorized to delete this download"
-      );
+      await expect(service.deleteDownload(1, 1)).rejects.toMatchObject({
+        statusCode: 403,
+        message: "Access denied",
+      });
     });
   });
 
-  describe("sanitizeFileName", () => {
-    it("should remove invalid characters from filename", () => {
-      // Access private method via any cast for testing
-      const result = (service as any).sanitizeFileName("Test/File:Name*.mp4");
+  describe("getOwnedDownload", () => {
+    it("returns the row of its owner", async () => {
+      const row = downloadRow({ id: 1, userId: 1 });
+      vi.mocked(prisma.download.findUnique).mockResolvedValue(row);
 
-      expect(result).toBe("Test_File_Name_.mp4");
+      expect(await service.getOwnedDownload(1, 1)).toEqual(row);
     });
 
-    it("should handle empty string", () => {
-      const result = (service as any).sanitizeFileName("");
+    it("throws 404 for a missing row and 403 for another user's", async () => {
+      vi.mocked(prisma.download.findUnique).mockResolvedValue(null);
+      await expect(service.getOwnedDownload(9, 1)).rejects.toMatchObject({
+        statusCode: 404,
+      });
 
-      expect(result).toBe("download");
-    });
-
-    it("should trim whitespace", () => {
-      const result = (service as any).sanitizeFileName("  Test File  ");
-
-      expect(result).toBe("Test File");
+      vi.mocked(prisma.download.findUnique).mockResolvedValue(
+        downloadRow({ id: 1, userId: 2 })
+      );
+      await expect(service.getOwnedDownload(1, 1)).rejects.toMatchObject({
+        statusCode: 403,
+      });
     });
   });
 });

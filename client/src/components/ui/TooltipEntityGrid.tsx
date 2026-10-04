@@ -18,6 +18,11 @@ interface Props {
   entities: EntityItem[] | null | undefined;
   title: string;
   parentInstanceId?: string;
+  /**
+   * How many there are: the list endpoints send at most 12, so a larger
+   * total adds "and K more" under the grid
+   */
+  total?: number;
 }
 
 /**
@@ -29,8 +34,15 @@ interface Props {
  * @param {Array} entities - Array of entities to display
  * @param {string} title - Grid title (e.g., "Performers", "Tags")
  * @param {string} parentInstanceId - Instance ID from parent entity (fallback when entities don't have their own)
+ * @param {number} total - How many there are, when the list holds only some
  */
-export const TooltipEntityGrid = ({ entityType, entities, title, parentInstanceId }: Props) => {
+export const TooltipEntityGrid = ({
+  entityType,
+  entities,
+  title,
+  parentInstanceId,
+  total,
+}: Props) => {
   const { hasMultipleInstances } = useConfig();
 
   if (!entities || entities.length === 0) return null;
@@ -61,7 +73,11 @@ export const TooltipEntityGrid = ({ entityType, entities, title, parentInstanceI
     const entityWithInstance = entity.instanceId
       ? entity
       : { ...entity, instanceId: parentInstanceId };
-    return getEntityPath(entityType, entityWithInstance as Parameters<typeof getEntityPath>[1], hasMultipleInstances);
+    return getEntityPath(
+      entityType,
+      entityWithInstance as Parameters<typeof getEntityPath>[1],
+      hasMultipleInstances
+    );
   };
 
   // Get image path for entity
@@ -175,6 +191,16 @@ export const TooltipEntityGrid = ({ entityType, entities, title, parentInstanceI
           </Link>
         ))}
       </div>
+
+      {/* The rest of the total, which the list leaves out */}
+      {total !== undefined && total > entities.length && (
+        <div
+          className="mt-1.5 text-[10px]"
+          style={{ color: "var(--text-muted)" }}
+        >
+          and {total - entities.length} more
+        </div>
+      )}
     </div>
   );
 };

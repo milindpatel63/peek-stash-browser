@@ -1,14 +1,20 @@
-import { useCallback, useEffect, useRef } from "react";
-import airplay from "@silvermine/videojs-airplay";
-import "@silvermine/videojs-airplay/dist/silvermine-videojs-airplay.css";
-import chromecast from "@silvermine/videojs-chromecast";
-import "@silvermine/videojs-chromecast/dist/silvermine-videojs-chromecast.css";
+import { useEffect, useRef } from "react";
 import "videojs-seek-buttons";
 import "videojs-seek-buttons/dist/videojs-seek-buttons.css";
 import videojs from "video.js";
-import { apiPost } from "../../api";
+import { apiFetch, apiPost, redirectToLogin } from "../../api";
+import { usePlayerHotkeys } from "../../hooks/useMediaKeys";
+import { canDecode } from "../../utils/browserPlayback";
+import { newClientToken } from "../../utils/clientToken";
+import { makeCompositeKey } from "../../utils/compositeKey";
 import { getSceneTitle } from "../../utils/format";
-import { setupSubtitles, togglePlaybackRateControl } from "./videoPlayerUtils";
+import { mayTakeFocus } from "../../utils/pageFocus";
+import { buildPlayerSources } from "./playerSources";
+import {
+  SESSION_EXPIRED_PLAYBACK_MESSAGE,
+  isSessionExpired,
+} from "./sessionCheck";
+import { setupSubtitles } from "./videoPlayerUtils";
 import "./vtt-thumbnails.js";
 import "./plugins/big-buttons.js";
 import "./plugins/markers.js";
@@ -17,33 +23,7 @@ import "./plugins/persist-volume.js";
 import "./plugins/skip-buttons.js";
 import "./plugins/source-selector.js";
 import "./plugins/track-activity.js";
-import "./plugins/vrmode.js";
 import "./plugins/media-session.js";
-
-// Register Video.js plugins
-airplay(videojs);
-chromecast(videojs);
-
-/**
- * Build video stream URL with optional instanceId for multi-instance support
- * @param {string} sceneId - Scene ID
- * @param {string} path - Stream path (e.g., "stream", "stream.m3u8", "proxy-stream/stream.m3u8")
- * @param {string|null} instanceId - Optional instance ID for disambiguation
- * @param {Object} params - Additional query parameters
- * @returns {string} Full URL with instanceId if provided
- */
-function buildStreamUrl(sceneId: string, path: string, instanceId: string | null | undefined, params: Record<string, string | undefined | null> = {}) {
-  const url = new URL(`/api/scene/${sceneId}/${path}`, window.location.origin);
-  if (instanceId) {
-    url.searchParams.set('instanceId', instanceId);
-  }
-  Object.entries(params).forEach(([key, value]) => {
-    if (value !== undefined && value !== null) {
-      url.searchParams.set(key, value);
-    }
-  });
-  return url.pathname + url.search;
-}
 
 /**
  * Retry a function with exponential backoff
@@ -52,7 +32,11 @@ function buildStreamUrl(sceneId: string, path: string, instanceId: string | null
  * @param {number} baseDelay - Base delay in ms (default: 1000)
  * @returns {Promise} Result of the function or throws after all retries
  */
-async function retryWithBackoff(fn: () => Promise<any>, maxAttempts = 3, baseDelay = 1000) {
+async function retryWithBackoff(
+  fn: () => Promise<any>,
+  maxAttempts = 3,
+  baseDelay = 1000
+) {
   let lastError: unknown;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
@@ -61,8 +45,11 @@ async function retryWithBackoff(fn: () => Promise<any>, maxAttempts = 3, baseDel
       lastError = error;
       if (attempt < maxAttempts) {
         const delay = baseDelay * Math.pow(2, attempt - 1);
-        console.warn(`[RETRY] Attempt ${attempt} failed, retrying in ${delay}ms...`, (error as Error).message);
-        await new Promise(resolve => setTimeout(resolve, delay));
+        console.warn(
+          `[RETRY] Attempt ${attempt} failed, retrying in ${delay}ms...`,
+          (error as Error).message
+        );
+        await new Promise((resolve) => setTimeout(resolve, delay));
       }
     }
   }
@@ -70,46 +57,15 @@ async function retryWithBackoff(fn: () => Promise<any>, maxAttempts = 3, baseDel
 }
 
 /**
- * Quality presets in descending order of resolution
- * Must match the presets defined in TranscodingManager.ts
+ * Focus the player, so its keys work, unless the user has moved focus to
+ * another control since the page or scene change began, `start` being what
+ * had focus then (see `mayTakeFocus`)
  */
-const QUALITY_PRESETS = [
-  { height: 2160, quality: "2160p" },
-  { height: 1080, quality: "1080p" },
-  { height: 720, quality: "720p" },
-  { height: 480, quality: "480p" },
-  { height: 360, quality: "360p" },
-];
-
-/**
- * Get the best transcode quality for a given source resolution
- * Returns the highest quality preset that is <= source height
- *
- * @param {number} sourceHeight - Height of the source video
- * @returns {string} Quality string (e.g., "1080p", "720p")
- */
-function getBestTranscodeQuality(sourceHeight: number): string {
-  // Find highest preset <= source resolution
-  for (const preset of QUALITY_PRESETS) {
-    if (preset.height <= sourceHeight) {
-      return preset.quality;
-    }
-  }
-  // Fallback to lowest quality if source is very small
-  return "360p";
-}
-
-/**
- * Get available quality options for a given source resolution
- * Only includes presets that are <= source height (no upscaling)
- * Always includes "direct" option
- *
- * @param {number} sourceHeight - Height of the source video
- * @returns {Array<{quality: string, height: number}>} Available quality options
- */
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-function getAvailableQualities(sourceHeight: number) {
-  return QUALITY_PRESETS.filter(preset => preset.height <= sourceHeight);
+function focusPlayer(
+  player: { el(): Element; focus(): void },
+  start: Element | null
+) {
+  if (mayTakeFocus(player.el(), start)) player.focus();
 }
 
 /**
@@ -125,47 +81,81 @@ export function useVideoPlayer({
   videoRef,
   playerRef,
   scene,
-  quality,
-  isAutoFallback, // eslint-disable-line @typescript-eslint/no-unused-vars
   ready,
   shouldAutoplay,
   playlist,
   currentIndex,
+  autoplayNext,
+  repeat,
+  restartCount,
   dispatch,
   nextScene,
   prevScene,
-  updateQuality,
+  registerPlayer,
   location,
   hasResumedRef,
   initialResumeTimeRef,
   watchHistory,
   loadingWatchHistory,
-  enableCast = true,
   minimumPlayPercent = 20,
 }: {
   videoRef: React.RefObject<HTMLDivElement | null>;
-  playerRef: React.MutableRefObject<any>;
+  playerRef: React.RefObject<any>;
   scene: any;
-  quality: string;
-  isAutoFallback: boolean;
   ready: boolean;
   shouldAutoplay: boolean;
   playlist: any;
   currentIndex: number;
+  /** The player's controls (the context's), never the queue's */
+  autoplayNext: boolean;
+  repeat: string;
+  /** Bumped by a queue step to an entry of the scene already loaded */
+  restartCount: number;
   dispatch: (action: any) => void;
+  /** The queue's steps (`useQueueNavigation`), which know what is playing */
   nextScene: () => void;
   prevScene: () => void;
-  updateQuality: (quality: string) => void;
+  /** Tells the player context which player this is (null: it is gone) */
+  registerPlayer: (player: { paused(): boolean } | null) => void;
   location: any;
-  hasResumedRef: React.MutableRefObject<boolean>;
-  initialResumeTimeRef: React.MutableRefObject<number | null>;
+  hasResumedRef: React.RefObject<boolean>;
+  initialResumeTimeRef: React.RefObject<number | null>;
   watchHistory: any;
   loadingWatchHistory: boolean;
-  enableCast?: boolean;
   minimumPlayPercent?: number;
 }) {
+  // The scene's id with its instance: two servers reuse small ids, so
+  // A:123 and B:123 are different scenes and moving between them is a
+  // scene change for every effect below
+  const { id: sceneId, instanceId: sceneInstanceId } = (scene ?? {}) as {
+    id?: string;
+    instanceId?: string;
+  };
+  const sceneKey = sceneId
+    ? makeCompositeKey(sceneId, sceneInstanceId)
+    : undefined;
+
   // Track previous scene for detecting changes
-  const prevSceneIdRef = useRef(null);
+  const prevSceneKeyRef = useRef<string | null>(null);
+
+  // Keys video.js's controls stop go to the shortcut dispatcher (stable)
+  const hotkeys = usePlayerHotkeys();
+
+  // What had focus when the page opened or the route last changed (a scene
+  // change begins with its URL, before the scene lands): the player may take
+  // focus from it, the control that started the change. Recorded before the
+  // effects below run, by declaration order. The route, not the history
+  // key: the queue's controls rewrite the entry at the same URL, and a
+  // control the user toggles while a scene loads starts no change.
+  const focusAtStartRef = useRef<Element | null>(null);
+  const { pathname, search } = location as {
+    pathname?: string;
+    search?: string;
+  };
+  const route = `${pathname ?? ""}${search ?? ""}`;
+  useEffect(() => {
+    focusAtStartRef.current = document.activeElement;
+  }, [route]);
 
   // ============================================================================
   // PLAYER INITIALIZATION (from useVideoPlayerLifecycle)
@@ -204,7 +194,8 @@ export function useVideoPlayer({
       playsinline: true,
       playbackRates: [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2],
       inactivityTimeout: 2000,
-      techOrder: enableCast ? ["chromecast", "html5"] : ["html5"],
+      userActions: { hotkeys },
+      techOrder: ["html5"],
       html5: {
         vhs: {
           overrideNative: !videojs.browser.IS_SAFARI,
@@ -218,15 +209,22 @@ export function useVideoPlayer({
         nativeVideoTracks: false,
       },
       plugins: {
-        ...(enableCast && { airPlay: {} }),
-        ...(enableCast && { chromecast: {} }),
         vttThumbnails: {
           showTimestamp: true,
           spriteUrl: scene?.paths?.sprite || null,
         },
         markers: {},
         pauseOnScrub: {},
-        sourceSelector: {},
+        // The one fallback path: a source that fails moves to the next.
+        // A <video> element cannot see its source's HTTP status, so the
+        // server is asked first: a lost session goes to login instead.
+        sourceSelector: {
+          beforeFallback: async () => {
+            if (!(await isSessionExpired())) return false;
+            redirectToLogin(SESSION_EXPIRED_PLAYBACK_MESSAGE);
+            return true;
+          },
+        },
         persistVolume: {},
         bigButtons: {},
         seekButtons: {
@@ -236,12 +234,15 @@ export function useVideoPlayer({
         skipButtons: {},
         trackActivity: {},
         mediaSession: {},
-        vrMenu: {},
       },
     });
 
     playerRef.current = player;
-    player.focus();
+    registerPlayer(player as { paused(): boolean });
+    focusPlayer(
+      player as { el(): Element; focus(): void },
+      focusAtStartRef.current
+    );
 
     // Volume persistence is now handled by persistVolume plugin
     // Watch history tracking is now handled by the trackActivity plugin
@@ -249,6 +250,7 @@ export function useVideoPlayer({
     // Cleanup
     return () => {
       playerRef.current = null;
+      registerPlayer(null);
 
       try {
         player.dispose();
@@ -268,15 +270,25 @@ export function useVideoPlayer({
   // VTT THUMBNAILS UPDATE (from useVideoPlayerLifecycle)
   // ============================================================================
 
+  const vttUrl = scene?.paths?.vtt as string | undefined;
+  const spriteUrl = scene?.paths?.sprite as string | undefined;
+
   useEffect(() => {
     const player = playerRef.current;
-    if (!player || !scene?.paths?.vtt || !scene?.paths?.sprite) return;
+    if (!player) return;
 
-    const vttPlugin = player.vttThumbnails?.();
-    if (vttPlugin) {
-      vttPlugin.src(scene.paths.vtt, scene.paths.sprite);
+    const vttPlugin = player.vttThumbnails?.() as
+      | { src(vtt: string, sprite: string): void; detach(): void }
+      | undefined;
+    if (!vttPlugin) return;
+
+    // A scene with no sprite shows no previews, not the last scene's
+    if (!vttUrl || !spriteUrl) {
+      vttPlugin.detach();
+      return;
     }
-  }, [scene?.paths?.vtt, scene?.paths?.sprite, playerRef]);
+    vttPlugin.src(vttUrl, spriteUrl);
+  }, [vttUrl, spriteUrl, playerRef]);
 
   // ============================================================================
   // MEDIA SESSION METADATA (OS media controls - title, artist, poster)
@@ -290,7 +302,8 @@ export function useVideoPlayer({
     if (!mediaSessionPlugin) return;
 
     // Build performer string from scene performers
-    const performers = scene.performers?.map((p: any) => p.name).join(", ") || "";
+    const performers =
+      scene.performers?.map((p: any) => p.name).join(", ") || "";
 
     // Set metadata for OS media controls
     mediaSessionPlugin.setMetadata(
@@ -299,7 +312,13 @@ export function useVideoPlayer({
       scene.paths?.screenshot || ""
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps -- deps list all accessed scene properties individually; adding `scene` object would cause re-runs on every render
-  }, [scene?.id, scene?.title, scene?.performers, scene?.paths?.screenshot, playerRef]);
+  }, [
+    sceneKey,
+    scene?.title,
+    scene?.performers,
+    scene?.paths?.screenshot,
+    playerRef,
+  ]);
 
   // ============================================================================
   // TRACK ACTIVITY PLUGIN (Stash pattern - integrates with watch history)
@@ -307,41 +326,72 @@ export function useVideoPlayer({
 
   useEffect(() => {
     const player = playerRef.current;
-    if (!player || !scene?.id) return;
+    if (!player || !sceneId) return;
 
     const trackActivityPlugin = player.trackActivity();
     if (!trackActivityPlugin) return;
-
-    const sceneId = scene.id;
 
     // Enable tracking
     trackActivityPlugin.setEnabled(true);
     trackActivityPlugin.minimumPlayPercent = minimumPlayPercent;
 
+    // One token per viewing of this scene, the same on every retry of its
+    // play-count request: the server counts a token once, so a retry after
+    // a lost answer cannot count the play twice
+    const playToken = newClientToken();
+
     // Connect plugin callbacks to API endpoints
-    // saveActivity is called periodically (every 10s) during playback
-    trackActivityPlugin.saveActivity = async (resumeTime: number, playDuration: number) => {
+    // saveActivity is called periodically (every 10s) during playback, when
+    // the scene changes, and when the tab is hidden or the page closes. The
+    // last two send with `keepalive`, so the request outlives the page, and
+    // once: a retry timer would not.
+    trackActivityPlugin.saveActivity = async (
+      resumeTime: number,
+      playDuration: number,
+      options?: { keepalive?: boolean }
+    ) => {
+      const body = {
+        sceneId,
+        instanceId: sceneInstanceId,
+        resumeTime,
+        playDuration,
+      };
       try {
-        await retryWithBackoff(() =>
-          apiPost("/watch-history/save-activity", {
-            sceneId,
-            resumeTime,
-            playDuration,
-          })
-        );
+        if (options?.keepalive) {
+          await apiFetch("/watch-history/save-activity", {
+            method: "POST",
+            body: JSON.stringify(body),
+            keepalive: true,
+          });
+        } else {
+          await retryWithBackoff(() =>
+            apiPost("/watch-history/save-activity", body)
+          );
+        }
       } catch (error) {
-        console.error("Failed to save activity after 3 attempts:", error);
+        console.error("Failed to save activity:", error);
       }
     };
 
     // incrementPlayCount is called once per session when threshold is reached
-    trackActivityPlugin.incrementPlayCount = async () => {
+    trackActivityPlugin.incrementPlayCount = async (options?: {
+      keepalive?: boolean;
+    }) => {
+      const body = { sceneId, instanceId: sceneInstanceId, playToken };
       try {
-        await retryWithBackoff(() =>
-          apiPost("/watch-history/increment-play-count", { sceneId })
-        );
+        if (options?.keepalive) {
+          await apiFetch("/watch-history/increment-play-count", {
+            method: "POST",
+            body: JSON.stringify(body),
+            keepalive: true,
+          });
+        } else {
+          await retryWithBackoff(() =>
+            apiPost("/watch-history/increment-play-count", body)
+          );
+        }
       } catch (error) {
-        console.error("Failed to increment play count after 3 attempts:", error);
+        console.error("Failed to increment play count:", error);
       }
     };
 
@@ -349,7 +399,9 @@ export function useVideoPlayer({
       trackActivityPlugin.setEnabled(false);
       trackActivityPlugin.reset();
     };
-  }, [scene?.id, playerRef, minimumPlayPercent]);
+    // Keyed on the scene's id and instance together: A:123 and B:123 are
+    // different scenes
+  }, [sceneId, sceneInstanceId, playerRef, minimumPlayPercent]);
 
   // ============================================================================
   // ASPECT RATIO UPDATES (fix layout when switching scenes)
@@ -366,8 +418,8 @@ export function useVideoPlayer({
     // This ensures proper layout before metadata loads
     const aspectRatio = `${firstFile.width}:${firstFile.height}`;
     player.aspectRatio(aspectRatio);
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- scene?.id captures scene changes; adding `scene` object would re-run aspect ratio setup on every render
-  }, [scene?.id, playerRef]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- sceneKey captures scene changes; adding `scene` object would re-run aspect ratio setup on every render
+  }, [sceneKey, playerRef]);
 
   // ============================================================================
   // RESUME PLAYBACK CAPTURE (from useResumePlayback)
@@ -377,7 +429,7 @@ export function useVideoPlayer({
   useEffect(() => {
     hasResumedRef.current = false;
     initialResumeTimeRef.current = null;
-  }, [scene?.id, hasResumedRef, initialResumeTimeRef]);
+  }, [sceneKey, hasResumedRef, initialResumeTimeRef]);
 
   // Capture resume time and set autoplay flag when watch history loads
   useEffect(() => {
@@ -401,95 +453,6 @@ export function useVideoPlayer({
   ]);
 
   // ============================================================================
-  // AUTO-FALLBACK ERROR HANDLER (set up once per scene)
-  // ============================================================================
-
-  const hasFallbackTriggeredRef = useRef(false);
-  const isAutoFallbackRef = useRef(false); // Use ref instead of state to avoid re-renders
-
-  useEffect(() => {
-    const player = playerRef.current;
-    if (!player || !scene) return;
-
-    // Reset fallback flags when scene changes
-    hasFallbackTriggeredRef.current = false;
-    isAutoFallbackRef.current = false;
-
-    const handleError = async () => {
-      if (hasFallbackTriggeredRef.current) {
-        console.log("[AUTO-FALLBACK] Already triggered for this scene, ignoring");
-        return;
-      }
-
-      const error = player.error();
-      if (!error) return;
-
-      // Only handle codec errors (3 = MEDIA_ERR_DECODE, 4 = MEDIA_ERR_SRC_NOT_SUPPORTED)
-      if (error.code !== 3 && error.code !== 4) return;
-
-      // Only auto-fallback if we're currently on direct play
-      const currentSrc = player.currentSrc();
-      if (!currentSrc || currentSrc.includes('.m3u8')) return;  // Already on HLS
-
-      // Determine best transcode quality based on source resolution
-      const sourceHeight = scene?.files?.[0]?.height || 1080;
-      const bestQuality = getBestTranscodeQuality(sourceHeight);
-
-      console.log(`[AUTO-FALLBACK] Codec error detected, falling back to ${bestQuality} transcoding (source: ${sourceHeight}p)`);
-      hasFallbackTriggeredRef.current = true;
-      isAutoFallbackRef.current = true; // Set ref flag (no re-render)
-
-      // Preserve current playback position (exactly like Stash does)
-      const currentTime = player.currentTime();
-
-      // Map quality preset to Stash resolution parameter
-      const qualityToResolution = {
-        '2160p': 'FOUR_K',
-        '1080p': 'FULL_HD',
-        '720p': 'STANDARD_HD',
-        '480p': 'STANDARD',
-        '360p': 'LOW',
-      };
-      const resolution = (qualityToResolution as Record<string, string>)[bestQuality] || 'STANDARD_HD';
-      const hlsUrl = buildStreamUrl(scene.id, 'proxy-stream/stream.m3u8', scene.instanceId, { resolution });
-
-      console.log(`[AUTO-FALLBACK] Trying next source: '${bestQuality} Transcode'`);
-
-      // Configure transcoded playback
-      togglePlaybackRateControl(player, false);
-
-      // Switch source exactly like Stash does - no clearing, no resetting
-      player.src({
-        src: hlsUrl,
-        type: "application/x-mpegURL",
-      });
-
-      player.load();
-
-      player.one("canplay", () => {
-        console.log("[AUTO-FALLBACK] canplay fired, restoring position");
-        player.currentTime(currentTime);
-        console.log("[AUTO-FALLBACK] Playback started successfully");
-        // Update quality in state (quality selector UI) and track for watch history
-        dispatch({ type: "SET_QUALITY", payload: bestQuality });
-        updateQuality(bestQuality);
-        // Clear auto-fallback flag
-        isAutoFallbackRef.current = false;
-      });
-
-      // Call play() immediately to prevent big play button from showing
-      player.play().catch((err: any) => console.error("[AUTO-FALLBACK] Play failed:", err));
-    };
-
-    player.on("error", handleError);
-
-    return () => {
-      player.off("error", handleError);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- scene?.id captures scene changes; playerRef is a stable ref; adding `scene` object would re-initialize error handler on every render
-  }, [scene?.id, playerRef, dispatch]); // Only re-run when scene changes
-
-  // ============================================================================
   // VIDEO SOURCES LOADING (using sourceSelector plugin - Stash pattern)
   // ============================================================================
 
@@ -502,18 +465,15 @@ export function useVideoPlayer({
     }
 
     // Don't re-initialize unless scene has changed (Stash line 568)
-    if (scene.id === prevSceneIdRef.current) {
+    if (sceneKey === prevSceneKeyRef.current) {
       return;
     }
 
     // Mark this scene as loaded
-    prevSceneIdRef.current = scene.id;
+    prevSceneKeyRef.current = sceneKey ?? null;
 
     // Set ready=false at START of scene loading (Stash line 572)
     dispatch({ type: "SET_READY", payload: false });
-
-    const isDirectPlay = quality === "direct";
-    // const firstFile = scene?.files?.[0]; // Unused - keeping for future use
 
     // Set poster
     const posterUrl = scene?.paths?.screenshot;
@@ -524,74 +484,13 @@ export function useVideoPlayer({
     // Get sourceSelector plugin
     const sourceSelector = player.sourceSelector();
 
-    // Build sources array from scene.sceneStreams (Stash pattern)
-    // sceneStreams contains ALL available stream formats from Stash:
-    // - Direct stream (original file)
-    // - HLS transcodes (various resolutions)
-    // - MP4/WEBM/DASH transcodes (if configured in Stash)
-    let sources = [];
+    // Sources are the server's stream paths (Stash's list for this file, as
+    // keyless Peek proxy paths), with Direct and MKV after the transcodes
+    // when this browser cannot decode the file
+    const sources = buildPlayerSources(scene, canDecode);
 
-    if (scene.sceneStreams && scene.sceneStreams.length > 0) {
-      // Get video duration from first file (needed for HLS transcodes to show correct duration)
-      const duration = scene.files?.[0]?.duration || undefined;
-
-      // Helper to check if stream is Direct (not transcoded)
-      const isDirect = (url: URL) => {
-        return (
-          url.pathname.endsWith('/stream') ||
-          url.pathname.endsWith('/stream.mpd') ||
-          url.pathname.endsWith('/stream.m3u8')
-        );
-      };
-
-      // Rewrite Stash URLs to use Peek's proxy
-      sources = scene.sceneStreams.map((stream: any) => {
-        try {
-          const url = new URL(stream.url);
-
-          // Extract path after /scene/{id}/
-          // e.g., "stream.m3u8" from "http://stash:9999/scene/123/stream.m3u8?resolution=STANDARD_HD"
-          const pathParts = url.pathname.split(`/scene/${scene.id}/`);
-          const streamPath = pathParts[1] || 'stream'; // "stream.m3u8" or "stream"
-
-          // Strip apikey from query params (security: don't expose Stash API key to client)
-          url.searchParams.delete('apikey');
-          url.searchParams.delete('ApiKey');
-          url.searchParams.delete('APIKEY');
-          // Add instanceId for multi-instance support
-          if (scene.instanceId) {
-            url.searchParams.set('instanceId', scene.instanceId);
-          }
-          const queryString = url.search; // "?resolution=STANDARD_HD&instanceId=..." or ""
-
-          // Rewrite to Peek's proxy endpoint
-          const proxiedUrl = `/api/scene/${scene.id}/proxy-stream/${streamPath}${queryString}`;
-
-          return {
-            src: proxiedUrl,
-            type: stream.mime_type || undefined,
-            label: stream.label || undefined,
-            offset: !isDirect(url), // Transcoded streams need time offset correction
-            duration, // Total video duration (fixes HLS duration incrementing)
-          };
-        } catch (error) {
-          console.error('[VideoPlayer] Error parsing stream URL:', stream.url, error);
-          return null;
-        }
-      }).filter(Boolean); // Remove any null entries from errors
-    } else {
-      console.warn('[VideoPlayer] No sceneStreams available, falling back to legacy Direct stream');
-      // Fallback: Use legacy Direct stream if sceneStreams not available
-      // This maintains backward compatibility during transition
-      const directUrl = buildStreamUrl(scene.id, 'stream', scene.instanceId);
-      sources.push({
-        src: directUrl,
-        label: "Direct",
-      });
-    }
-
-    // Set sources using sourceSelector plugin
-    // Plugin handles source switching, fallback, and playback state preservation
+    // The plugin loads the first, falls back through the rest and shows the
+    // rate menu only on Direct and MKV
     sourceSelector.setSources(sources);
 
     // Setup subtitles if available (using sourceSelector for track management)
@@ -599,15 +498,15 @@ export function useVideoPlayer({
       setupSubtitles(player, scene.id, scene.captions, scene.instanceId);
     }
 
-    // Configure player
-    togglePlaybackRateControl(player, isDirectPlay);
-    if (isDirectPlay) {
-      player.playbackRates([0.5, 1, 1.25, 1.5, 2]);
-    }
+    // The rates the menu offers where it shows (Direct and MKV)
+    player.playbackRates([0.5, 1, 1.25, 1.5, 2]);
 
     // Load the source (Stash line 693)
     player.load();
-    player.focus();
+    focusPlayer(
+      player as { el(): Element; focus(): void },
+      focusAtStartRef.current
+    );
 
     // Use player.ready() callback like Stash does (line 696)
     // This ensures player is truly ready to accept commands
@@ -615,14 +514,26 @@ export function useVideoPlayer({
       dispatch({ type: "SET_READY", payload: true });
     });
 
-    dispatch({ type: "SET_INITIALIZING", payload: false });
-
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scene?.id, quality]); // Stateless: only scene and quality matter
+  }, [sceneKey]); // Stateless: only the scene matters
 
   // ============================================================================
-  // QUALITY SWITCHING (from useVideoPlayerSources)
+  // RESTART (a queue step to an entry of the same scene)
   // ============================================================================
+
+  // Nothing loads again for a duplicate entry, or a one-scene queue on
+  // repeat all: start the scene over (the autoplay effect below plays it)
+  const seenRestartRef = useRef(restartCount);
+  useEffect(() => {
+    if (restartCount === seenRestartRef.current) return;
+    seenRestartRef.current = restartCount;
+    const player = playerRef.current as {
+      isDisposed(): boolean;
+      currentTime(seconds: number): void;
+    } | null;
+    if (!player || player.isDisposed()) return;
+    player.currentTime(0);
+  }, [restartCount, playerRef]);
 
   // ============================================================================
   // AUTOPLAY AND RESUME (Stash pattern - simple and clean)
@@ -636,13 +547,23 @@ export function useVideoPlayer({
     const resumeTime = initialResumeTimeRef.current;
 
     // Handle resume playback before starting
-    if (shouldResume && !hasResumedRef.current && resumeTime != null && resumeTime > 0) {
+    if (
+      shouldResume &&
+      !hasResumedRef.current &&
+      resumeTime != null &&
+      resumeTime > 0
+    ) {
       hasResumedRef.current = true;
       player.currentTime(resumeTime);
     }
 
-    // Just play - like Stash does
-    player.play();
+    // A browser that blocks autoplay with sound may still play it muted
+    player.play()?.catch((err: unknown) => {
+      if (err instanceof DOMException && err.name === "NotAllowedError") {
+        player.muted(true);
+        void player.play()?.catch(() => {});
+      }
+    });
 
     // Clear autoplay flag
     dispatch({ type: "SET_SHOULD_AUTOPLAY", payload: false });
@@ -657,115 +578,43 @@ export function useVideoPlayer({
   ]);
 
   // ============================================================================
-  // PLAYLIST NAVIGATION (from usePlaylistPlayer)
+  // PLAYLIST NAVIGATION: the end of a video and the skip buttons
   // ============================================================================
 
-  // Navigate to previous scene, preserving autoplay state if playing
-  const playPreviousInPlaylist = useCallback(() => {
-    const player = playerRef.current;
-    if (player && !player.paused()) {
-      dispatch({ type: "SET_SHOULD_AUTOPLAY", payload: true });
-    }
-    prevScene();
-  }, [playerRef, prevScene, dispatch]);
-
-  // Navigate to next scene, preserving autoplay state if playing
-  const playNextInPlaylist = useCallback(() => {
-    const player = playerRef.current;
-    if (player && !player.paused()) {
-      dispatch({ type: "SET_SHOULD_AUTOPLAY", payload: true });
-    }
-    nextScene();
-  }, [playerRef, nextScene, dispatch]);
-
-  // Auto-play next video when current video ends (respects shuffle/repeat/autoplayNext)
+  // At the end of a video: repeat one replays it; otherwise, with autoplay
+  // on, the queue steps on through the reducer's one advance path (which
+  // owns shuffle, its history and repeat all)
   useEffect(() => {
     const player = playerRef.current;
 
-    if (!player || player.isDisposed?.() || !playlist || !playlist.scenes) {
+    if (!player || player.isDisposed?.()) {
       return;
     }
 
     const handleEnded = () => {
-      // Repeat One: replay current scene
-      if (playlist.repeat === "one") {
+      if (repeat === "one") {
         player.currentTime(0);
-        player.play().catch((err: any) => console.error("Repeat play failed:", err));
+        player
+          .play()
+          .catch((err: unknown) => console.error("Repeat play failed:", err));
         return;
       }
 
-      // Autoplay Next is OFF: stop playback
-      if (!playlist.autoplayNext) {
+      if (!autoplayNext) {
         return;
       }
 
-      // Determine next scene index
-      let nextIndex = null;
-
-      if (playlist.shuffle) {
-        // Shuffle mode: pick random unplayed scene
-        const totalScenes = playlist.scenes.length;
-        const unplayedScenes = [];
-
-        for (let i = 0; i < totalScenes; i++) {
-          if (i !== currentIndex && !playlist.shuffleHistory.includes(i)) {
-            unplayedScenes.push(i);
-          }
-        }
-
-        if (unplayedScenes.length > 0) {
-          // Pick random from unplayed
-          nextIndex =
-            unplayedScenes[Math.floor(Math.random() * unplayedScenes.length)];
-        } else if (playlist.repeat === "all") {
-          // All scenes played, reset shuffle history and start over
-          dispatch({ type: "SET_SHUFFLE_HISTORY", payload: [] });
-          // Pick random scene (excluding current)
-          const candidates = Array.from({ length: totalScenes }, (_, i) => i).filter(
-            (i) => i !== currentIndex
-          );
-          nextIndex = candidates[Math.floor(Math.random() * candidates.length)];
-        }
-        // else: no more scenes and repeat is not "all", stop playback
-      } else {
-        // Sequential mode
-        if (currentIndex < playlist.scenes.length - 1) {
-          nextIndex = currentIndex + 1;
-        } else if (playlist.repeat === "all") {
-          nextIndex = 0; // Loop back to start
-        }
-        // else: last scene and repeat is not "all", stop playback
-      }
-
-      // Navigate to next scene if determined
-      if (nextIndex !== null) {
-        // Add current index to shuffle history
-        if (playlist.shuffle) {
-          const newHistory = [...playlist.shuffleHistory, currentIndex];
-          dispatch({ type: "SET_SHUFFLE_HISTORY", payload: newHistory });
-        }
-
-        // Navigate to next scene with autoplay enabled
-        dispatch({
-          type: "GOTO_SCENE_INDEX",
-          payload: { index: nextIndex, shouldAutoplay: true },
-        });
-      }
+      dispatch({ type: "NEXT_SCENE", payload: { autoplay: true } });
     };
 
     player.on("ended", handleEnded);
 
     return () => {
-      if (player && !player.isDisposed()) {
+      if (!player.isDisposed()) {
         player.off("ended", handleEnded);
       }
     };
-  }, [
-    playerRef,
-    playlist,
-    currentIndex,
-    dispatch,
-  ]);
+  }, [playerRef, autoplayNext, repeat, dispatch]);
 
   // Configure skipButtons plugin for playlist navigation (Stash pattern)
   useEffect(() => {
@@ -779,8 +628,8 @@ export function useVideoPlayer({
 
     // Set handlers based on playlist availability
     if (playlist && playlist.scenes && playlist.scenes.length > 1) {
-      skipButtonsPlugin.setForwardHandler(playNextInPlaylist);
-      skipButtonsPlugin.setBackwardHandler(playPreviousInPlaylist);
+      skipButtonsPlugin.setForwardHandler(nextScene);
+      skipButtonsPlugin.setBackwardHandler(prevScene);
     } else {
       // Clear handlers if no playlist or single scene
       skipButtonsPlugin.setForwardHandler(undefined);
@@ -789,10 +638,4 @@ export function useVideoPlayer({
 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentIndex, playlist]);
-
-  // Return playlist navigation functions for use by media keys hook
-  return {
-    playNextInPlaylist,
-    playPreviousInPlaylist,
-  };
 }

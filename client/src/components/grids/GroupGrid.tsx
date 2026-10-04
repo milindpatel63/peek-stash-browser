@@ -1,5 +1,7 @@
-import { SearchableGrid } from "../ui/SearchableGrid";
+import type { ComponentProps } from "react";
+import { makeCompositeKey } from "../../utils/compositeKey";
 import { GroupCard } from "../cards/index";
+import { SearchableGrid } from "../ui/SearchableGrid";
 
 interface Props {
   lockedFilters?: Record<string, unknown>;
@@ -24,13 +26,16 @@ const GroupGrid = ({
       emptyMessage={emptyMessage}
       defaultSort="name"
       density={density}
-      renderItem={(group: any, _index: number, { onHideSuccess }: any) => (
-        <GroupCard
-          key={group.id}
-          group={group}
-          onHideSuccess={() => onHideSuccess(group.id)}
-        />
-      )}
+      renderItem={(item, _index, { onHideSuccess }) => {
+        const group = item as ComponentProps<typeof GroupCard>["group"];
+        return (
+          <GroupCard
+            key={makeCompositeKey(group.id, group.instanceId)}
+            group={group}
+            onHideSuccess={onHideSuccess}
+          />
+        );
+      }}
       {...rest}
     />
   );

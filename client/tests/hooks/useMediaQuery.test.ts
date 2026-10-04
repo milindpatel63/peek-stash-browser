@@ -1,24 +1,44 @@
 // client/tests/hooks/useMediaQuery.test.js
-import { renderHook, act } from "@testing-library/react";
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { act, renderHook } from "@testing-library/react";
+import {
+  type Mock,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 import { useMediaQuery } from "../../src/hooks/useMediaQuery";
+import { controlMatchMedia } from "../helpers/matchMedia";
+
+/** The change listener the hook registers; tests call it with just matches */
+type ChangeListener = (event: Pick<MediaQueryListEvent, "matches">) => void;
+
+/** The MediaQueryList fields the hook uses */
+interface FakeMediaQueryList {
+  matches: boolean;
+  media?: string;
+  addEventListener: Mock<(event: string, handler: ChangeListener) => void>;
+  removeEventListener: Mock<(event: string, handler: ChangeListener) => void>;
+}
 
 describe("useMediaQuery", () => {
-  let matchMediaMock: any;
-  let listeners: any[];
+  let matchMediaMock: Mock<(query: string) => FakeMediaQueryList>;
+  let listeners: ChangeListener[];
 
   beforeEach(() => {
     listeners = [];
 
-    matchMediaMock = vi.fn((query) => ({
+    matchMediaMock = vi.fn((query: string) => ({
       matches: false,
       media: query,
-      addEventListener: vi.fn((event, handler) => {
+      addEventListener: vi.fn((event: string, handler: ChangeListener) => {
         if (event === "change") {
           listeners.push(handler);
         }
       }),
-      removeEventListener: vi.fn((event, handler) => {
+      removeEventListener: vi.fn((event: string, handler: ChangeListener) => {
         if (event === "change") {
           const index = listeners.indexOf(handler);
           if (index > -1) {
@@ -28,7 +48,8 @@ describe("useMediaQuery", () => {
       }),
     }));
 
-    window.matchMedia = matchMediaMock;
+    // Only the fields the hook uses
+    window.matchMedia = matchMediaMock as unknown as typeof window.matchMedia;
   });
 
   afterEach(() => {
@@ -55,24 +76,49 @@ describe("useMediaQuery", () => {
   });
 
   it("updates when media query changes", () => {
-    const { result } = renderHook(() => useMediaQuery("(max-width: 768px)"));
+    const media = controlMatchMedia();
+    try {
+      const { result } = renderHook(() => useMediaQuery("(max-width: 768px)"));
 
-    expect(result.current).toBe(false);
+      expect(result.current).toBe(false);
 
-    // Simulate media query change
-    act(() => {
-      listeners.forEach((listener) => listener({ matches: true }));
-    });
+      act(() => media.set("(max-width: 768px)", true));
 
-    expect(result.current).toBe(true);
+      expect(result.current).toBe(true);
+    } finally {
+      media.restore();
+    }
+  });
+
+  it("two components reading one query add one change listener", () => {
+    const media = controlMatchMedia();
+    try {
+      const first = renderHook(() => useMediaQuery("(orientation: portrait)"));
+      const second = renderHook(() => useMediaQuery("(orientation: portrait)"));
+
+      expect(media.listenerCount("(orientation: portrait)")).toBe(1);
+
+      act(() => media.set("(orientation: portrait)", true));
+      expect(first.result.current).toBe(true);
+      expect(second.result.current).toBe(true);
+
+      // The listener stays until the last reader leaves
+      first.unmount();
+      expect(media.listenerCount("(orientation: portrait)")).toBe(1);
+      second.unmount();
+      expect(media.listenerCount("(orientation: portrait)")).toBe(0);
+    } finally {
+      media.restore();
+    }
   });
 
   it("removes event listener on unmount", () => {
-    const removeEventListener = vi.fn();
+    const removeEventListener =
+      vi.fn<(event: string, handler: ChangeListener) => void>();
 
     matchMediaMock.mockReturnValue({
       matches: false,
-      addEventListener: vi.fn((event, handler) => {
+      addEventListener: vi.fn((event: string, handler: ChangeListener) => {
         if (event === "change") {
           listeners.push(handler);
         }
@@ -84,7 +130,10 @@ describe("useMediaQuery", () => {
 
     unmount();
 
-    expect(removeEventListener).toHaveBeenCalledWith("change", expect.any(Function));
+    expect(removeEventListener).toHaveBeenCalledWith(
+      "change",
+      expect.any(Function)
+    );
   });
 
   it("updates listener when query changes", () => {
@@ -123,27 +172,5 @@ describe("useMediaQuery", () => {
       useMediaQuery("(min-width: 1024px)")
     );
     expect(result2.current).toBe(false);
-  });
-
-  it("falls back to addListener/removeListener for older browsers", () => {
-    const addListener = vi.fn();
-    const removeListener = vi.fn();
-
-    matchMediaMock.mockReturnValue({
-      matches: false,
-      // No addEventListener/removeEventListener (older browsers)
-      addEventListener: undefined,
-      removeEventListener: undefined,
-      addListener,
-      removeListener,
-    });
-
-    const { unmount } = renderHook(() => useMediaQuery("(max-width: 768px)"));
-
-    expect(addListener).toHaveBeenCalled();
-
-    unmount();
-
-    expect(removeListener).toHaveBeenCalled();
   });
 });

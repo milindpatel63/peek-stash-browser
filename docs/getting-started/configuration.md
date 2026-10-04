@@ -19,7 +19,7 @@ Peek can connect to **multiple Stash servers** simultaneously. This is useful wh
 
 ### Adding Instances
 
-**Location:** Settings → Server Configuration → Stash Instances
+**Location:** Settings → Server Settings → Server Configuration → Stash Instances
 
 1. Click **Add Instance**
 2. Fill in the instance details:
@@ -27,47 +27,82 @@ Peek can connect to **multiple Stash servers** simultaneously. This is useful wh
    - **Description** — Help users understand what content this instance contains
    - **URL** (required) — Stash GraphQL endpoint (must end with `/graphql`)
    - **API Key** (required) — From the Stash instance's Settings → Security
-   - **Priority** — Lower number = higher priority for deduplication
+   - **Priority**: Lower number comes first: it orders the servers in Peek's lists, and the server with the lowest number is the one whose filter entries carry no server name when two servers have entries with the same name
 3. Click **Test Connection** to validate
 4. Save the instance
 
-Peek automatically triggers a full sync for new instances in the background.
+Peek automatically triggers a full sync for new instances in the background. If a sync is already running, the new instance syncs right after it.
+
+A new instance appears in users' libraries once its first sync has finished, so every user's restrictions and hidden items apply to its content from the first item shown. Until then it is hidden from everyone, admins included, and the instance list shows it as **First sync running, hidden from users**; a user who selected only that instance sees the "syncing" notice meanwhile. Changing an instance's URL makes it new again: it is hidden until its resync has finished. An instance you add disabled starts its first sync when you enable it.
 
 ### Managing Instances
 
 Each instance can be:
 
-- **Edited** — Update URL, API key, name, or priority
-- **Enabled/Disabled** — Temporarily hide an instance without deleting it
-- **Deleted** — Permanently remove (cannot delete the last enabled instance)
+- **Edited**: Update URL, API key, name, or priority
+- **Enabled/Disabled**: Temporarily hide an instance without deleting it. Disabling asks to confirm.
+- **Deleted**: Permanently remove it, with its cached library and every user's ratings, favorites, watch and O history, image views, playlist entries, hidden items and downloads for it. Peek refuses while a sync is running. To keep all of that, disable the instance instead.
+
+Peek always keeps one enabled instance: the last one can be neither disabled nor deleted. Add another first, or change its address under **Edit**.
+
+### Sync Status
+
+**Location:** Settings → Server Settings → Server Configuration → Sync status
+
+Each instance has a table of its entity types: when each last had a full sync, the newest change Peek has from Stash, the last run's count and duration, and any problem the last run had with that type (a Stash error, a timeout, or a cleanup that was skipped or held back). While a sync runs, the status refreshes every 10 seconds and an **Abort sync** button stops it. **Full Sync** under Server Statistics asks before it starts. See [Sync Problems](troubleshooting.md#sync-problems) for what each problem means.
+
+**Sync Interval**, above the status, sets how often Peek checks Stash for changes (every hour by default). A new interval takes effect at once: the next scheduled sync comes one new interval after you save it. Saving it does not start a sync. Scheduled syncs begin as soon as the setup wizard has saved the first instance, with no restart.
 
 ### Per-User Instance Selection
 
 When multiple instances are configured, each user can choose which instances they see content from:
 
-**Location:** Settings → Content → Content Sources
+**Location:** Settings → User Preferences → Content → Content Sources
 
 - Check or uncheck instances to control which content appears in your library
 - At least one instance must remain selected
+- The selection applies to every page, the timeline included: its bars count only content from the servers you selected, and not a server's content before its first sync has finished
 - New users see all instances by default
+- If an admin disables every instance a user selected, that user sees all the enabled instances instead, with their restrictions and hidden items applied, until they choose again
 
 !!! tip "First-Login Setup"
     When a new user logs in and multiple instances are available, they're prompted to select which instances they want to see.
+
+Users have a page of their own on this: [Using Several Stash Servers](../user-guide/multiple-stash-servers.md).
 
 ### How Multi-Instance Content Works
 
 - Content from all selected instances appears together in search results, carousels, and browsing pages
 - Each entity is tagged internally with its source instance
-- If the same content exists on multiple instances, the instance with the lowest priority number is used as the primary source
+- Peek does not merge or deduplicate content across instances: the same scene on two servers shows as two scenes. Priority only orders the servers, and decides which server's same-named tags, studios and performers in a filter list get no server name after them
 - Ratings, watch history, and playlists track which instance each scene belongs to
 
 ## Required Environment Variables
 
-| Variable     | Description     | Example                             |
-| ------------ | --------------- | ----------------------------------- |
-| `JWT_SECRET` | JWT signing key | Generate with `openssl rand -base64 32` |
+None. Peek starts with no environment variables set; everything below is optional.
 
-### Generating JWT Secret
+## Optional Environment Variables
+
+These settings have sensible defaults but can be customized:
+
+| Variable             | Description                | Default                                | Notes                        |
+| -------------------- | -------------------------- | -------------------------------------- | ---------------------------- |
+| `JWT_SECRET`         | Signs login sessions       | Generated on first start, kept in `/app/data/.jwt-secret` | Set it only to control the value. Values copied from examples in these docs are ignored, with a warning in the log |
+| `DATABASE_URL`       | SQLite database file       | `file:/app/data/peek-stash-browser.db` | Fixed in the Docker image; ignored with a warning if set |
+| `CONFIG_DIR`         | Where backups and download zips go | `/app/data`                    | The database stays in `/app/data`. A directory outside `/app/data` is given to `PUID:PGID` on start |
+| `MAX_PLAYLIST_DOWNLOAD_SIZE_MB` | Largest playlist zip, in MB | `10240` | A zip larger than this is refused. The server also needs that much free space plus 1 GB in `CONFIG_DIR` while it builds one. A value that is not a positive whole number uses the default, with a warning in the log |
+| `PUID`               | User that owns `/app/data` and runs the server | `99` (unRAID's `nobody`) | See [File ownership](installation.md#file-ownership-puidpgid). `0` runs as root, with a warning |
+| `PGID`               | Group that owns `/app/data` | `100` (unRAID's `users`)              | See [File ownership](installation.md#file-ownership-puidpgid) |
+| `LOG_LEVEL`          | Server log detail          | `INFO`                                 | `ERROR`, `WARN`, `INFO`, `DEBUG` or `VERBOSE`. `INFO` logs server events (library syncs, users, settings, restrictions, writes to Stash) and errors with their cause; `DEBUG` adds per-request timings (lists, playback progress, ratings). No level logs Stash API keys or signed stream links, so a `DEBUG` log is safe to share |
+| `NODE_ENV`           | Environment mode           | `production`                           | `development` or `production`|
+| `STASH_HEADERS_TIMEOUT_MS` | How long a file download waits for Stash to start answering | `60000` (60 seconds) | In milliseconds. Raise it if downloads from a slow NAS or a sleeping disk fail before they start. A value that is not a positive number uses the default |
+| `PROXY_AUTH_HEADER`  | Proxy Auth Header          |                                        | Disabled by default          |
+| `PROXY_AUTH_TRUSTED_IPS` | Addresses allowed to send `PROXY_AUTH_HEADER` | Unset (any address, with a startup warning) | Comma-separated IPs and CIDR ranges of your auth proxy. See [Trusted proxy addresses](#trusted-proxy-addresses) |
+| `TRUST_PROXY`        | Reverse proxies in front of Peek | Unset (trusts only the image's own nginx) | Set to the number of reverse proxies between browsers and Peek. See [Behind a reverse proxy](#behind-a-reverse-proxy) |
+
+### Generating a JWT Secret
+
+Only needed if you set `JWT_SECRET` yourself.
 
 **Linux/macOS/unRAID:**
 ```bash
@@ -81,17 +116,6 @@ $bytes = New-Object byte[] 32
 $rng.GetBytes($bytes)
 [Convert]::ToBase64String($bytes)
 ```
-
-## Optional Environment Variables
-
-These settings have sensible defaults but can be customized:
-
-| Variable             | Description                | Default                                | Notes                        |
-| -------------------- | -------------------------- | -------------------------------------- | ---------------------------- |
-| `DATABASE_URL`       | SQLite database file       | `file:/app/data/peek-stash-browser.db` | Path inside container        |
-| `CONFIG_DIR`         | App data directory         | `/app/data`                            | Database location            |
-| `NODE_ENV`           | Environment mode           | `production`                           | `development` or `production`|
-| `PROXY_AUTH_HEADER`  | Proxy Auth Header          |                                        | Disabled by default          |
 
 ## Video Streaming (v2.0+)
 
@@ -111,11 +135,24 @@ This is a significant simplification from v1.x which required mounting media dir
 | `SECURE_COOKIES` | Enable secure cookie flag      | `false` | Set to `true` when using HTTPS reverse proxy |
 
 !!! warning "Security Best Practices"
-    - Set a strong `JWT_SECRET` during installation (required)
+    - Keep `/app/data` private: it holds the database, which stores each Stash API key in plain text, and the generated session secret
     - Set `SECURE_COOKIES=true` when using HTTPS
     - **Never expose Peek directly to the internet** - always use a reverse proxy
     - Admin credentials are created during setup wizard (no default passwords)
-    - Stash API key is stored securely in the database (not in environment variables)
+    - Stash API keys are stored in the database in plain text (not in environment variables): anyone who can read `/app/data` can read them
+
+### Behind a reverse proxy
+
+The image trusts its own nginx, so sign-in lockouts and rate limits see each visitor's address when browsers reach the container directly. With SWAG, Nginx Proxy Manager, Traefik or Caddy in front, set `TRUST_PROXY=1` (one per proxy) so they still see each visitor's address rather than the proxy's.
+
+!!! warning
+    Never set `TRUST_PROXY` higher than the real number of proxies. A higher value lets anyone fake their address and get around lockouts and rate limits.
+
+### Security headers and third parties
+
+The bundled nginx sends a Content Security Policy and four other security headers (`X-Frame-Options`, `X-Content-Type-Options`, `Referrer-Policy` and `Permissions-Policy`) on every response. A reverse proxy in front should pass them through unchanged. Peek sends no HSTS header, because it usually runs over plain HTTP on a LAN: if you serve it over HTTPS, set HSTS on that proxy.
+
+Peek serves its own fonts. The browser loads nothing from third parties, apart from the admin-only update check, which asks the GitHub API for the latest release.
 
 ## Proxy Authentication
 
@@ -125,7 +162,7 @@ Peek supports delegating authentication to your reverse proxy (e.g., Nginx, Trae
 
 1. Your reverse proxy handles authentication (SSO, OAuth, basic auth, etc.)
 2. The proxy adds a header with the authenticated username to all requests
-3. Peek reads this header and looks up the corresponding user in its database
+3. Peek reads this header, from the proxy's address only when `PROXY_AUTH_TRUSTED_IPS` is set, and looks up the corresponding user in its database
 4. If no header is present, Peek falls back to standard JWT token authentication
 
 ### Configuration
@@ -142,14 +179,37 @@ Common header names:
 - `Remote-User` (common with Nginx auth_request)
 - `X-Auth-Request-User` (oauth2-proxy)
 
+### Trusted proxy addresses
+
+Set `PROXY_AUTH_TRUSTED_IPS` to your proxy's address, so Peek honours the header only from there:
+
+```bash
+PROXY_AUTH_TRUSTED_IPS=172.18.0.5
+```
+
+It takes comma-separated IP addresses and CIDR ranges, IPv4 or IPv6 (for example `172.18.0.5, 192.168.1.0/24`). Use the address the proxy connects to Peek from, as Peek sees it. When the proxy and Peek share a Docker network, that is the proxy container's address on that network; when the proxy runs on the host and reaches a published port, it is usually the Docker network's gateway (`172.17.0.1` on the default bridge). `TRUST_PROXY` does not change which address is checked.
+
+Peek logs the address for you:
+
+- `Proxy auth: ignored the Remote-User header from 172.18.0.5, which is not in PROXY_AUTH_TRUSTED_IPS` (a warning, at most once every 10 minutes per address): the request carried the header from an address outside the list, so Peek ignored the header and fell back to the session cookie. If that address is your proxy, add it.
+- `Proxy auth: signed in from header` (info, the first time and then at most once an hour per user) gives the username and the proxy's address as `peer`.
+- `Proxy auth: the header names no Peek user` (a warning, at most once every 10 minutes per username and address): the proxy passed a username that has no Peek account.
+
+Without `PROXY_AUTH_TRUSTED_IPS`, Peek honours the header from any address, as earlier versions did, and logs a warning at startup: anyone who can reach Peek's port can sign in as any user by sending the header. If an entry is not an address or a range, Peek logs an error naming it at startup and honours the header from no address until you fix it.
+
+### External player links
+
+External players (VLC, Android video apps) cannot pass your single-sign-on login to the proxy. The external player button therefore gives each user a personal, signed link, and Peek checks the signature itself. Let requests to `GET /api/scene/*/proxy-stream/stream` that carry a `sig` query parameter through the proxy without authentication; everything else stays behind it. Peek still rejects an expired, tampered or foreign link with 401, and applies that user's hidden items and content restrictions.
+
 ### Security Requirements
 
 !!! danger "Critical Security Requirements"
     When using proxy authentication, you **MUST** ensure:
     
-    1. **Peek is NOT accessible directly** - Only allow access through the reverse proxy
+    1. **Peek is NOT accessible directly** - Publish Peek's port only to the proxy: put both on one Docker network and publish no port, or bind the port to the proxy's host only (`-p 127.0.0.1:6969:80`)
     2. **The proxy sanitizes the authentication header** - The proxy must strip any user-supplied headers with the same name to prevent header injection attacks
     3. **Network isolation** - Peek should only listen on localhost or a private network, not on public interfaces
+    4. **`PROXY_AUTH_TRUSTED_IPS` names the proxy** - so a request that reaches Peek any other way is not signed in from the header
     
     **Failure to follow these requirements will allow anyone to impersonate any user by setting the header in their request.**
 
@@ -178,6 +238,9 @@ location / {
 ```bash
 # Peek configuration
 PROXY_AUTH_HEADER=Remote-User
+# Where nginx connects from, as Peek sees it (the default bridge's gateway
+# here); the "ignored the Remote-User header from" log line names yours
+PROXY_AUTH_TRUSTED_IPS=172.17.0.1
 ```
 
 ### Example: Traefik with ForwardAuth (Authelia)
@@ -193,6 +256,8 @@ services:
   peek:
     environment:
       - PROXY_AUTH_HEADER=Remote-User
+      # Traefik's address on the network it shares with Peek
+      - PROXY_AUTH_TRUSTED_IPS=172.18.0.2
     labels:
       - "traefik.http.routers.peek.middlewares=authelia@docker"
 ```
@@ -201,10 +266,10 @@ services:
 
 Users **must exist** in Peek's database for proxy authentication to work:
 
-1. Create users through Peek's admin panel (Settings → User Management)
+1. Create users through Peek's admin panel (Settings → Server Settings → User Management)
 2. The **username** in Peek must **exactly match** the username passed by the proxy
 3. User roles and permissions are still managed within Peek
-4. Passwords are not used when proxy auth is enabled (but must still be set in the database)
+4. Passwords still work for anyone who reaches Peek without the proxy, so every user needs one in the database (see [Fallback Behavior](#fallback-behavior))
 
 ### Fallback Behavior
 
@@ -220,6 +285,11 @@ When `PROXY_AUTH_HEADER` is set but the header is not present in a request, Peek
 - Verify the user exists in Peek's database
 - Check that usernames match exactly (case-sensitive)
 - Verify the proxy is passing the correct header name
+- Look for `Proxy auth: the header names no Peek user` in the log, with the username Peek received
+
+**The header is ignored and Peek shows its login page**
+- Look for `Proxy auth: ignored the ... header from <address>` in the log and add that address to `PROXY_AUTH_TRUSTED_IPS` if it is your proxy
+- An invalid entry turns header sign-in off: the startup log names it
 
 **Users being logged in as wrong user**
 - **CRITICAL**: Your proxy is not sanitizing the header properly
@@ -231,9 +301,7 @@ When `PROXY_AUTH_HEADER` is set but the header is not present in a request, Peek
 ### Minimal Production Configuration (v2.0+)
 
 ```bash
-# Required
-JWT_SECRET=your_very_long_random_secret_key_here
-
+# No variables are required
 # Stash connection configured via Setup Wizard (stored in database)
 # All other settings use defaults
 ```
@@ -241,12 +309,12 @@ JWT_SECRET=your_very_long_random_secret_key_here
 ### Complete Production Configuration
 
 ```bash
-# Authentication (Required)
-JWT_SECRET=your_very_long_random_secret_key_here
-
-# Database (Optional - defaults shown)
-DATABASE_URL=file:/app/data/peek-stash-browser.db
+# Backups and download zips (Optional - default shown)
 CONFIG_DIR=/app/data
+
+# File ownership (Optional - defaults shown)
+PUID=99
+PGID=100
 
 # Security (Optional)
 SECURE_COOKIES=true
@@ -255,21 +323,6 @@ SECURE_COOKIES=true
 NODE_ENV=production
 
 # Stash connection configured via Setup Wizard (stored in database)
-```
-
-### Development Configuration
-
-```bash
-# Authentication
-JWT_SECRET=dev-secret-change-in-production
-
-# Database (local SQLite file)
-DATABASE_URL=file:./data/peek-db.db
-
-# Development
-NODE_ENV=development
-
-# Stash connection configured via Setup Wizard
 ```
 
 
@@ -285,7 +338,6 @@ services:
     volumes:
       - peek-data:/app/data
     environment:
-      - JWT_SECRET=${JWT_SECRET}
       # Optional
       - NODE_ENV=production
       - SECURE_COOKIES=false
@@ -317,13 +369,13 @@ Test connectivity:
 docker exec peek-stash-browser curl http://your-stash-ip:9999/graphql
 ```
 
-You can update Stash connection details in Settings → Stash Configuration.
+You can update Stash connection details in Settings → Server Settings → Server Configuration → Stash Instances.
 
 ### Videos Won't Play
 
 Check:
 
-- Stash connection is configured correctly (Settings → Stash Configuration)
+- Stash connection is configured correctly (Settings → Server Settings → Server Configuration → Stash Instances)
 - Stash server is running and accessible
 - The scene exists in Stash and has a valid video file
 
@@ -331,7 +383,7 @@ Check:
 
 Check:
 
-- `JWT_SECRET` is set
+- If you set `JWT_SECRET`, keep it the same across restarts; changing it signs everyone out
 - `SECURE_COOKIES` matches your HTTP/HTTPS setup
 - Database is writable
 

@@ -1,8 +1,11 @@
-import { describe, it, expect, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { render, screen } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
 import ClipCard from "../../../src/components/cards/ClipCard";
+import { AuthContext } from "../../../src/contexts/AuthContextProvider";
 import { CardDisplaySettingsProvider } from "../../../src/contexts/CardDisplaySettingsContext";
+import { createAuthValue } from "../../testUtils";
 
 // Mock the api module
 vi.mock("../../../src/api", () => ({
@@ -15,17 +18,26 @@ const mockClip = {
   seconds: 120,
   endSeconds: 180,
   sceneId: "scene-1",
+  instanceId: "inst-a",
   isGenerated: true,
   primaryTag: { id: "tag-1", name: "Action", color: "#ff0000" },
   tags: [],
-  scene: { id: "scene-1", title: "Test Scene", pathScreenshot: "/screenshot.jpg" },
+  scene: {
+    id: "scene-1",
+    title: "Test Scene",
+    pathScreenshot: "/screenshot.jpg",
+  },
 };
 
 const renderWithProviders = (ui: React.ReactElement) => {
   return render(
-    <MemoryRouter>
-      <CardDisplaySettingsProvider>{ui}</CardDisplaySettingsProvider>
-    </MemoryRouter>
+    <QueryClientProvider client={new QueryClient()}>
+      <MemoryRouter>
+        <AuthContext.Provider value={createAuthValue()}>
+          <CardDisplaySettingsProvider>{ui}</CardDisplaySettingsProvider>
+        </AuthContext.Provider>
+      </MemoryRouter>
+    </QueryClientProvider>
   );
 };
 
@@ -33,6 +45,12 @@ describe("ClipCard", () => {
   it("renders clip title", () => {
     renderWithProviders(<ClipCard clip={mockClip} />);
     expect(screen.getByText("Test Clip")).toBeInTheDocument();
+  });
+
+  it("the card of an untitled clip reads its primary tag's name", () => {
+    renderWithProviders(<ClipCard clip={{ ...mockClip, title: null }} />);
+    expect(screen.getByText("Action")).toBeInTheDocument();
+    expect(screen.queryByText("Untitled")).not.toBeInTheDocument();
   });
 
   it("shows formatted duration", () => {

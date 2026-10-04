@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  Columns3 as LucideColumns3,
-  ChevronUp as LucideChevronUp,
   ChevronDown as LucideChevronDown,
-  ChevronsUp as LucideChevronsUp,
+  ChevronUp as LucideChevronUp,
   ChevronsDown as LucideChevronsDown,
+  ChevronsUp as LucideChevronsUp,
+  Columns3 as LucideColumns3,
   X as LucideX,
 } from "lucide-react";
 import Button from "../ui/Button";
@@ -20,7 +20,10 @@ interface Props {
   visibleColumnIds: string[];
   columnOrder: string[];
   onToggleColumn?: (columnId: string) => void;
-  onMoveColumn?: (columnId: string, direction: "up" | "down" | "top" | "bottom") => void;
+  onMoveColumn?: (
+    columnId: string,
+    direction: "up" | "down" | "top" | "bottom"
+  ) => void;
 }
 
 /**
@@ -37,7 +40,8 @@ const ColumnConfigPopover = ({
   const popoverRef = useRef<HTMLDivElement>(null);
   const buttonRef = useRef<HTMLDivElement>(null);
 
-  // Close popover when clicking outside
+  // Close popover when clicking outside,
+  // in the capture phase: a Modal stops the press bubbling past its backdrop
   useEffect(() => {
     if (!isOpen) return;
 
@@ -52,12 +56,12 @@ const ColumnConfigPopover = ({
       }
     };
 
-    document.addEventListener("mousedown", handleClickOutside);
-    document.addEventListener("touchstart", handleClickOutside);
+    document.addEventListener("mousedown", handleClickOutside, true);
+    document.addEventListener("touchstart", handleClickOutside, true);
 
     return () => {
-      document.removeEventListener("mousedown", handleClickOutside);
-      document.removeEventListener("touchstart", handleClickOutside);
+      document.removeEventListener("mousedown", handleClickOutside, true);
+      document.removeEventListener("touchstart", handleClickOutside, true);
     };
   }, [isOpen]);
 
@@ -72,7 +76,8 @@ const ColumnConfigPopover = ({
   const orderedColumns = getOrderedColumns();
 
   // Check if column is visible
-  const isColumnVisible = (columnId: string) => visibleColumnIds.includes(columnId);
+  const isColumnVisible = (columnId: string) =>
+    visibleColumnIds.includes(columnId);
 
   // Check if column can move in a direction
   const canMoveUp = (index: number) => index > 0;
@@ -82,7 +87,8 @@ const ColumnConfigPopover = ({
   const handleMoveTop = (columnId: string) => onMoveColumn?.(columnId, "top");
   const handleMoveUp = (columnId: string) => onMoveColumn?.(columnId, "up");
   const handleMoveDown = (columnId: string) => onMoveColumn?.(columnId, "down");
-  const handleMoveBottom = (columnId: string) => onMoveColumn?.(columnId, "bottom");
+  const handleMoveBottom = (columnId: string) =>
+    onMoveColumn?.(columnId, "bottom");
 
   // Handle visibility toggle
   const handleToggle = (columnId: string) => onToggleColumn?.(columnId);
@@ -99,7 +105,9 @@ const ColumnConfigPopover = ({
           aria-label="Columns"
           style={{
             backgroundColor: isOpen ? "var(--bg-card)" : "var(--bg-secondary)",
-            borderColor: isOpen ? "var(--accent-primary)" : "var(--border-color)",
+            borderColor: isOpen
+              ? "var(--accent-primary)"
+              : "var(--border-color)",
           }}
         />
       </div>
@@ -108,7 +116,7 @@ const ColumnConfigPopover = ({
       {isOpen && (
         <div
           ref={popoverRef}
-          className="absolute left-0 mt-2 w-[320px] rounded-lg shadow-xl z-50"
+          className="absolute right-0 sm:right-auto sm:left-0 mt-2 w-[320px] max-w-[calc(100vw-2rem)] rounded-lg shadow-xl z-50"
           style={{
             backgroundColor: "var(--bg-card)",
             border: "1px solid var(--border-color)",

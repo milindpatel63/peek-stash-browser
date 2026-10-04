@@ -1,626 +1,550 @@
 /**
- * GroupQueryBuilder - SQL-native group querying
+ * GroupQueryBuilder: the group (collection) list in SQL.
  *
- * Builds parameterized SQL queries for group filtering, sorting, and pagination.
- * Eliminates the need to load all groups into memory.
+ * The group builder on the base (`query/EntityQueryBuilder.ts`): this file
+ * declares the group's spec (table, the rating join, columns with the
+ * sub-group count, the name tiebreak), its filter clauses from the parsed
+ * request, its sort map, its row transform and its relations, and the
+ * detail page's hierarchy. The instance filter, the exclusion join, the
+ * `ids` filter, the random sort and the count are the base's.
  */
-import type { PeekGroupFilter, NormalizedGroup, PerformerRef, TagRef, StudioRef, GalleryRef } from "../types/index.js";
-import type { GroupQueryRow } from "../types/internal/queryRows.js";
+import type { SortDirection } from "@peek/shared-types/filters/index.js";
 import prisma from "../prisma/singleton.js";
-import { logger } from "../utils/logger.js";
-import { expandTagIds, expandStudioIds } from "../utils/hierarchyUtils.js";
-import { getGalleryFallbackTitle } from "../utils/titleUtils.js";
-import { parseJsonArray } from "../utils/sqlHelpers.js";
-import { buildNumericFilter, buildDateFilter, buildTextFilter, buildFavoriteFilter, buildJunctionFilter, parseCompositeFilterValues, type FilterClause } from "../utils/sqlFilterBuilders.js";
-import { coerceEntityRefs } from "@peek/shared-types/instanceAwareId.js";
+import type {
+  GroupRelationRef,
+  NormalizedGroup,
+  StudioRef,
+  TagRef,
+} from "../types/index.js";
+import type {
+  GroupQueryRow,
+  GroupRelationQueryRow,
+} from "../types/internal/queryRows.js";
+import type {
+  FilterRef,
+  ParsedFilter,
+  RefCriterion,
+  RefFieldCriterion,
+} from "../types/parsedFilters.js";
+import { type EntityRef, entityKey } from "../utils/entityRef.js";
+import { expandRefs, expandRefsEach } from "../utils/hierarchyUtils.js";
+import { toProxyUrl } from "../utils/proxyUrl.js";
+import {
+  type ColumnTarget,
+  type FilterClause,
+  type JunctionTarget,
+  type ParentKey,
+  type SqlFragment,
+  type ViaSceneSpec,
+  allOf,
+  buildCountFilter,
+  buildDayFilter,
+  buildFavoriteFilter,
+  buildInstantFilter,
+  buildNumericFilter,
+  buildTextFilter,
+  noClause,
+  refSetMatch,
+  searchAll,
+  viaSceneClause,
+  visibleGuard,
+} from "../utils/sqlClauses.js";
+import {
+  emptyToNull,
+  parseJsonArray,
+  searchTerms,
+} from "../utils/sqlHelpers.js";
+import { loadTooltipRelations } from "./TooltipRelations.js";
+import {
+  EntityQueryBuilder,
+  type EntitySpec,
+  type FieldClauses,
+  type LeafContext,
+  type QueryContext,
+  type SortExpr,
+  favoriteRefs,
+  hierarchicalRefClause,
+  refOptionsOf,
+} from "./query/EntityQueryBuilder.js";
+import { excludedCountsJoin, visibleCount } from "./query/excludedCounts.js";
+import { STUDIO_REF, loadRefsByKey } from "./query/nestedRefs.js";
 
-// Query builder options
-export interface GroupQueryOptions {
-  userId: number;
-  filters?: PeekGroupFilter;
-  applyExclusions?: boolean; // Default true - use pre-computed exclusions
-  sort: string;
-  sortDirection: "ASC" | "DESC";
-  page: number;
-  perPage: number;
-  searchQuery?: string;
-  allowedInstanceIds?: string[];
-  specificInstanceId?: string; // Single instance filter for disambiguation on detail pages
-  randomSeed?: number; // Seed for consistent random ordering
+/** A group's place in the collection hierarchy, as its detail page shows it */
+export interface GroupHierarchy {
+  containing_groups: GroupRelationRef[];
+  sub_groups: GroupRelationRef[];
 }
 
-// Query result
-export interface GroupQueryResult {
-  groups: NormalizedGroup[];
-  total: number;
-}
-
-/**
- * Builds and executes SQL queries for group filtering
- */
-class GroupQueryBuilder {
-  // Column list for SELECT - all StashGroup fields plus user data
-  private readonly SELECT_COLUMNS = `
+// Column list for SELECT - all StashGroup fields plus user data; the
+// counts as the viewer sees them (query/excludedCounts.ts)
+const selectColumns = (ctx: QueryContext) =>
+  `
     g.id, g.stashInstanceId, g.name, g.date, g.studioId, g.rating100 AS stashRating100,
-    g.duration, g.sceneCount, g.performerCount,
-    g.director, g.synopsis, g.urls,
+    g.duration,
+    ${visibleCount(ctx, "g.sceneCount", "scenes")} AS sceneCount,
+    ${visibleCount(ctx, "g.performerCount", "performers")} AS performerCount,
+    g.director, g.synopsis, g.urls, g.aliases,
     g.frontImagePath, g.backImagePath,
     g.stashCreatedAt, g.stashUpdatedAt,
     r.rating AS userRating, r.favorite AS userFavorite
   `.trim();
 
-  // Base FROM clause with user data JOINs
-  private buildFromClause(
-    userId: number,
-    applyExclusions: boolean = true
-  ): { sql: string; params: number[] } {
-    const baseJoins = `
-        FROM StashGroup g
-        LEFT JOIN GroupRating r ON g.id = r.groupId AND g.stashInstanceId = r.instanceId AND r.userId = ?
-    `.trim();
+/** The viewer whose exclusions apply, or null */
+const viewerOf = (ctx: QueryContext): number | null =>
+  ctx.applyExclusions ? ctx.userId : null;
 
-    if (applyExclusions) {
-      return {
-        sql: `${baseJoins}
-        LEFT JOIN UserExcludedEntity e ON e.userId = ? AND e.entityType = 'group' AND e.entityId = g.id AND (e.instanceId = '' OR e.instanceId = g.stashInstanceId)`,
-        params: [userId, userId],
-      };
-    }
+/**
+ * The collection's direct sub-collections that are live and the viewer can
+ * see (`gsc`, through GroupRelation `gsr` by its primary key prefix): the
+ * FROM after `SELECT ...`, the WHERE, and the parameters the FROM binds. A
+ * sub-collection is on the collection's own instance, which the list
+ * already allows.
+ */
+function visibleSubGroups(ctx: QueryContext): FilterClause {
+  const guard = visibleGuard("gsc", "group", viewerOf(ctx));
+  return {
+    sql: `FROM GroupRelation gsr JOIN StashGroup gsc ON gsc.id = gsr.subId AND gsc.stashInstanceId = gsr.subInstanceId${guard.join} WHERE gsr.containingId = g.id AND gsr.containingInstanceId = g.stashInstanceId AND gsr.subInstanceId = g.stashInstanceId AND ${guard.where}`,
+    params: guard.params,
+  };
+}
 
+/**
+ * The collections directly containing it, live and visible to the viewer
+ * (`gcp`, through GroupRelation `gcr` by its (subId, subInstanceId) index),
+ * on its own instance: as `visibleSubGroups`
+ */
+function visibleContainingGroups(ctx: QueryContext): FilterClause {
+  const guard = visibleGuard("gcp", "group", viewerOf(ctx));
+  return {
+    sql: `FROM GroupRelation gcr JOIN StashGroup gcp ON gcp.id = gcr.containingId AND gcp.stashInstanceId = gcr.containingInstanceId${guard.join} WHERE gcr.subId = g.id AND gcr.subInstanceId = g.stashInstanceId AND gcr.containingInstanceId = g.stashInstanceId AND ${guard.where}`,
+    params: guard.params,
+  };
+}
+
+/** How many rows a `visible...` FROM reads, as a scalar subquery */
+function countOf(from: FilterClause): FilterClause {
+  return { sql: `(SELECT COUNT(*) ${from.sql})`, params: from.params };
+}
+
+/** The collection's live tags the viewer can see */
+function tagCount(ctx: QueryContext): FilterClause {
+  const guard = visibleGuard("gtt", "tag", viewerOf(ctx));
+  return {
+    sql: `(SELECT COUNT(*) FROM GroupTag gtc JOIN StashTag gtt ON gtt.id = gtc.tagId AND gtt.stashInstanceId = gtc.tagInstanceId${guard.join} WHERE gtc.groupId = g.id AND gtc.groupInstanceId = g.stashInstanceId AND ${guard.where})`,
+    params: guard.params,
+  };
+}
+
+/**
+ * The viewer's O count or plays summed over the collection's live scenes
+ * they can see (Stash's group O count and play count, from the viewer's
+ * own WatchHistory rows only): SceneGroup by its group index, each scene
+ * by its key, the history by (user, instance, scene). Never missing: 0.
+ */
+function historySum(
+  column: "oCount" | "playCount",
+  ctx: QueryContext
+): FilterClause {
+  const guard = visibleGuard("gws", "scene", viewerOf(ctx));
+  return {
+    sql: `(SELECT COALESCE(SUM(gw.${column}), 0) FROM SceneGroup gwg JOIN StashScene gws ON gws.id = gwg.sceneId AND gws.stashInstanceId = gwg.sceneInstanceId${guard.join} JOIN WatchHistory gw ON gw.userId = ? AND gw.instanceId = gws.stashInstanceId AND gw.sceneId = gws.id WHERE gwg.groupId = g.id AND gwg.groupInstanceId = g.stashInstanceId AND ${guard.where})`,
+    params: [...guard.params, ctx.userId],
+  };
+}
+
+/**
+ * The sub-group count column: the group's direct sub-groups that are live
+ * and, with exclusions applied, not excluded for the user, as the
+ * `sub_group_count` filter counts them. Each row probes GroupRelation's
+ * primary key prefix (containingId, containingInstanceId), so a page of 40
+ * groups is 40 lookups.
+ */
+function subGroupCountColumn(ctx: QueryContext): SqlFragment {
+  const count = countOf(visibleSubGroups(ctx));
+  return { sql: `${count.sql} AS subGroupCount`, params: count.params };
+}
+
+const GROUP_SPEC: EntitySpec = {
+  table: "StashGroup",
+  alias: "g",
+  entityType: "group",
+  userJoins: [{ table: "GroupRating", alias: "r", entityIdCol: "groupId" }],
+  // The viewer's excluded links per collection, for the counts
+  extraJoins: (ctx) => excludedCountsJoin(ctx, "group", "g"),
+  selectColumns: (ctx) => {
+    const subGroupCount = subGroupCountColumn(ctx);
     return {
-      sql: baseJoins,
-      params: [userId],
+      sql: `${selectColumns(ctx)},\n    ${subGroupCount.sql}`,
+      params: subGroupCount.params,
     };
-  }
+  },
+  defaultSort: "name",
+  // Equal values list by name, then by the base's key
+  tiebreak: (field) =>
+    field === "name" ? undefined : "g.name COLLATE NOCASE ASC",
+};
 
-  // Base WHERE clause (always filter deleted, optionally filter excluded)
-  private buildBaseWhere(applyExclusions: boolean = true): FilterClause {
-    if (applyExclusions) {
-      return {
-        sql: "g.deletedAt IS NULL AND e.id IS NULL",
-        params: [],
-      };
-    }
-    return {
-      sql: "g.deletedAt IS NULL",
+/** A group's studio, on the group's own row */
+const GROUP_STUDIO: ColumnTarget = {
+  kind: "column",
+  parentTable: "StashGroup",
+  parentAlias: "g",
+  idCol: "studioId",
+  instanceCol: "stashInstanceId",
+};
+
+/** A group's tags */
+const GROUP_TAGS: JunctionTarget = {
+  kind: "junction",
+  table: "GroupTag",
+  alias: "gt",
+  parentAlias: "g",
+  parentIdCol: "groupId",
+  parentInstanceCol: "groupInstanceId",
+  refIdCol: "tagId",
+  refInstanceCol: "tagInstanceId",
+};
+
+/** Groups holding one of the scenes (a scene's Collections tab) */
+const GROUPS_BY_SCENE: ViaSceneSpec = {
+  alias: "g",
+  junction: { table: "SceneGroup", alias: "sg" },
+  entityIdCol: "groupId",
+  entityInstanceCol: "groupInstanceId",
+  sceneIdCol: "sceneId",
+  sceneInstanceCol: "sceneInstanceId",
+};
+
+/** Groups with a scene of one of the performers (a performer's Collections tab) */
+const GROUPS_BY_PERFORMER: ViaSceneSpec = {
+  ...GROUPS_BY_SCENE,
+  via: {
+    table: "ScenePerformer",
+    alias: "sp",
+    sceneIdCol: "sceneId",
+    sceneInstanceCol: "sceneInstanceId",
+    refIdCol: "performerId",
+    refInstanceCol: "performerInstanceId",
+  },
+};
+
+/**
+ * Builds and executes SQL queries for group filtering
+ */
+class GroupQueryBuilder extends EntityQueryBuilder<
+  GroupQueryRow,
+  NormalizedGroup,
+  "group"
+> {
+  protected readonly spec = GROUP_SPEC;
+
+  protected sortMap(
+    dir: SortDirection,
+    filter: ParsedFilter<"group">,
+    ctx: QueryContext
+  ): Record<string, SortExpr> {
+    const column = (sql: string): SortExpr => ({
+      sql: `${sql} ${dir}`,
       params: [],
-    };
-  }
-
-  /**
-   * Build instance filter clause for multi-instance support
-   */
-  private buildInstanceFilter(allowedInstanceIds: string[] | undefined): FilterClause {
-    if (!allowedInstanceIds || allowedInstanceIds.length === 0) {
-      return { sql: "", params: [] };
-    }
-    const placeholders = allowedInstanceIds.map(() => "?").join(", ");
-    return {
-      sql: `(g.stashInstanceId IN (${placeholders}) OR g.stashInstanceId IS NULL)`,
-      params: allowedInstanceIds,
-    };
-  }
-
-  /**
-   * Build filter for a specific instance ID (for disambiguation on detail pages)
-   */
-  private buildSpecificInstanceFilter(instanceId: string | undefined): FilterClause {
-    if (!instanceId) {
-      return { sql: "", params: [] };
-    }
-    return {
-      sql: `g.stashInstanceId = ?`,
-      params: [instanceId],
-    };
-  }
-
-  /**
-   * Build ID filter clause
-   */
-  private buildIdFilter(
-    filter: { value?: string[] | null; modifier?: string | null } | string[] | undefined | null
-  ): FilterClause {
-    const ids = Array.isArray(filter) ? filter : filter?.value;
-    if (!ids || ids.length === 0) {
-      return { sql: "", params: [] };
-    }
-
-    const modifier = Array.isArray(filter) ? "INCLUDES" : filter?.modifier || "INCLUDES";
-    const placeholders = ids.map(() => "?").join(", ");
-
-    switch (modifier) {
-      case "INCLUDES":
-        return { sql: `g.id IN (${placeholders})`, params: ids };
-      case "EXCLUDES":
-        return { sql: `g.id NOT IN (${placeholders})`, params: ids };
-      default:
-        return { sql: `g.id IN (${placeholders})`, params: ids };
-    }
-  }
-
-  /**
-   * Build studio filter clause with hierarchy support
-   */
-  private async buildStudioFilterWithHierarchy(
-    filter: { value?: string[] | null; modifier?: string | null; depth?: number | null } | undefined | null
-  ): Promise<FilterClause> {
-    if (!filter || !filter.value || filter.value.length === 0) {
-      return { sql: "", params: [] };
-    }
-
-    // Parse composite keys ("5:instance-1" -> "5") since UI sends composite format
-    const { parsed } = parseCompositeFilterValues(filter.value);
-    let ids = parsed.map(p => p.id);
-    const { modifier = "INCLUDES", depth } = filter;
-
-    // Expand IDs if depth is specified and not 0
-    if (depth !== undefined && depth !== null && depth !== 0) {
-      ids = await expandStudioIds(ids, depth);
-    }
-
-    const placeholders = ids.map(() => "?").join(", ");
-
-    switch (modifier) {
-      case "INCLUDES":
-        return {
-          sql: `g.studioId IN (${placeholders})`,
-          params: ids,
-        };
-
-      case "INCLUDES_ALL":
-        // For studios, a group can only have one studio, so INCLUDES_ALL with multiple IDs would return nothing
-        if (ids.length === 1) {
-          return {
-            sql: `g.studioId = ?`,
-            params: ids,
-          };
-        }
-        // Multiple studios in INCLUDES_ALL means no group can match (a group has at most one studio)
-        return { sql: "1 = 0", params: [] };
-
-      case "EXCLUDES":
-        return {
-          sql: `(g.studioId IS NULL OR g.studioId NOT IN (${placeholders}))`,
-          params: ids,
-        };
-
-      default:
-        return { sql: "", params: [] };
-    }
-  }
-
-  /**
-   * Build scenes filter clause
-   * Filter groups by scenes they contain
-   */
-  private buildScenesFilter(
-    filter: { value?: string[] | null; modifier?: string | null } | undefined | null
-  ): FilterClause {
-    if (!filter || !filter.value || filter.value.length === 0) {
-      return { sql: "", params: [] };
-    }
-
-    const { value: ids, modifier = "INCLUDES" } = filter;
-    const placeholders = ids.map(() => "?").join(", ");
-
-    // Groups contain scenes via SceneGroup junction table
-    switch (modifier) {
-      case "INCLUDES":
-        return {
-          sql: `g.id IN (
-            SELECT sg.groupId FROM SceneGroup sg
-            WHERE sg.sceneId IN (${placeholders})
-          )`,
-          params: ids,
-        };
-
-      case "INCLUDES_ALL":
-        return {
-          sql: `g.id IN (
-            SELECT sg.groupId FROM SceneGroup sg
-            WHERE sg.sceneId IN (${placeholders})
-            GROUP BY sg.groupId
-            HAVING COUNT(DISTINCT sg.sceneId) = ?
-          )`,
-          params: [...ids, ids.length],
-        };
-
-      case "EXCLUDES":
-        return {
-          sql: `g.id NOT IN (
-            SELECT sg.groupId FROM SceneGroup sg
-            WHERE sg.sceneId IN (${placeholders})
-          )`,
-          params: ids,
-        };
-
-      default:
-        return { sql: "", params: [] };
-    }
-  }
-
-  /**
-   * Build performer filter clause
-   * Groups don't have direct performer relationships - we check via scenes
-   */
-  private buildPerformerFilter(
-    filter: { value?: string[] | null; modifier?: string | null } | undefined | null
-  ): FilterClause {
-    if (!filter || !filter.value || filter.value.length === 0) {
-      return { sql: "", params: [] };
-    }
-
-    const { value: ids, modifier = "INCLUDES" } = filter;
-    const placeholders = ids.map(() => "?").join(", ");
-
-    // Groups contain scenes, scenes have performers
-    // Join: StashGroup -> SceneGroup -> ScenePerformer
-    switch (modifier) {
-      case "INCLUDES":
-        return {
-          sql: `g.id IN (
-            SELECT sg.groupId FROM SceneGroup sg
-            JOIN ScenePerformer sp ON sg.sceneId = sp.sceneId AND sg.sceneInstanceId = sp.sceneInstanceId
-            WHERE sp.performerId IN (${placeholders})
-          )`,
-          params: ids,
-        };
-
-      case "INCLUDES_ALL":
-        return {
-          sql: `g.id IN (
-            SELECT sg.groupId FROM SceneGroup sg
-            JOIN ScenePerformer sp ON sg.sceneId = sp.sceneId AND sg.sceneInstanceId = sp.sceneInstanceId
-            WHERE sp.performerId IN (${placeholders})
-            GROUP BY sg.groupId
-            HAVING COUNT(DISTINCT sp.performerId) = ?
-          )`,
-          params: [...ids, ids.length],
-        };
-
-      case "EXCLUDES":
-        return {
-          sql: `g.id NOT IN (
-            SELECT sg.groupId FROM SceneGroup sg
-            JOIN ScenePerformer sp ON sg.sceneId = sp.sceneId AND sg.sceneInstanceId = sp.sceneInstanceId
-            WHERE sp.performerId IN (${placeholders})
-          )`,
-          params: ids,
-        };
-
-      default:
-        return { sql: "", params: [] };
-    }
-  }
-
-  /**
-   * Build tag filter clause with hierarchy support
-   */
-  private async buildTagFilterWithHierarchy(
-    filter: { value?: string[] | null; modifier?: string | null; depth?: number | null } | undefined | null
-  ): Promise<FilterClause> {
-    if (!filter || !filter.value || filter.value.length === 0) {
-      return { sql: "", params: [] };
-    }
-
-    // Parse composite keys ("284:instance-1" -> "284") since UI sends composite format
-    const { parsed } = parseCompositeFilterValues(filter.value);
-    let ids = parsed.map(p => p.id);
-    const { modifier, depth } = filter;
-
-    // Expand IDs if depth is specified and not 0
-    if (depth !== undefined && depth !== null && depth !== 0) {
-      ids = await expandTagIds(ids, depth);
-    }
-
-    return buildJunctionFilter(
-      coerceEntityRefs(ids), "GroupTag", "groupId", "groupInstanceId",
-      "tagId", "tagInstanceId", "g", modifier || "INCLUDES"
-    );
-  }
-
-  /**
-   * Build search query filter (searches name and synopsis)
-   */
-  private buildSearchFilter(searchQuery: string | undefined): FilterClause {
-    if (!searchQuery || searchQuery.trim() === "") {
-      return { sql: "", params: [] };
-    }
-
-    const lowerQuery = `%${searchQuery.toLowerCase()}%`;
-    return {
-      sql: "(LOWER(g.name) LIKE ? OR LOWER(g.synopsis) LIKE ?)",
-      params: [lowerQuery, lowerQuery],
-    };
-  }
-
-  /**
-   * Build ORDER BY clause
-   */
-  private buildSortClause(sort: string, direction: "ASC" | "DESC", randomSeed?: number): string {
-    const dir = direction === "ASC" ? "ASC" : "DESC";
-    const seed = randomSeed || 12345;
-
-    const sortMap: Record<string, string> = {
-      // Group metadata - use COLLATE NOCASE for case-insensitive sorting
-      name: `g.name COLLATE NOCASE ${dir}`,
-      date: `g.date ${dir}`,
-      created_at: `g.stashCreatedAt ${dir}`,
-      updated_at: `g.stashUpdatedAt ${dir}`,
-
-      // Counts
-      scene_count: `g.sceneCount ${dir}`,
-      performer_count: `g.performerCount ${dir}`,
-      duration: `g.duration ${dir}`,
-
-      // User ratings
-      rating: `COALESCE(r.rating, 0) ${dir}`,
-      rating100: `COALESCE(r.rating, 0) ${dir}`,
-
-      // Random - seeded formula matching Stash's algorithm, prevents SQLite integer overflow
-      random: `(((((g.id + ${seed}) % 2147483647) * ((g.id + ${seed}) % 2147483647) % 2147483647) * 52959209 % 2147483647 + ((g.id + ${seed}) * 1047483763 % 2147483647)) % 2147483647) ${dir}`,
-    };
-
-    const sortExpr = sortMap[sort] || sortMap["name"];
-
-    // Add secondary sort by name for stable ordering
-    if (sort !== "name") {
-      return `${sortExpr}, g.name COLLATE NOCASE ASC`;
-    }
-    return `${sortExpr}, g.id ${dir}`;
-  }
-
-  async execute(options: GroupQueryOptions): Promise<GroupQueryResult> {
-    const startTime = Date.now();
-    const { userId, page, perPage, applyExclusions = true, filters, searchQuery, allowedInstanceIds, specificInstanceId, randomSeed } = options;
-
-    // Build FROM clause with optional exclusion JOIN
-    const fromClause = this.buildFromClause(userId, applyExclusions);
-
-    // Build WHERE clauses
-    const whereClauses: FilterClause[] = [this.buildBaseWhere(applyExclusions)];
-
-    // Instance filter (multi-instance support)
-    const instanceFilter = this.buildInstanceFilter(allowedInstanceIds);
-    if (instanceFilter.sql) {
-      whereClauses.push(instanceFilter);
-    }
-
-    // Specific instance filter (for disambiguation on detail pages)
-    if (specificInstanceId) {
-      const specificFilter = this.buildSpecificInstanceFilter(specificInstanceId);
-      if (specificFilter.sql) {
-        whereClauses.push(specificFilter);
-      }
-    }
-
-    // Search query
-    const searchFilter = this.buildSearchFilter(searchQuery);
-    if (searchFilter.sql) {
-      whereClauses.push(searchFilter);
-    }
-
-    // ID filter
-    if (filters?.ids) {
-      const idFilter = this.buildIdFilter(filters.ids);
-      if (idFilter.sql) {
-        whereClauses.push(idFilter);
-      }
-    }
-
-    // User data filters
-    const favoriteFilter = buildFavoriteFilter(filters?.favorite);
-    if (favoriteFilter.sql) {
-      whereClauses.push(favoriteFilter);
-    }
-
-    // Studio filter
-    if (filters?.studios) {
-      const studioFilter = await this.buildStudioFilterWithHierarchy(filters.studios);
-      if (studioFilter.sql) {
-        whereClauses.push(studioFilter);
-      }
-    }
-
-    // Scenes filter
-    if (filters?.scenes) {
-      const scenesFilter = this.buildScenesFilter(filters.scenes);
-      if (scenesFilter.sql) {
-        whereClauses.push(scenesFilter);
-      }
-    }
-
-    // Performer filter (via scenes)
-    if (filters?.performers) {
-      const performerFilter = this.buildPerformerFilter(filters.performers);
-      if (performerFilter.sql) {
-        whereClauses.push(performerFilter);
-      }
-    }
-
-    // Tag filter
-    if (filters?.tags) {
-      const tagFilter = await this.buildTagFilterWithHierarchy(filters.tags);
-      if (tagFilter.sql) {
-        whereClauses.push(tagFilter);
-      }
-    }
-
-    // Rating filter
-    if (filters?.rating100) {
-      const ratingFilter = buildNumericFilter(filters.rating100, "COALESCE(r.rating, 0)");
-      if (ratingFilter.sql) {
-        whereClauses.push(ratingFilter);
-      }
-    }
-
-    // Scene count filter
-    if (filters?.scene_count) {
-      const sceneCountFilter = buildNumericFilter(filters.scene_count, "COALESCE(g.sceneCount, 0)");
-      if (sceneCountFilter.sql) {
-        whereClauses.push(sceneCountFilter);
-      }
-    }
-
-    // Duration filter
-    if (filters?.duration) {
-      const durationFilter = buildNumericFilter(filters.duration, "COALESCE(g.duration, 0)");
-      if (durationFilter.sql) {
-        whereClauses.push(durationFilter);
-      }
-    }
-
-    // Name filter
-    if (filters?.name) {
-      const nameFilter = buildTextFilter(filters.name, "g.name");
-      if (nameFilter.sql) {
-        whereClauses.push(nameFilter);
-      }
-    }
-
-    // Date filters
-    if (filters?.date) {
-      const dateFilter = buildDateFilter(filters.date, "g.date");
-      if (dateFilter.sql) {
-        whereClauses.push(dateFilter);
-      }
-    }
-
-    if (filters?.created_at) {
-      const createdAtFilter = buildDateFilter(filters.created_at, "g.stashCreatedAt");
-      if (createdAtFilter.sql) {
-        whereClauses.push(createdAtFilter);
-      }
-    }
-
-    if (filters?.updated_at) {
-      const updatedAtFilter = buildDateFilter(filters.updated_at, "g.stashUpdatedAt");
-      if (updatedAtFilter.sql) {
-        whereClauses.push(updatedAtFilter);
-      }
-    }
-
-    // Combine WHERE clauses
-    const whereSQL = whereClauses.map((c) => c.sql).filter(Boolean).join(" AND ");
-    const whereParams = whereClauses.flatMap((c) => c.params);
-
-    // Build sort clause
-    const sortClause = this.buildSortClause(options.sort, options.sortDirection, randomSeed);
-
-    // Build full query
-    const offset = (page - 1) * perPage;
-    const sql = `
-      SELECT ${this.SELECT_COLUMNS}
-      ${fromClause.sql}
-      WHERE ${whereSQL}
-      ORDER BY ${sortClause}
-      LIMIT ? OFFSET ?
-    `;
-
-    const params = [...fromClause.params, ...whereParams, perPage, offset];
-
-    logger.info("GroupQueryBuilder.execute", {
-      whereClauseCount: whereClauses.length,
-      applyExclusions,
-      sort: options.sort,
-      sortDirection: options.sortDirection,
-      paramCount: params.length,
     });
+    return {
+      // Group metadata, the name case-insensitive
+      name: column("g.name COLLATE NOCASE"),
+      date: column("g.date"),
+      created_at: column("g.stashCreatedAt"),
+      updated_at: column("g.stashUpdatedAt"),
 
-    // Execute query
-    const queryStart = Date.now();
-    const rows = await prisma.$queryRawUnsafe<GroupQueryRow[]>(sql, ...params);
-    const queryMs = Date.now() - queryStart;
+      // Counts, as the viewer sees them
+      scene_count: column(visibleCount(ctx, "g.sceneCount", "scenes")),
+      performer_count: column(
+        visibleCount(ctx, "g.performerCount", "performers")
+      ),
+      duration: column("g.duration"),
 
-    // Count query
-    const countStart = Date.now();
-    let total: number;
+      // The collection's tags the viewer can see, and the viewer's own O
+      // count over its visible scenes: the values the filters read
+      tag_count: this.countSort(tagCount(ctx), dir),
+      o_counter: this.countSort(historySum("oCount", ctx), dir),
+      ...this.subGroupOrderSort(dir, filter),
 
-    // Check if we have any user-data filters that require the JOINs
-    const hasUserDataFilters =
-      filters?.favorite !== undefined ||
-      filters?.rating100 !== undefined;
+      // The viewer's rating (GroupRating)
+      rating: column("COALESCE(r.rating, 0)"),
+      rating100: column("COALESCE(r.rating, 0)"),
+    };
+  }
 
-    if (hasUserDataFilters || applyExclusions) {
-      const countSql = `
-        SELECT COUNT(DISTINCT g.id || ':' || g.stashInstanceId) as total
-        ${fromClause.sql}
-        WHERE ${whereSQL}
-      `;
-      const countParams = [...fromClause.params, ...whereParams];
-      const countResult = await prisma.$queryRawUnsafe<{ total: number }[]>(countSql, ...countParams);
-      total = Number(countResult[0]?.total || 0);
-    } else {
-      // Fast path: count without JOINs
-      const baseWhereClauses = whereClauses.filter(
-        (c) => !c.sql.includes("r.")
+  /**
+   * Sub-collection order: the collection's index in the first collection
+   * the filter's `containing_groups` includes, collections without one
+   * (the filter's depth reaches collections further down) last. The LEFT
+   * JOIN reads the one (containing, sub) row by GroupRelation's primary
+   * key, on the collection's own instance, so the count is unchanged. A
+   * collection has no expression without an including criterion: the key
+   * falls back to the default sort (the parser refuses it first).
+   */
+  private subGroupOrderSort(
+    dir: SortDirection,
+    filter: ParsedFilter<"group">
+  ): Record<string, SortExpr> {
+    const criterion = filter.containing_groups;
+    const first = criterion?.refs[0];
+    if (
+      criterion === undefined ||
+      first === undefined ||
+      (criterion.modifier !== "INCLUDES" &&
+        criterion.modifier !== "INCLUDES_ALL")
+    ) {
+      return {};
+    }
+    return {
+      sub_group_order: {
+        sql: `sgo.orderIndex IS NULL, sgo.orderIndex ${dir}`,
+        params: [],
+        joins: [
+          {
+            sql: `LEFT JOIN GroupRelation sgo ON sgo.containingId = ? AND sgo.containingInstanceId = ${first.instanceId === undefined ? "g.stashInstanceId" : "?"} AND sgo.subId = g.id AND sgo.subInstanceId = g.stashInstanceId`,
+            params:
+              first.instanceId === undefined
+                ? [first.id]
+                : [first.id, first.instanceId],
+          },
+        ],
+      },
+    };
+  }
+
+  /**
+   * The group filter's clauses, one per field, in the order the statement
+   * ANDs them. A ref field's CTEs are named from the leaf (`ctx.name`).
+   */
+  protected override readonly fieldClauses: FieldClauses<"group"> = {
+    // The viewer's own data
+    favorite: (favorite) => buildFavoriteFilter(favorite),
+    performer_favorite: (on, ctx) => this.performerFavoriteClause(on, ctx),
+    o_counter: (c, ctx) => buildCountFilter(c, historySum("oCount", ctx)),
+    play_count: (c, ctx) => buildCountFilter(c, historySum("playCount", ctx)),
+
+    // Related entities
+    studios: (c, ctx) => this.studioClause(c, ctx),
+    scenes: (c, ctx) =>
+      viaSceneClause(GROUPS_BY_SCENE, c.refs, c.modifier, ctx),
+    performers: (c, ctx) =>
+      viaSceneClause(GROUPS_BY_PERFORMER, c.refs, c.modifier, ctx),
+    tags: (c, ctx) => this.tagClause(c, ctx),
+    containing_groups: (c, ctx) =>
+      this.hierarchyClause(
+        visibleContainingGroups,
+        ["gcp.id", "gcp.stashInstanceId"],
+        "down",
+        c,
+        ctx
+      ),
+    sub_groups: (c, ctx) =>
+      this.hierarchyClause(
+        visibleSubGroups,
+        ["gsc.id", "gsc.stashInstanceId"],
+        "up",
+        c,
+        ctx
+      ),
+
+    // The viewer's rating and the counts
+    rating100: (c) => buildNumericFilter(c, "r.rating"),
+    scene_count: (c, ctx) =>
+      buildNumericFilter(c, visibleCount(ctx, "g.sceneCount", "scenes")),
+    sub_group_count: (c, ctx) =>
+      buildCountFilter(c, countOf(visibleSubGroups(ctx))),
+    containing_group_count: (c, ctx) =>
+      buildCountFilter(c, countOf(visibleContainingGroups(ctx))),
+    tag_count: (c, ctx) => buildCountFilter(c, tagCount(ctx)),
+    duration: (c) => buildNumericFilter(c, "g.duration"),
+
+    // Text
+    name: (c) => buildTextFilter(c, "g.name"),
+    synopsis: (c) => buildTextFilter(c, "g.synopsis"),
+    director: (c) => buildTextFilter(c, "g.director"),
+    // Stash's single aliases text as one phrase; any one of the links
+    aliases: (c) => buildTextFilter(c, "g.aliases"),
+    url: (c) => buildTextFilter(c, null, { lists: ["g.urls"] }),
+
+    // Dates
+    date: (c) => buildDayFilter(c, "g.date"),
+    created_at: (c, ctx) =>
+      buildInstantFilter(c, "g.stashCreatedAt", ctx.timeZone),
+    updated_at: (c, ctx) =>
+      buildInstantFilter(c, "g.stashUpdatedAt", ctx.timeZone),
+  };
+
+  /**
+   * The studio filter, with the studios' descendants to the depth. A group
+   * has one studio, so the parser never sends INCLUDES_ALL here.
+   */
+  private async studioClause(
+    criterion: RefFieldCriterion,
+    ctx: LeafContext
+  ): Promise<FilterClause> {
+    // "Has any" and "has none" count only a studio the viewer can see: a
+    // studio hide does not cascade to its collections
+    return hierarchicalRefClause("studio", GROUP_STUDIO, criterion, ctx, {
+      name: ctx.name,
+      related: { table: "StashStudio", entityType: "studio" },
+    });
+  }
+
+  /** The tag filter, with the tags' descendants to the depth */
+  private async tagClause(
+    criterion: RefFieldCriterion,
+    ctx: LeafContext
+  ): Promise<FilterClause> {
+    // "Has any" and "has none" count only tags the viewer can see
+    return hierarchicalRefClause("tag", GROUP_TAGS, criterion, ctx, {
+      name: ctx.name,
+      related: { table: "StashTag", entityType: "tag" },
+    });
+  }
+
+  /**
+   * `containing_groups` and `sub_groups`: a visible linked collection (a
+   * containing one, or a sub-collection) among the refs with their
+   * descendants to the depth (`containing_groups`, "down": the collections
+   * under a ref within depth + 1 levels) or their ancestors
+   * (`sub_groups`, "up": the collections holding a ref within depth + 1
+   * levels). The expansion follows live links (utils/hierarchyUtils.ts)
+   * and ends on a cycle; the link that matches must be to a collection the
+   * viewer can see, so a hidden one links nothing. INCLUDES any,
+   * INCLUDES_ALL one of each chosen ref's own group, EXCLUDES none (a
+   * collection with no links kept). The refs match as pairs, above
+   * PAIR_INLINE_LIMIT a refs CTE (`refSetMatch`).
+   */
+  private async hierarchyClause(
+    links: (ctx: QueryContext) => FilterClause,
+    key: ParentKey,
+    direction: "down" | "up",
+    criterion: RefCriterion,
+    ctx: LeafContext
+  ): Promise<FilterClause> {
+    if (criterion.refs.length === 0) return noClause();
+    const from = links(ctx);
+    const holds = (refs: readonly FilterRef[], name: string): FilterClause => {
+      const match = refSetMatch(key, refs, {
+        name,
+        allowedInstanceIds: ctx.allowedInstanceIds,
+      });
+      return {
+        sql: `EXISTS (SELECT 1 ${from.sql} AND ${match.sql})`,
+        params: [...from.params, ...match.params],
+        ...(match.ctes ? { ctes: match.ctes } : {}),
+      };
+    };
+    if (criterion.modifier === "INCLUDES_ALL") {
+      const groups = await expandRefsEach(
+        "group",
+        criterion.refs,
+        criterion.depth,
+        ctx.allowedInstanceIds,
+        direction
       );
-      const baseWhereSQL = baseWhereClauses.map((c) => c.sql).filter(Boolean).join(" AND ");
-      const baseWhereParams = baseWhereClauses.flatMap((c) => c.params);
-
-      const countSql = `
-        SELECT COUNT(*) as total
-        FROM StashGroup g
-        WHERE ${baseWhereSQL || "1=1"}
-      `;
-      const countResult = await prisma.$queryRawUnsafe<{ total: number }[]>(countSql, ...baseWhereParams);
-      total = Number(countResult[0]?.total || 0);
+      return allOf(groups.map((group, i) => holds(group, `${ctx.name}_${i}`)));
     }
-    const countMs = Date.now() - countStart;
+    const any = holds(
+      await expandRefs(
+        "group",
+        criterion.refs,
+        criterion.depth,
+        ctx.allowedInstanceIds,
+        direction
+      ),
+      ctx.name
+    );
+    return criterion.modifier === "INCLUDES"
+      ? any
+      : { ...any, sql: `NOT ${any.sql}` };
+  }
 
-    const transformStart = Date.now();
-    const groups = rows.map((row) => this.transformRow(row));
-    const transformMs = Date.now() - transformStart;
+  /**
+   * `performer_favorite`: a favourite performer of the viewer's (live, and
+   * not one they hid: `favoriteRefs`) in one of the collection's live
+   * scenes they can see (`true`), or none (`false`), as one EXISTS keyed on
+   * the collection: SceneGroup by its group index, each scene's performers
+   * by their key. The favourites match as pairs, above PAIR_INLINE_LIMIT a
+   * refs CTE (`refSetMatch`): the via-scene INCLUDES, driven from the refs,
+   * read every performer row of 267 favourites (0.9 s a count at 215k
+   * scenes, against 4 ms keyed). With no favourites `true` matches nothing
+   * and `false` is no filter.
+   */
+  private async performerFavoriteClause(
+    on: boolean,
+    ctx: LeafContext
+  ): Promise<FilterClause> {
+    const refs = await favoriteRefs("performer", ctx);
+    if (refs.length === 0) {
+      return on ? { sql: "1 = 0", params: [] } : noClause();
+    }
+    const scene = visibleGuard("gfs", "scene", viewerOf(ctx));
+    const performer = visibleGuard("gfp", "performer", viewerOf(ctx));
+    const match = refSetMatch(
+      ["gfsp.performerId", "gfsp.performerInstanceId"],
+      refs,
+      refOptionsOf(ctx)
+    );
+    const exists: FilterClause = {
+      sql: `EXISTS (SELECT 1 FROM SceneGroup gfg JOIN StashScene gfs ON gfs.id = gfg.sceneId AND gfs.stashInstanceId = gfg.sceneInstanceId${scene.join} JOIN ScenePerformer gfsp ON gfsp.sceneId = gfs.id AND gfsp.sceneInstanceId = gfs.stashInstanceId JOIN StashPerformer gfp ON gfp.id = gfsp.performerId AND gfp.stashInstanceId = gfsp.performerInstanceId${performer.join} WHERE gfg.groupId = g.id AND gfg.groupInstanceId = g.stashInstanceId AND ${scene.where} AND ${performer.where} AND ${match.sql})`,
+      params: [...scene.params, ...performer.params, ...match.params],
+      ...(match.ctes ? { ctes: match.ctes } : {}),
+    };
+    return on ? exists : { ...exists, sql: `NOT ${exists.sql}` };
+  }
 
-    // Populate relations (tags, studio)
-    const relationsStart = Date.now();
-    await this.populateRelations(groups);
-    const relationsMs = Date.now() - relationsStart;
-
-    logger.info("GroupQueryBuilder.execute complete", {
-      queryTimeMs: Date.now() - startTime,
-      breakdown: { queryMs, countMs, transformMs, relationsMs },
-      resultCount: groups.length,
-      total,
-    });
-
-    return { groups, total };
+  /**
+   * The search across the name, synopsis and Stash's aliases text: every
+   * word must match (`searchAll`), each as `likeContains` with `ESCAPE '\'`;
+   * no `LOWER()`
+   */
+  protected override searchClause(q: string): FilterClause {
+    return searchAll(searchTerms(q), (pattern) => ({
+      sql: "(g.name LIKE ? ESCAPE '\\' OR g.synopsis LIKE ? ESCAPE '\\' OR g.aliases LIKE ? ESCAPE '\\')",
+      params: [pattern, pattern, pattern],
+    }));
   }
 
   /**
    * Transform a raw database row into a NormalizedGroup
    */
-  private transformRow(row: GroupQueryRow): NormalizedGroup {
+  protected transformRow(row: GroupQueryRow): NormalizedGroup {
     const group = {
       id: row.id,
       instanceId: row.stashInstanceId, // For multi-instance correctness in populateRelations
       name: row.name,
-      date: row.date || null,
-      director: row.director || null,
-      synopsis: row.synopsis || null,
+      date: emptyToNull(row.date),
+      director: emptyToNull(row.director),
+      synopsis: emptyToNull(row.synopsis),
       urls: parseJsonArray(row.urls),
+      aliases: emptyToNull(row.aliases),
 
       // Counts
-      scene_count: row.sceneCount || 0,
-      performer_count: row.performerCount || 0,
-      duration: row.duration || 0,
+      scene_count: Number(row.sceneCount ?? 0),
+      performer_count: Number(row.performerCount ?? 0),
+      sub_group_count: Number(row.subGroupCount),
+      duration: row.duration ?? 0,
 
       // Image paths - transform to proxy URLs with instanceId for multi-instance routing
-      front_image_path: this.transformUrl(row.frontImagePath, row.stashInstanceId),
-      back_image_path: this.transformUrl(row.backImagePath, row.stashInstanceId),
+      front_image_path: toProxyUrl(row.frontImagePath, row.stashInstanceId),
+      back_image_path: toProxyUrl(row.backImagePath, row.stashInstanceId),
 
       // Timestamps
-      created_at: row.stashCreatedAt || null,
-      updated_at: row.stashUpdatedAt || null,
+      created_at: row.stashCreatedAt?.toISOString() ?? null,
+      updated_at: row.stashUpdatedAt?.toISOString() ?? null,
 
       // User data - Peek user data ONLY
-      rating: row.userRating ?? null,
-      rating100: row.userRating ?? null,
-      favorite: Boolean(row.userFavorite),
+      rating: row.userRating,
+      rating100: row.userRating,
+      favorite: row.userFavorite ?? false,
 
       // Relations - populated separately
-      studio: row.studioId ? { id: row.studioId, name: "" } as StudioRef : null,
-      studioId: row.studioId || null, // For multi-instance correctness in populateRelations
+      studio: row.studioId
+        ? ({ id: row.studioId, name: "" } as StudioRef)
+        : null,
+      studioId: emptyToNull(row.studioId), // For multi-instance correctness in populateRelations
       tags: [] as TagRef[],
       scenes: [] as { id: string }[],
     };
@@ -629,261 +553,87 @@ class GroupQueryBuilder {
   }
 
   /**
-   * Populate group relations (tags, studio, performers, galleries)
-   * Includes minimal data for TooltipEntityGrid
+   * A group's place in the collection hierarchy: the groups containing it, by
+   * name, and its sub-groups, in Stash's order (`orderIndex`), each with the
+   * link's description. The first query drives from GroupRelation's reverse
+   * index (subId, subInstanceId), the second from its primary key prefix.
+   * Both leave out deleted groups and those excluded for the user (hidden,
+   * restricted, empty), as the list's sub-group count does. The other end is
+   * held to the group's own instance, which the caller already allows.
    */
-  async populateRelations(groups: NormalizedGroup[]): Promise<void> {
-    if (groups.length === 0) return;
+  async getHierarchy(
+    groupId: string,
+    instanceId: string,
+    userId: number
+  ): Promise<GroupHierarchy> {
+    const visible = `LEFT JOIN UserExcludedEntity e ON e.userId = ? AND e.entityType = 'group' AND e.entityId = other.id AND (e.instanceId = '' OR e.instanceId = other.stashInstanceId)`;
 
-    const groupIds = groups.map((g) => g.id);
-    // Extract instanceIds from groups for multi-instance correctness
-    const groupInstanceIds = [...new Set(groups.map((g) => g.instanceId))];
-
-    // Load tag junctions and scene groups - filter by both groupId AND groupInstanceId
-    const [tagJunctions, sceneGroups] = await Promise.all([
-      prisma.groupTag.findMany({
-        where: {
-          groupId: { in: groupIds },
-          groupInstanceId: { in: groupInstanceIds },
-        },
-      }),
-      prisma.sceneGroup.findMany({
-        where: {
-          groupId: { in: groupIds },
-          groupInstanceId: { in: groupInstanceIds },
-        },
-        select: { groupId: true, groupInstanceId: true, sceneId: true, sceneInstanceId: true },
-      }),
+    const [containing, sub] = await Promise.all([
+      prisma.$queryRawUnsafe<GroupRelationQueryRow[]>(
+        `SELECT other.id, other.stashInstanceId, other.name, gr.description
+        FROM GroupRelation gr
+        JOIN StashGroup other ON other.id = gr.containingId AND other.stashInstanceId = gr.containingInstanceId AND other.deletedAt IS NULL
+        ${visible}
+        WHERE gr.subId = ? AND gr.subInstanceId = ? AND gr.containingInstanceId = ? AND e.id IS NULL
+        ORDER BY other.name COLLATE NOCASE ASC, other.id ASC`,
+        userId,
+        groupId,
+        instanceId,
+        instanceId
+      ),
+      prisma.$queryRawUnsafe<GroupRelationQueryRow[]>(
+        `SELECT other.id, other.stashInstanceId, other.name, gr.description
+        FROM GroupRelation gr
+        JOIN StashGroup other ON other.id = gr.subId AND other.stashInstanceId = gr.subInstanceId AND other.deletedAt IS NULL
+        ${visible}
+        WHERE gr.containingId = ? AND gr.containingInstanceId = ? AND gr.subInstanceId = ? AND e.id IS NULL
+        ORDER BY gr.orderIndex ASC, other.id ASC`,
+        userId,
+        groupId,
+        instanceId,
+        instanceId
+      ),
     ]);
 
-    // Collect unique scene keys from junction records
-    const sceneKeys = [...new Map(
-      sceneGroups.map((sg) => [`${sg.sceneId}:${sg.sceneInstanceId}`, { id: sg.sceneId, instanceId: sg.sceneInstanceId }])
-    ).values()];
-    const sceneIds = sceneKeys.map((k) => k.id);
-    const sceneInstanceIds = [...new Set(sceneKeys.map((k) => k.instanceId))];
-
-    // Load scene relationships - filter by both sceneId AND sceneInstanceId
-    const [scenePerformers, sceneGalleries] = await Promise.all([
-      sceneIds.length > 0
-        ? prisma.scenePerformer.findMany({
-            where: {
-              sceneId: { in: sceneIds },
-              sceneInstanceId: { in: sceneInstanceIds },
-            },
-            select: { sceneId: true, sceneInstanceId: true, performerId: true, performerInstanceId: true },
-          })
-        : [],
-      sceneIds.length > 0
-        ? prisma.sceneGallery.findMany({
-            where: {
-              sceneId: { in: sceneIds },
-              sceneInstanceId: { in: sceneInstanceIds },
-            },
-            select: { sceneId: true, sceneInstanceId: true, galleryId: true, galleryInstanceId: true },
-          })
-        : [],
-    ]);
-
-    // Collect unique entity keys (id:instanceId) from junction tables
-    const tagKeys = [...new Map(
-      tagJunctions.map((j) => [`${j.tagId}:${j.tagInstanceId}`, { id: j.tagId, instanceId: j.tagInstanceId }])
-    ).values()];
-    const studioKeys = [...new Map(
-      groups
-        .flatMap((g) => g.studioId ? [[`${g.studioId}:${g.instanceId}`, { id: g.studioId, instanceId: g.instanceId }] as const] : [])
-    ).values()];
-    const performerKeys = [...new Map(
-      scenePerformers.map((sp) => [`${sp.performerId}:${sp.performerInstanceId}`, { id: sp.performerId, instanceId: sp.performerInstanceId }])
-    ).values()];
-    const galleryKeys = [...new Map(
-      sceneGalleries.map((sg) => [`${sg.galleryId}:${sg.galleryInstanceId}`, { id: sg.galleryId, instanceId: sg.galleryInstanceId }])
-    ).values()];
-
-    // Build OR conditions for entity queries using composite keys
-    const tagOrConditions = tagKeys.map((k) => ({
-      id: k.id,
-      stashInstanceId: k.instanceId,
-    }));
-    const studioOrConditions = studioKeys.map((k) => ({
-      id: k.id,
-      stashInstanceId: k.instanceId,
-    }));
-    const performerOrConditions = performerKeys.map((k) => ({
-      id: k.id,
-      stashInstanceId: k.instanceId,
-    }));
-    const galleryOrConditions = galleryKeys.map((k) => ({
-      id: k.id,
-      stashInstanceId: k.instanceId,
-    }));
-
-    // Load all entities in parallel using composite key lookups
-    const [tags, studios, performers, galleries] = await Promise.all([
-      tagOrConditions.length > 0 ? prisma.stashTag.findMany({ where: { OR: tagOrConditions } }) : [],
-      studioOrConditions.length > 0 ? prisma.stashStudio.findMany({ where: { OR: studioOrConditions } }) : [],
-      performerOrConditions.length > 0 ? prisma.stashPerformer.findMany({ where: { OR: performerOrConditions } }) : [],
-      galleryOrConditions.length > 0 ? prisma.stashGallery.findMany({ where: { OR: galleryOrConditions } }) : [],
-    ]);
-
-    // Build lookup maps with composite keys (id:instanceId)
-    const tagsByKey = new Map<string, TagRef>();
-    for (const t of tags) {
-      const key = `${t.id}:${t.stashInstanceId}`;
-      tagsByKey.set(key, {
-        id: t.id,
-        instanceId: t.stashInstanceId,
-        name: t.name,
-        image_path: this.transformUrl(t.imagePath, t.stashInstanceId),
-        favorite: t.favorite,
-      });
-    }
-
-    const studiosByKey = new Map<string, StudioRef>();
-    for (const s of studios) {
-      const key = `${s.id}:${s.stashInstanceId}`;
-      studiosByKey.set(key, {
-        id: s.id,
-        instanceId: s.stashInstanceId,
-        name: s.name,
-        image_path: this.transformUrl(s.imagePath, s.stashInstanceId),
-        favorite: s.favorite,
-        parent_studio: s.parentId ? { id: s.parentId } : null,
-      });
-    }
-
-    const performersByKey = new Map<string, PerformerRef>();
-    for (const p of performers) {
-      const key = `${p.id}:${p.stashInstanceId}`;
-      performersByKey.set(key, {
-        id: p.id,
-        instanceId: p.stashInstanceId,
-        name: p.name,
-        disambiguation: p.disambiguation || null,
-        gender: p.gender || null,
-        image_path: this.transformUrl(p.imagePath, p.stashInstanceId),
-        favorite: p.favorite,
-        rating100: p.rating100 ?? null,
-      });
-    }
-
-    const galleriesByKey = new Map<string, GalleryRef>();
-    for (const g of galleries) {
-      const key = `${g.id}:${g.stashInstanceId}`;
-      galleriesByKey.set(key, {
-        id: g.id,
-        instanceId: g.stashInstanceId,
-        title: g.title || getGalleryFallbackTitle(g.folderPath, g.fileBasename),
-        cover: this.transformUrl(g.coverPath, g.stashInstanceId),
-      });
-    }
-
-    // Build group -> tags map using composite keys
-    // Key format: groupId:groupInstanceId -> tags[]
-    const tagsByGroup = new Map<string, TagRef[]>();
-    for (const junction of tagJunctions) {
-      const tagKey = `${junction.tagId}:${junction.tagInstanceId}`;
-      const tag = tagsByKey.get(tagKey);
-      if (!tag) continue; // Skip orphaned junction records
-      const groupKey = `${junction.groupId}:${junction.groupInstanceId}`;
-      const list = tagsByGroup.get(groupKey) || [];
-      list.push(tag);
-      tagsByGroup.set(groupKey, list);
-    }
-
-    // Build group -> scene mapping using composite keys
-    // Key format: groupId:groupInstanceId -> Set<sceneId:sceneInstanceId>
-    const scenesByGroup = new Map<string, Set<string>>();
-    for (const sg of sceneGroups) {
-      const groupKey = `${sg.groupId}:${sg.groupInstanceId}`;
-      const sceneKey = `${sg.sceneId}:${sg.sceneInstanceId}`;
-      const set = scenesByGroup.get(groupKey) || new Set();
-      set.add(sceneKey);
-      scenesByGroup.set(groupKey, set);
-    }
-
-    // Build scene -> entities mappings using composite keys
-    // Key format: sceneId:sceneInstanceId -> Set<entityId:entityInstanceId>
-    const performersByScene = new Map<string, Set<string>>();
-    for (const sp of scenePerformers) {
-      const sceneKey = `${sp.sceneId}:${sp.sceneInstanceId}`;
-      const performerKey = `${sp.performerId}:${sp.performerInstanceId}`;
-      const set = performersByScene.get(sceneKey) || new Set();
-      set.add(performerKey);
-      performersByScene.set(sceneKey, set);
-    }
-
-    const galleriesByScene = new Map<string, Set<string>>();
-    for (const sg of sceneGalleries) {
-      const sceneKey = `${sg.sceneId}:${sg.sceneInstanceId}`;
-      const galleryKey = `${sg.galleryId}:${sg.galleryInstanceId}`;
-      const set = galleriesByScene.get(sceneKey) || new Set();
-      set.add(galleryKey);
-      galleriesByScene.set(sceneKey, set);
-    }
-
-    // Populate groups using composite keys
-    for (const group of groups) {
-      const groupKey = `${group.id}:${group.instanceId}`;
-      group.tags = tagsByGroup.get(groupKey) || [];
-
-      // Hydrate studio with tooltip data (id, name, image_path) using composite key
-      if (group.studio?.id) {
-        const studioKey = `${group.studio.id}:${group.instanceId}`;
-        const studioData = studiosByKey.get(studioKey);
-        if (studioData) {
-          group.studio = studioData;
-        }
-      }
-
-      // Derive performers and galleries from group's scenes using composite keys
-      const groupSceneKeys = scenesByGroup.get(groupKey) || new Set();
-
-      const groupPerformerKeys = new Set<string>();
-      const groupGalleryKeys = new Set<string>();
-
-      for (const sceneKey of groupSceneKeys) {
-        for (const performerKey of performersByScene.get(sceneKey) || []) groupPerformerKeys.add(performerKey);
-        for (const galleryKey of galleriesByScene.get(sceneKey) || []) groupGalleryKeys.add(galleryKey);
-      }
-
-      group.performers = [...groupPerformerKeys].map((key) => performersByKey.get(key)).filter((p): p is PerformerRef => !!p);
-      group.galleries = [...groupGalleryKeys].map((key) => galleriesByKey.get(key)).filter((g): g is GalleryRef => !!g);
-    }
+    const toRef = (row: GroupRelationQueryRow): GroupRelationRef => ({
+      group: { id: row.id, name: row.name, instanceId: row.stashInstanceId },
+      description: row.description,
+    });
+    return {
+      containing_groups: containing.map(toRef),
+      sub_groups: sub.map(toRef),
+    };
   }
 
-
   /**
-   * Transform a Stash URL/path to a proxy URL
-   * @param urlOrPath - The URL or path to transform
-   * @param instanceId - Optional Stash instance ID for multi-instance routing
+   * The card's relations for the whole page: its tags, at most
+   * TOOLTIP_LIMIT performers and galleries with how many there are
+   * (TooltipRelations), one statement per relation; and its studio, on the
+   * group's instance, only when the viewer may see it (`query/nestedRefs.ts`)
    */
-  private transformUrl(urlOrPath: string | null, instanceId?: string | null): string | null {
-    if (!urlOrPath) return null;
+  protected async populateRelations(
+    groups: NormalizedGroup[],
+    ctx: QueryContext
+  ): Promise<void> {
+    if (groups.length === 0) return;
 
-    if (urlOrPath.startsWith("/api/proxy/stash")) {
-      return urlOrPath;
+    const studioRefs = groups.flatMap((group): EntityRef[] =>
+      group.studioId
+        ? [{ id: group.studioId, instanceId: group.instanceId }]
+        : []
+    );
+    const relations = await loadTooltipRelations("group", groups, ctx.userId);
+    const studios = await loadRefsByKey(STUDIO_REF, studioRefs, ctx);
+    for (const group of groups) {
+      Object.assign(
+        group,
+        relations.get(entityKey(group.id, group.instanceId))
+      );
+      // The row's studio id until here; none when the viewer cannot see it
+      group.studio = group.studioId
+        ? (studios.get(entityKey(group.studioId, group.instanceId)) ?? null)
+        : null;
     }
-
-    let proxyPath: string;
-
-    if (urlOrPath.startsWith("http://") || urlOrPath.startsWith("https://")) {
-      try {
-        const url = new URL(urlOrPath);
-        const pathWithQuery = url.pathname + url.search;
-        proxyPath = `/api/proxy/stash?path=${encodeURIComponent(pathWithQuery)}`;
-      } catch {
-        proxyPath = `/api/proxy/stash?path=${encodeURIComponent(urlOrPath)}`;
-      }
-    } else {
-      proxyPath = `/api/proxy/stash?path=${encodeURIComponent(urlOrPath)}`;
-    }
-
-    if (instanceId) {
-      proxyPath += `&instanceId=${encodeURIComponent(instanceId)}`;
-    }
-
-    return proxyPath;
   }
 }
 

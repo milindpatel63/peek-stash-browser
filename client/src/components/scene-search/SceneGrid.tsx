@@ -1,20 +1,33 @@
-import React, { useEffect, useRef, useState } from "react";
-import { LucideCheckSquare, LucideSquare, LucideEyeOff, LucidePlus } from "lucide-react";
+import {
+  type ReactNode,
+  useCallback,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type { NormalizedScene } from "@peek/shared-types";
+import {
+  LucideCheckSquare,
+  LucideEyeOff,
+  LucidePlus,
+  LucideSquare,
+} from "lucide-react";
 import { getGridClasses } from "../../constants/grids";
-import { useGridColumns } from "../../hooks/useGridColumns";
 import { useHideBulkAction } from "../../hooks/useHideBulkAction";
+import { useRenderedColumns } from "../../hooks/useRenderedColumns";
+import { makeCompositeKey } from "../../utils/compositeKey";
 import {
   AddToPlaylistButton,
   BulkActionBar,
   Button,
   EmptyState,
-  ErrorMessage,
   HideConfirmationDialog,
   LoadingSpinner,
   Pagination,
   SceneCard,
   SkeletonSceneCard,
+  StatusMessage,
 } from "../ui/index";
 
 interface Props {
@@ -26,16 +39,34 @@ interface Props {
   totalPages?: number;
   onPageChange?: (page: number) => void;
   onSceneClick?: (scene: NormalizedScene) => void;
-  onHideSuccess?: (sceneId: string, entityType: string) => void;
+  onHideSuccess?: (
+    entityId: string,
+    entityType: string,
+    instanceId?: string
+  ) => void;
   fromPageTitle?: string;
   emptyMessage?: string;
-  emptyDescription?: string;
+  emptyDescription?: ReactNode;
   enableKeyboard?: boolean;
-  isTVMode?: boolean;
-  tvGridZoneActive?: boolean;
-  gridNavigation?: unknown;
-  gridItemProps?: ((index: number) => Record<string, unknown>) | null;
+  /**
+   * What the selection belongs to: the list's query, page included. The
+   * selection clears when it changes (a filter, a sort, a page), so a bulk
+   * action never reaches scenes the user no longer sees. Without one, only a
+   * page change through `onPageChange` clears it.
+   */
+  selectionScope?: string;
 }
+
+const keyOf = (scene: NormalizedScene) =>
+  makeCompositeKey(scene.id, scene.instanceId);
+
+/** The selected scenes, and the one a Shift+click range starts from */
+interface Selection {
+  scenes: NormalizedScene[];
+  anchor: string | null;
+}
+
+const NO_SELECTION: Selection = { scenes: [], anchor: null };
 
 const SceneGrid = ({
   scenes,
@@ -51,70 +82,105 @@ const SceneGrid = ({
   emptyMessage = "No scenes found",
   emptyDescription = "Check your media library configuration",
   enableKeyboard = true, // eslint-disable-line @typescript-eslint/no-unused-vars
-  isTVMode = false, // eslint-disable-line @typescript-eslint/no-unused-vars
-  tvGridZoneActive = false,
-  gridNavigation = null, // eslint-disable-line @typescript-eslint/no-unused-vars
-  gridItemProps = null,
+  selectionScope,
 }: Props) => {
   const gridRef = useRef<HTMLDivElement>(null);
-  const columns = useGridColumns("scenes");
+  const columns = useRenderedColumns(gridRef);
   const gridClasses = getGridClasses("scene", density);
 
   // Selection state (always enabled, no mode toggle)
-  const [selectedScenes, setSelectedScenes] = useState<NormalizedScene[]>([]);
+  const [selection, setSelection] = useState<Selection>(NO_SELECTION);
+  const selectedScenes = selection.scenes;
 
-  // Selection handlers
-  const handleToggleSelect = (scene: NormalizedScene) => {
-    setSelectedScenes((prev) => {
-      const isSelected = prev.some((s) => s.id === scene.id);
-      if (isSelected) {
-        return prev.filter((s) => s.id !== scene.id);
-      } else {
-        return [...prev, scene];
-      }
-    });
-  };
+  // A new scope is a new list: the selection starts over (adjusted while
+  // rendering, not in an effect, so no frame shows the old selection)
+  const [scope, setScope] = useState(selectionScope);
+  if (scope !== selectionScope) {
+    setScope(selectionScope);
+    setSelection(NO_SELECTION);
+  }
 
+  // A range reads the page's current scenes without changing the toggle
+  const scenesRef = useRef(scenes);
+  useLayoutEffect(() => {
+    scenesRef.current = scenes;
+  }, [scenes]);
+
+  // One toggle for every card, so memoised cards keep. A scene is its id on
+  // its server: two servers can hold the same id.
+  const handleToggleSelect = useCallback(
+    (scene: NormalizedScene, options?: { range: boolean }) => {
+      const key = keyOf(scene);
+      setSelection((prev) => {
+        if (options?.range && prev.anchor !== null) {
+          // Shift+click: every scene on the page between the last click and this
+          const page = scenesRef.current;
+          const keys = page.map(keyOf);
+          const from = keys.indexOf(prev.anchor);
+          const to = keys.indexOf(key);
+          if (from >= 0 && to >= 0) {
+            const have = new Set(prev.scenes.map(keyOf));
+            const added = page
+              .slice(Math.min(from, to), Math.max(from, to) + 1)
+              .filter((s) => !have.has(keyOf(s)));
+            return { scenes: [...prev.scenes, ...added], anchor: key };
+          }
+        }
+        const isSelected = prev.scenes.some((s) => keyOf(s) === key);
+        return {
+          scenes: isSelected
+            ? prev.scenes.filter((s) => keyOf(s) !== key)
+            : [...prev.scenes, scene],
+          anchor: key,
+        };
+      });
+    },
+    []
+  );
+
+  const selectedKeys = useMemo(
+    () => new Set(selectedScenes.map(keyOf)),
+    [selectedScenes]
+  );
+
+  // Select All is the page on screen
   const handleSelectAll = () => {
-    setSelectedScenes(scenes || []);
+    setSelection((prev) => ({ scenes: scenes || [], anchor: prev.anchor }));
   };
 
   const handleDeselectAll = () => {
-    setSelectedScenes([]);
+    setSelection(NO_SELECTION);
   };
 
   const handleClearSelection = () => {
-    setSelectedScenes([]);
+    setSelection(NO_SELECTION);
   };
 
   // Bulk hide action
-  const { hideDialogOpen, isHiding, handleHideClick, handleHideConfirm, closeHideDialog } = useHideBulkAction({
+  const {
+    hideDialogOpen,
+    isHiding,
+    handleHideClick,
+    handleHideConfirm,
+    closeHideDialog,
+  } = useHideBulkAction({
     selectedScenes,
     onComplete: handleClearSelection,
-    onHideSuccess: onHideSuccess as ((id: string | number, entityType: string) => void) | undefined,
+    onHideSuccess: onHideSuccess as
+      | ((id: string | number, entityType: string) => void)
+      | undefined,
   });
-
-  // Set initial focus when grid loads and zone is active (only in TV mode)
-  useEffect(() => {
-    if (tvGridZoneActive && scenes?.length > 0 && gridRef.current) {
-      // Focus the grid container to enable keyboard navigation
-      const firstFocusable = gridRef.current.querySelector('[tabindex="0"]') as HTMLElement | null;
-      if (firstFocusable) {
-        firstFocusable.focus();
-      }
-    }
-  }, [tvGridZoneActive, scenes]);
 
   // Clear selections when page changes - wrapped in handler instead of effect
   const handlePageChange = (page: number) => {
-    setSelectedScenes([]);
+    setSelection(NO_SELECTION);
     onPageChange?.(page);
   };
 
   if (loading) {
     return (
       <div className={gridClasses}>
-        {[...Array(12)].map((_, i) => (
+        {Array.from({ length: 12 }).map((_, i) => (
           <SkeletonSceneCard key={i} />
         ))}
       </div>
@@ -122,26 +188,11 @@ const SceneGrid = ({
   }
 
   if (error) {
-    return <ErrorMessage error={error} />;
+    return <StatusMessage variant="error" message={error} />;
   }
 
   if (!scenes || scenes.length === 0) {
-    return (
-      <div className="flex items-center justify-center py-16">
-        <div className="text-center">
-          <div className="text-6xl mb-4" style={{ color: "var(--text-muted)" }}>
-            🎬
-          </div>
-          <h3
-            className="text-xl font-medium mb-2"
-            style={{ color: "var(--text-primary)" }}
-          >
-            {emptyMessage}
-          </h3>
-          <p style={{ color: "var(--text-secondary)" }}>{emptyDescription}</p>
-        </div>
-      </div>
-    );
+    return <EmptyState title={emptyMessage} description={emptyDescription} />;
   }
 
   return (
@@ -170,24 +221,20 @@ const SceneGrid = ({
 
       {/* Grid */}
       <div ref={gridRef} className={gridClasses}>
-        {scenes.map((scene: NormalizedScene, index: number) => {
-          // Use gridItemProps if provided (TV mode with zone navigation), otherwise use defaults
-          const itemProps = gridItemProps ? gridItemProps(index) : {};
-          return (
-            <SceneCard
-              key={scene.id}
-              scene={scene}
-              onClick={selectedScenes.length === 0 && onSceneClick ? () => onSceneClick(scene) : undefined}
-              onHideSuccess={onHideSuccess}
-              fromPageTitle={fromPageTitle}
-              isSelected={selectedScenes.some((s) => s.id === scene.id)}
-              onToggleSelect={handleToggleSelect}
-              selectionMode={selectedScenes.length > 0}
-              autoplayOnScroll={columns === 1}
-              {...itemProps}
-            />
-          );
-        })}
+        {scenes.map((scene: NormalizedScene) => (
+          <SceneCard
+            key={makeCompositeKey(scene.id, scene.instanceId)}
+            scene={scene}
+            // The page's one handler: the card calls it with its scene
+            onClick={selectedScenes.length === 0 ? onSceneClick : undefined}
+            onHideSuccess={onHideSuccess}
+            fromPageTitle={fromPageTitle}
+            isSelected={selectedKeys.has(keyOf(scene))}
+            onToggleSelect={handleToggleSelect}
+            selectionMode={selectedScenes.length > 0}
+            autoplayOnScroll={columns === 1}
+          />
+        ))}
       </div>
 
       {/* Pagination */}
@@ -220,7 +267,7 @@ const SceneGrid = ({
                   </span>
                 </Button>
                 <AddToPlaylistButton
-                  sceneIds={selectedScenes.map((s) => s.id)}
+                  scenes={selectedScenes}
                   buttonText={`Add ${selectedScenes.length} to Playlist`}
                   icon={<LucidePlus className="w-4 h-4" />}
                   dropdownPosition="above"
@@ -232,7 +279,7 @@ const SceneGrid = ({
           <HideConfirmationDialog
             isOpen={hideDialogOpen}
             onClose={closeHideDialog}
-            onConfirm={handleHideConfirm}
+            onConfirm={(dontAskAgain) => void handleHideConfirm(dontAskAgain)}
             entityType="scene"
             entityName={`${selectedScenes.length} scene${selectedScenes.length !== 1 ? "s" : ""}`}
           />

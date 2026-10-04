@@ -1,101 +1,379 @@
-import { renderHook } from "@testing-library/react";
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import type { Mock } from "vitest";
-import { usePlaylistMediaKeys } from "@/hooks/useMediaKeys";
-import { useVideoPlayerShortcuts } from "@/hooks/useKeyboardShortcuts";
-import { isInRatingMode } from "@/hooks/useRatingHotkeys";
+import { type ReactNode, createElement } from "react";
+import { act, renderHook } from "@testing-library/react";
+import { untrusted } from "@tests/helpers/untrusted";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { ShortcutScopeProvider } from "@/contexts/ShortcutScopeContext";
+import { usePlayerHotkeys, usePlaylistMediaKeys } from "@/hooks/useMediaKeys";
+import { useRatingHotkeys } from "@/hooks/useRatingHotkeys";
 
-vi.mock("@/hooks/useKeyboardShortcuts", () => ({
-  useVideoPlayerShortcuts: vi.fn(),
-}));
+type MediaKeysOptions = Parameters<typeof usePlaylistMediaKeys>[0];
 
-vi.mock("@/hooks/useRatingHotkeys", () => ({
-  isInRatingMode: vi.fn(() => false),
-}));
+/** A mock Video.js player with sensible defaults. */
+const createMockPlayer = (
+  overrides: Partial<Record<string, ReturnType<typeof vi.fn>>> = {}
+) => ({
+  paused: vi.fn(() => true),
+  play: vi.fn(),
+  pause: vi.fn(),
+  currentTime: vi.fn((t?: number) => t ?? 30),
+  duration: vi.fn(() => 100),
+  volume: vi.fn((v?: number) => v ?? 0.5),
+  muted: vi.fn((m?: boolean) => m ?? false),
+  playbackRate: vi.fn((r?: number) => r ?? 1),
+  isFullscreen: vi.fn(() => false),
+  exitFullscreen: vi.fn(),
+  requestFullscreen: vi.fn(),
+  ...overrides,
+});
 
-const mockUseVideoPlayerShortcuts = useVideoPlayerShortcuts as Mock;
-const mockIsInRatingMode = isInRatingMode as Mock;
+const wrapper = ({ children }: { children: ReactNode }) =>
+  createElement(ShortcutScopeProvider, null, children);
 
-/**
- * Creates a mock Video.js player with sensible defaults.
- */
-function createMockPlayer(overrides: Record<string, any> = {}) {
-  return {
-    paused: vi.fn(() => true),
-    play: vi.fn(),
-    pause: vi.fn(),
-    currentTime: vi.fn((t?: number) => (t !== undefined ? t : 30)),
-    duration: vi.fn(() => 100),
-    volume: vi.fn((v?: number) => (v !== undefined ? v : 0.5)),
-    muted: vi.fn((m?: boolean) => (m !== undefined ? m : false)),
-    playbackRate: vi.fn((r?: number) => (r !== undefined ? r : 1)),
-    isFullscreen: vi.fn(() => false),
-    exitFullscreen: vi.fn(),
-    requestFullscreen: vi.fn(),
-    ...overrides,
-  };
+const mounted: HTMLElement[] = [];
+
+/** A DOM element in the document, removed after the test. */
+function addElement<K extends keyof HTMLElementTagNameMap>(
+  tag: K,
+  attrs: Record<string, string> = {},
+  parent: HTMLElement = document.body
+): HTMLElementTagNameMap[K] {
+  const el = document.createElement(tag);
+  for (const [name, value] of Object.entries(attrs)) {
+    el.setAttribute(name, value);
+  }
+  parent.appendChild(el);
+  mounted.push(el);
+  return el;
 }
 
 /**
- * Captures the shortcuts object passed to useVideoPlayerShortcuts.
+ * Mounts the player's keys. The player's element holds a button and a menu;
+ * a tab and a button sit outside it.
  */
-function captureShortcuts(
-  playerOverrides: Record<string, any> = {},
-  hookOptions: Record<string, any> = {}
+function setup(
+  playerOverrides: Partial<Record<string, ReturnType<typeof vi.fn>>> = {},
+  hookOptions: Partial<MediaKeysOptions> = {}
 ) {
   const player = createMockPlayer(playerOverrides);
   const playerRef = { current: player };
+  const playerEl = addElement("div", { tabindex: "-1" });
+  const playerButton = addElement("button", {}, playerEl);
+  const menu = addElement("div", { role: "menu" }, playerEl);
+  const menuItem = addElement("button", { role: "menuitem" }, menu);
+  const pageButton = addElement("button");
+  const pageTab = addElement("button", { role: "tab" });
 
-  renderHook(() =>
-    usePlaylistMediaKeys({
-      playerRef: playerRef as any,
-      playlist: hookOptions.playlist ?? null,
-      playNext: hookOptions.playNext ?? null,
-      playPrevious: hookOptions.playPrevious ?? null,
-      enabled: hookOptions.enabled ?? true,
-    })
+  const rendered = renderHook(
+    () =>
+      usePlaylistMediaKeys({
+        playerRef,
+        playlist: hookOptions.playlist ?? null,
+        playNext: hookOptions.playNext ?? null,
+        playPrevious: hookOptions.playPrevious ?? null,
+        enabled: hookOptions.enabled ?? true,
+        root: () => playerEl,
+      }),
+    { wrapper }
   );
 
-  // useVideoPlayerShortcuts is called with (playerRef, shortcuts, options)
-  const lastCall =
-    mockUseVideoPlayerShortcuts.mock.calls[
-      mockUseVideoPlayerShortcuts.mock.calls.length - 1
-    ];
-  const shortcuts = lastCall[1] as Record<string, (event?: any) => any>;
-
-  return { player, playerRef, shortcuts };
+  return {
+    player,
+    playerEl,
+    playerButton,
+    menuItem,
+    pageButton,
+    pageTab,
+    ...rendered,
+  };
 }
 
+/** Dispatches a keydown on the target (the body by default). */
+function press(
+  key: string,
+  target: EventTarget = document.body,
+  init: Partial<KeyboardEventInit> = {}
+) {
+  const event = new KeyboardEvent("keydown", {
+    key,
+    bubbles: true,
+    cancelable: true,
+    ...init,
+  });
+  act(() => {
+    target.dispatchEvent(event);
+  });
+  return event;
+}
+
+afterEach(() => {
+  for (const el of mounted.splice(0)) el.remove();
+  if (document.activeElement instanceof HTMLElement) {
+    document.activeElement.blur();
+  }
+});
+
 describe("usePlaylistMediaKeys", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    mockIsInRatingMode.mockReturnValue(false);
+  // ─── Focus decides who owns the key ─────────────────────────────────────
+
+  it("Space on a focused button outside the player activates the button and does not toggle playback", () => {
+    const { player, pageButton } = setup();
+    pageButton.focus();
+
+    const event = press(" ", pageButton);
+
+    expect(player.play).not.toHaveBeenCalled();
+    expect(player.pause).not.toHaveBeenCalled();
+    expect(event.defaultPrevented).toBe(false);
+  });
+
+  it("Space with focus on the page body toggles playback", () => {
+    const { player } = setup({ paused: vi.fn(() => true) });
+
+    const event = press(" ", document.body);
+
+    expect(player.play).toHaveBeenCalledTimes(1);
+    expect(event.defaultPrevented).toBe(true);
+  });
+
+  it("Space with focus inside the player's element toggles playback", () => {
+    const { player, playerEl } = setup({ paused: vi.fn(() => false) });
+    playerEl.focus();
+
+    press(" ", playerEl);
+
+    expect(player.pause).toHaveBeenCalledTimes(1);
+  });
+
+  it("Space on a button inside the player activates the button and does not toggle playback", () => {
+    const { player, playerButton } = setup();
+    playerButton.focus();
+
+    press(" ", playerButton);
+
+    expect(player.play).not.toHaveBeenCalled();
+    expect(player.pause).not.toHaveBeenCalled();
+  });
+
+  it("arrows inside a video.js menu (role=menu) move in the menu and do not seek", () => {
+    const { player, menuItem } = setup();
+    menuItem.focus();
+
+    for (const key of ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"]) {
+      press(key, menuItem);
+    }
+
+    expect(player.currentTime).not.toHaveBeenCalled();
+    expect(player.volume).not.toHaveBeenCalled();
+  });
+
+  it("End with focus on a tab outside the player does nothing to the video", () => {
+    const { player, pageTab } = setup();
+    pageTab.focus();
+
+    press("End", pageTab);
+    press("Home", pageTab);
+    press("ArrowRight", pageTab);
+    press("k", pageTab);
+
+    expect(player.currentTime).not.toHaveBeenCalled();
+    expect(player.play).not.toHaveBeenCalled();
+  });
+
+  it("does not act in a text field", () => {
+    const { player } = setup();
+    const input = addElement("input", { type: "text" });
+    input.focus();
+
+    press("k", input);
+    press("End", input);
+
+    expect(player.play).not.toHaveBeenCalled();
+    expect(player.currentTime).not.toHaveBeenCalled();
+  });
+
+  it("does nothing when disabled", () => {
+    const { player } = setup({}, { enabled: false });
+
+    press("k");
+
+    expect(player.play).not.toHaveBeenCalled();
+  });
+
+  it("does nothing while the player is not created yet", () => {
+    const playerRef = { current: null };
+    renderHook(
+      () =>
+        usePlaylistMediaKeys({
+          playerRef,
+          playlist: null,
+          playNext: null,
+          playPrevious: null,
+          root: () => null,
+        }),
+      { wrapper }
+    );
+
+    expect(() => press("k")).not.toThrow();
+  });
+
+  // ─── Focus on video.js's own controls ───────────────────────────────────
+
+  describe("with focus on a video.js control, which stops the key from bubbling", () => {
+    type Hotkeys = (event: KeyboardEvent) => void;
+
+    /**
+     * video.js 7's copy of a DOM event (`fixEvent`): the fields are copied,
+     * and preventDefault and stopPropagation forward to the native event.
+     */
+    function videoJsEvent(native: KeyboardEvent): KeyboardEvent {
+      let stopped = false;
+      const event = {
+        key: native.key,
+        ctrlKey: native.ctrlKey,
+        metaKey: native.metaKey,
+        altKey: native.altKey,
+        shiftKey: native.shiftKey,
+        isComposing: native.isComposing,
+        target: native.target,
+        defaultPrevented: false,
+        preventDefault() {
+          native.preventDefault();
+          event.defaultPrevented = true;
+        },
+        stopPropagation() {
+          native.stopPropagation();
+          stopped = true;
+        },
+        isPropagationStopped: () => stopped,
+      };
+      return untrusted(event);
+    }
+
+    /**
+     * The player's element and a button in it, wired as video.js 7 wires
+     * them: the button (`ClickableComponent`) clicks itself on Space and
+     * Enter; for any other key but Tab it stops the event and hands it to
+     * the player's `userActions.hotkeys` (`Component#handleKeyDown`). The
+     * player's own element hands every key that bubbles to it to the same
+     * function (`Player#handleKeyDown`).
+     */
+    function setupVideoJs(
+      playerOverrides: Partial<Record<string, ReturnType<typeof vi.fn>>> = {}
+    ) {
+      const player = createMockPlayer(playerOverrides);
+      const playerRef = { current: player };
+      const playerEl = addElement("div", { tabindex: "-1" });
+      const control = addElement("button", { class: "vjs-control" }, playerEl);
+      const onClick = vi.fn();
+      control.addEventListener("click", onClick);
+
+      const rendered = renderHook(
+        () => {
+          usePlaylistMediaKeys({
+            playerRef,
+            playlist: null,
+            playNext: null,
+            playPrevious: null,
+            root: () => playerEl,
+          });
+          return usePlayerHotkeys();
+        },
+        { wrapper }
+      );
+      const hotkeys: Hotkeys = (event) => rendered.result.current(event);
+
+      control.addEventListener("keydown", (native) => {
+        const event = videoJsEvent(native);
+        if (event.key === " " || event.key === "Enter") {
+          event.preventDefault();
+          event.stopPropagation();
+          control.click();
+          return;
+        }
+        if (event.key !== "Tab") event.stopPropagation();
+        hotkeys(event);
+      });
+      playerEl.addEventListener("keydown", (native) => {
+        hotkeys(videoJsEvent(native));
+      });
+
+      return { player, playerEl, control, onClick };
+    }
+
+    it("m on the control mutes once", () => {
+      const { player, control } = setupVideoJs();
+      control.focus();
+
+      const event = press("m", control);
+
+      expect(player.muted).toHaveBeenCalledTimes(2); // read, then set
+      expect(player.muted).toHaveBeenLastCalledWith(true);
+      expect(event.defaultPrevented).toBe(true);
+    });
+
+    it("k on the control toggles playback once", () => {
+      const { player, control } = setupVideoJs({ paused: vi.fn(() => true) });
+      control.focus();
+
+      press("k", control);
+
+      expect(player.play).toHaveBeenCalledTimes(1);
+    });
+
+    it("m on the player's own element, which bubbles to the page, mutes once", () => {
+      const { player, playerEl } = setupVideoJs();
+      playerEl.focus();
+
+      press("m", playerEl);
+
+      expect(player.muted).toHaveBeenCalledTimes(2);
+      expect(player.muted).toHaveBeenLastCalledWith(true);
+    });
+
+    it("Space on the control is the control's click, and no shortcut toggles playback as well", () => {
+      const { player, control, onClick } = setupVideoJs();
+      control.focus();
+
+      press(" ", control);
+
+      expect(onClick).toHaveBeenCalledTimes(1);
+      expect(player.play).not.toHaveBeenCalled();
+      expect(player.pause).not.toHaveBeenCalled();
+    });
   });
 
   // ─── Play/pause ─────────────────────────────────────────────────────────
 
   it("toggles play/pause with space key (plays when paused)", () => {
-    const { player, shortcuts } = captureShortcuts({ paused: vi.fn(() => true) });
+    const { player } = setup({ paused: vi.fn(() => true) });
 
-    shortcuts.space();
+    press(" ");
 
     expect(player.play).toHaveBeenCalledTimes(1);
     expect(player.pause).not.toHaveBeenCalled();
   });
 
   it("toggles play/pause with space key (pauses when playing)", () => {
-    const { player, shortcuts } = captureShortcuts({ paused: vi.fn(() => false) });
+    const { player } = setup({ paused: vi.fn(() => false) });
 
-    shortcuts.space();
+    press(" ");
 
     expect(player.pause).toHaveBeenCalledTimes(1);
     expect(player.play).not.toHaveBeenCalled();
   });
 
   it("toggles play/pause with k key", () => {
-    const { player, shortcuts } = captureShortcuts({ paused: vi.fn(() => true) });
+    const { player } = setup({ paused: vi.fn(() => true) });
 
-    shortcuts.k();
+    press("k");
+
+    expect(player.play).toHaveBeenCalledTimes(1);
+  });
+
+  it("toggles play/pause with the media play/pause key", () => {
+    const { player } = setup({ paused: vi.fn(() => true) });
+
+    press("MediaPlayPause");
 
     expect(player.play).toHaveBeenCalledTimes(1);
   });
@@ -103,279 +381,292 @@ describe("usePlaylistMediaKeys", () => {
   // ─── Seeking ────────────────────────────────────────────────────────────
 
   it("seeks backward 10s with j key (clamped to 0)", () => {
-    const { player, shortcuts } = captureShortcuts({
-      currentTime: vi.fn((t?: number) => (t !== undefined ? t : 5)),
+    const { player } = setup({
+      currentTime: vi.fn((t?: number) => t ?? 5),
     });
 
-    shortcuts.j();
+    press("j");
 
-    // 5 - 10 = -5, clamped to 0
     expect(player.currentTime).toHaveBeenCalledWith(0);
   });
 
   it("seeks forward 10s with l key", () => {
-    const { player, shortcuts } = captureShortcuts({
-      currentTime: vi.fn((t?: number) => (t !== undefined ? t : 30)),
-    });
+    const { player } = setup();
 
-    shortcuts.l();
+    press("l");
 
     expect(player.currentTime).toHaveBeenCalledWith(40);
   });
 
   it("seeks backward 5s with left arrow", () => {
-    const { player, shortcuts } = captureShortcuts({
-      currentTime: vi.fn((t?: number) => (t !== undefined ? t : 30)),
-    });
+    const { player } = setup();
 
-    shortcuts.left();
+    press("ArrowLeft");
 
     expect(player.currentTime).toHaveBeenCalledWith(25);
   });
 
   it("seeks forward 5s with right arrow", () => {
-    const { player, shortcuts } = captureShortcuts({
-      currentTime: vi.fn((t?: number) => (t !== undefined ? t : 30)),
-    });
+    const { player } = setup();
 
-    shortcuts.right();
+    press("ArrowRight");
 
     expect(player.currentTime).toHaveBeenCalledWith(35);
   });
 
-  // ─── Home / End ─────────────────────────────────────────────────────────
-
   it("seeks to start with Home key", () => {
-    const { player, shortcuts } = captureShortcuts();
+    const { player } = setup();
 
-    shortcuts.home();
+    press("Home");
 
     expect(player.currentTime).toHaveBeenCalledWith(0);
   });
 
   it("seeks to end with End key", () => {
-    const { player, shortcuts } = captureShortcuts({
-      duration: vi.fn(() => 200),
-    });
+    const { player } = setup({ duration: vi.fn(() => 200) });
 
-    shortcuts.end();
+    press("End");
 
     expect(player.currentTime).toHaveBeenCalledWith(200);
   });
 
-  // ─── Number keys percentage ─────────────────────────────────────────────
+  it("jumps to a percentage with number keys", () => {
+    const { player } = setup();
 
-  it("jumps to percentage with number keys", () => {
-    const { player, shortcuts } = captureShortcuts({
-      duration: vi.fn(() => 100),
-    });
-
-    shortcuts["0"]();
-    expect(player.currentTime).toHaveBeenCalledWith(0);
-
-    player.currentTime.mockClear();
-    shortcuts["5"]();
-    expect(player.currentTime).toHaveBeenCalledWith(50);
-
-    player.currentTime.mockClear();
-    shortcuts["9"]();
-    expect(player.currentTime).toHaveBeenCalledWith(90);
+    press("0");
+    expect(player.currentTime).toHaveBeenLastCalledWith(0);
+    press("5");
+    expect(player.currentTime).toHaveBeenLastCalledWith(50);
+    press("9");
+    expect(player.currentTime).toHaveBeenLastCalledWith(90);
   });
 
-  // ─── Rating mode blocks numbers 0-5 ────────────────────────────────────
+  // ─── Rating keys share the number row and f ─────────────────────────────
 
-  it("returns false for keys 0-5 when in rating mode", () => {
-    mockIsInRatingMode.mockReturnValue(true);
-    const { shortcuts } = captureShortcuts();
+  describe("with the page's rating keys", () => {
+    // Both hooks in one render share one dispatcher
+    function setupShared() {
+      const player = createMockPlayer();
+      const playerRef = { current: player };
+      const setRating = vi.fn();
+      const toggleFavorite = vi.fn();
+      renderHook(
+        () => {
+          usePlaylistMediaKeys({
+            playerRef,
+            playlist: null,
+            playNext: null,
+            playPrevious: null,
+            root: () => null,
+          });
+          useRatingHotkeys({ setRating, toggleFavorite });
+        },
+        { wrapper }
+      );
+      return { player, setRating, toggleFavorite };
+    }
 
-    for (const key of ["0", "1", "2", "3", "4", "5"]) {
-      expect(shortcuts[key]()).toBe(false);
+    it("r then 5 sets the rating and does not jump to 50%", () => {
+      const { player, setRating } = setupShared();
+
+      press("r");
+      press("5");
+
+      expect(setRating).toHaveBeenCalledWith(100);
+      expect(player.currentTime).not.toHaveBeenCalled();
+    });
+
+    it("r then 0 clears the rating and does not jump to the start", () => {
+      const { player, setRating } = setupShared();
+
+      press("r");
+      press("0");
+
+      expect(setRating).toHaveBeenCalledWith(null);
+      expect(player.currentTime).not.toHaveBeenCalled();
+    });
+
+    it("r then f toggles the favorite and does not toggle fullscreen", () => {
+      const { player, toggleFavorite } = setupShared();
+
+      press("r");
+      press("f");
+
+      expect(toggleFavorite).toHaveBeenCalledTimes(1);
+      expect(player.requestFullscreen).not.toHaveBeenCalled();
+    });
+
+    it("5 and f alone still act on the video", () => {
+      const { player, setRating, toggleFavorite } = setupShared();
+
+      press("5");
+      press("f");
+
+      expect(player.currentTime).toHaveBeenCalledWith(50);
+      expect(player.requestFullscreen).toHaveBeenCalledTimes(1);
+      expect(setRating).not.toHaveBeenCalled();
+      expect(toggleFavorite).not.toHaveBeenCalled();
+    });
+  });
+
+  it("jumps with 6-9", () => {
+    const { player } = setup();
+
+    for (const [key, time] of [
+      ["6", 60],
+      ["7", 70],
+      ["8", 80],
+    ] as const) {
+      press(key);
+      expect(player.currentTime).toHaveBeenLastCalledWith(time);
     }
   });
 
-  // ─── Numbers 6-9 always work ───────────────────────────────────────────
-
-  it("does not block keys 6-9 even in rating mode", () => {
-    mockIsInRatingMode.mockReturnValue(true);
-    const { player, shortcuts } = captureShortcuts({
-      duration: vi.fn(() => 100),
-    });
-
-    for (const key of ["6", "7", "8", "9"]) {
-      const result = shortcuts[key]();
-      expect(result).not.toBe(false);
-    }
-    // Verify actual seeking happened
-    expect(player.currentTime).toHaveBeenCalled();
-  });
-
-  // ─── Volume ─────────────────────────────────────────────────────────────
+  // ─── Volume, mute, speed, fullscreen ────────────────────────────────────
 
   it("increases volume with up arrow (+0.05, clamped to 1)", () => {
-    const { player, shortcuts } = captureShortcuts({
-      volume: vi.fn((v?: number) => (v !== undefined ? v : 0.95)),
-    });
+    const { player } = setup({ volume: vi.fn((v?: number) => v ?? 0.95) });
 
-    shortcuts.up();
+    press("ArrowUp");
 
     expect(player.volume).toHaveBeenCalledWith(1);
   });
 
   it("decreases volume with down arrow (-0.05, clamped to 0)", () => {
-    const { player, shortcuts } = captureShortcuts({
-      volume: vi.fn((v?: number) => (v !== undefined ? v : 0.03)),
-    });
+    const { player } = setup({ volume: vi.fn((v?: number) => v ?? 0.03) });
 
-    shortcuts.down();
+    press("ArrowDown");
 
     expect(player.volume).toHaveBeenCalledWith(0);
   });
 
-  // ─── Mute toggle ───────────────────────────────────────────────────────
-
   it("toggles mute with m key", () => {
-    const { player, shortcuts } = captureShortcuts({
-      muted: vi.fn((m?: boolean) => (m !== undefined ? m : false)),
-    });
+    const { player } = setup();
 
-    shortcuts.m();
+    press("m");
 
     expect(player.muted).toHaveBeenCalledWith(true);
   });
 
-  // ─── Speed control ─────────────────────────────────────────────────────
-
   it("increases playback speed with shift+> (max 2)", () => {
-    const { player, shortcuts } = captureShortcuts({
-      playbackRate: vi.fn((r?: number) => (r !== undefined ? r : 1.75)),
+    const { player } = setup({
+      playbackRate: vi.fn((r?: number) => r ?? 1.75),
     });
 
-    shortcuts["shift+>"]();
+    press(">", document.body, { shiftKey: true });
 
     expect(player.playbackRate).toHaveBeenCalledWith(2);
   });
 
   it("decreases playback speed with shift+< (min 0.25)", () => {
-    const { player, shortcuts } = captureShortcuts({
-      playbackRate: vi.fn((r?: number) => (r !== undefined ? r : 0.5)),
+    const { player } = setup({
+      playbackRate: vi.fn((r?: number) => r ?? 0.5),
     });
 
-    shortcuts["shift+<"]();
+    press("<", document.body, { shiftKey: true });
 
     expect(player.playbackRate).toHaveBeenCalledWith(0.25);
   });
 
-  // ─── Fullscreen ─────────────────────────────────────────────────────────
-
   it("toggles fullscreen with f key", () => {
-    const { player, shortcuts } = captureShortcuts({
-      isFullscreen: vi.fn(() => false),
-    });
+    const { player } = setup({ isFullscreen: vi.fn(() => false) });
 
-    shortcuts.f();
+    press("f");
 
     expect(player.requestFullscreen).toHaveBeenCalledTimes(1);
   });
 
   it("exits fullscreen when already fullscreen", () => {
-    const { player, shortcuts } = captureShortcuts({
-      isFullscreen: vi.fn(() => true),
-    });
+    const { player } = setup({ isFullscreen: vi.fn(() => true) });
 
-    shortcuts.f();
+    press("f");
 
     expect(player.exitFullscreen).toHaveBeenCalledTimes(1);
   });
 
-  it("returns false for f key when in rating mode", () => {
-    mockIsInRatingMode.mockReturnValue(true);
-    const { shortcuts } = captureShortcuts();
+  // ─── Playlist navigation ────────────────────────────────────────────────
 
-    expect(shortcuts.f()).toBe(false);
-  });
+  describe("Shift+N and Shift+P", () => {
+    it("Shift+N plays next only in a playlist of two or more", () => {
+      const playNext = vi.fn();
+      const playPrevious = vi.fn();
+      setup({}, { playlist: { scenes: [{}, {}] }, playNext, playPrevious });
 
-  // ─── Playlist navigation (Shift+N/P) ───────────────────────────────────
+      const event = press("N", document.body, { shiftKey: true });
 
-  it("calls playNext on Shift+N when playlist exists", () => {
-    const playNext = vi.fn();
-    const playPrevious = vi.fn();
-
-    renderHook(() =>
-      usePlaylistMediaKeys({
-        playerRef: { current: createMockPlayer() } as any,
-        playlist: { scenes: [{}, {}] },
-        playNext,
-        playPrevious,
-        enabled: true,
-      })
-    );
-
-    // Shift+N is handled by a separate keydown listener (not via shortcuts object)
-    const event = new KeyboardEvent("keydown", {
-      key: "N",
-      shiftKey: true,
-      bubbles: true,
-      cancelable: true,
-    });
-    vi.spyOn(event, "preventDefault");
-    document.dispatchEvent(event);
-
-    expect(playNext).toHaveBeenCalledTimes(1);
-    expect(event.preventDefault).toHaveBeenCalled();
-  });
-
-  it("calls playPrevious on Shift+P when playlist exists", () => {
-    const playNext = vi.fn();
-    const playPrevious = vi.fn();
-
-    renderHook(() =>
-      usePlaylistMediaKeys({
-        playerRef: { current: createMockPlayer() } as any,
-        playlist: { scenes: [{}, {}] },
-        playNext,
-        playPrevious,
-        enabled: true,
-      })
-    );
-
-    const event = new KeyboardEvent("keydown", {
-      key: "P",
-      shiftKey: true,
-      bubbles: true,
-      cancelable: true,
-    });
-    vi.spyOn(event, "preventDefault");
-    document.dispatchEvent(event);
-
-    expect(playPrevious).toHaveBeenCalledTimes(1);
-    expect(event.preventDefault).toHaveBeenCalled();
-  });
-
-  // ─── Playlist media keys ───────────────────────────────────────────────
-
-  it("includes mediatracknext/mediatrackprevious when playlist has multiple scenes", () => {
-    const playNext = vi.fn();
-    const playPrevious = vi.fn();
-    const { shortcuts } = captureShortcuts({}, {
-      playlist: { scenes: [{}, {}] },
-      playNext,
-      playPrevious,
+      expect(playNext).toHaveBeenCalledTimes(1);
+      expect(playPrevious).not.toHaveBeenCalled();
+      expect(event.defaultPrevented).toBe(true);
     });
 
-    expect(shortcuts.mediatracknext).toBeDefined();
-    expect(shortcuts.mediatrackprevious).toBeDefined();
+    it("Shift+P plays previous in a playlist of two or more", () => {
+      const playNext = vi.fn();
+      const playPrevious = vi.fn();
+      setup({}, { playlist: { scenes: [{}, {}] }, playNext, playPrevious });
 
-    shortcuts.mediatracknext();
-    expect(playNext).toHaveBeenCalledTimes(1);
+      press("P", document.body, { shiftKey: true });
 
-    shortcuts.mediatrackprevious();
-    expect(playPrevious).toHaveBeenCalledTimes(1);
-  });
+      expect(playPrevious).toHaveBeenCalledTimes(1);
+      expect(playNext).not.toHaveBeenCalled();
+    });
 
-  it("does not include media track keys when no playlist", () => {
-    const { shortcuts } = captureShortcuts({}, { playlist: null });
+    it("plain n and p do nothing", () => {
+      const playNext = vi.fn();
+      const playPrevious = vi.fn();
+      setup({}, { playlist: { scenes: [{}, {}] }, playNext, playPrevious });
 
-    expect(shortcuts.mediatracknext).toBeUndefined();
-    expect(shortcuts.mediatrackprevious).toBeUndefined();
+      const n = press("n");
+      press("p");
+
+      expect(playNext).not.toHaveBeenCalled();
+      expect(playPrevious).not.toHaveBeenCalled();
+      expect(n.defaultPrevented).toBe(false);
+    });
+
+    it("do nothing with a single scene or no playlist", () => {
+      const playNext = vi.fn();
+      const playPrevious = vi.fn();
+      setup({}, { playlist: { scenes: [{}] }, playNext, playPrevious });
+
+      press("N", document.body, { shiftKey: true });
+      press("P", document.body, { shiftKey: true });
+
+      expect(playNext).not.toHaveBeenCalled();
+      expect(playPrevious).not.toHaveBeenCalled();
+    });
+
+    it("do nothing while focus is on a control outside the player", () => {
+      const playNext = vi.fn();
+      const { pageTab } = setup(
+        {},
+        { playlist: { scenes: [{}, {}] }, playNext, playPrevious: vi.fn() }
+      );
+      pageTab.focus();
+
+      press("N", pageTab, { shiftKey: true });
+
+      expect(playNext).not.toHaveBeenCalled();
+    });
+
+    it("hardware media track keys move through the playlist", () => {
+      const playNext = vi.fn();
+      const playPrevious = vi.fn();
+      setup({}, { playlist: { scenes: [{}, {}] }, playNext, playPrevious });
+
+      press("MediaTrackNext");
+      press("MediaTrackPrevious");
+
+      expect(playNext).toHaveBeenCalledTimes(1);
+      expect(playPrevious).toHaveBeenCalledTimes(1);
+    });
+
+    it("media track keys do nothing without a playlist", () => {
+      const playNext = vi.fn();
+      setup({}, { playlist: null, playNext, playPrevious: vi.fn() });
+
+      press("MediaTrackNext");
+
+      expect(playNext).not.toHaveBeenCalled();
+    });
   });
 });

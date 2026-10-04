@@ -1,44 +1,38 @@
 // server/tests/services/MultiInstanceIsolation.test.ts
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import type { NormalizedScene } from "../../types/index.js";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import prisma from "../../prisma/singleton.js";
+import { exclusionComputationService } from "../../services/ExclusionComputationService.js";
+import {
+  IMPLICIT_PERFORMER_WEIGHT,
+  type LightweightEntityPreferences,
+  PERFORMER_FAVORITE_WEIGHT,
+  STUDIO_FAVORITE_WEIGHT,
+  TAG_SCENE_FAVORITE_WEIGHT,
+  scoreScoringDataByPreferences,
+} from "../../services/RecommendationScoringService.js";
+import type { SceneScoringData } from "../../types/index.js";
+import { entityKey } from "../../utils/entityRef.js";
+import { must } from "../helpers/must.js";
+import { prismaImpl } from "../helpers/prismaMock.js";
 
 // ─── Mocks ──────────────────────────────────────────────────────────────────
 // Mock prisma before importing service
-vi.mock("../../prisma/singleton.js", () => ({
-  default: {
-    stashPerformer: { findFirst: vi.fn() },
-    stashStudio: { findMany: vi.fn() },
-    scenePerformer: { findMany: vi.fn(), count: vi.fn() },
-    galleryPerformer: { count: vi.fn() },
-    stashScene: { findMany: vi.fn() },
-    sceneTag: { findMany: vi.fn() },
-    performerTag: { findMany: vi.fn() },
-    studioTag: { findMany: vi.fn() },
-    groupTag: { findMany: vi.fn() },
-    sceneGroup: { findMany: vi.fn() },
-    sceneGallery: { findMany: vi.fn() },
-    imageGallery: { findMany: vi.fn() },
-    userExcludedEntity: {
-      upsert: vi.fn(),
-      deleteMany: vi.fn(),
-      createMany: vi.fn(),
-      findMany: vi.fn(),
-      count: vi.fn(),
-    },
-    userContentRestriction: { findMany: vi.fn() },
-    userHiddenEntity: { findMany: vi.fn() },
-    userEntityStats: { upsert: vi.fn() },
-    user: { findMany: vi.fn() },
-    stashTag: { count: vi.fn() },
-    stashGroup: { count: vi.fn() },
-    stashGallery: { count: vi.fn() },
-    stashImage: { count: vi.fn() },
-    stashClip: { count: vi.fn() },
-    $transaction: vi.fn(),
-    $queryRaw: vi.fn(),
-    $queryRawUnsafe: vi.fn(),
-    $executeRaw: vi.fn(),
-  },
+vi.mock(
+  "../../prisma/singleton.js",
+  () => import("../helpers/prismaSingletonMock.js")
+);
+
+// The compute client (hides compute and merge their rows on it) is the same
+// mocked prisma
+vi.mock(
+  "../../prisma/computeClient.js",
+  () => import("../helpers/computeClientMock.js")
+);
+
+// Mock UserInstanceService: the exclusion compute resolves hides on the
+// user's instance scope
+vi.mock("../../services/UserInstanceService.js", () => ({
+  getUserInstanceScope: vi.fn().mockResolvedValue(["inst-a", "inst-b"]),
 }));
 
 // Mock StashInstanceManager
@@ -49,19 +43,9 @@ vi.mock("../../services/StashInstanceManager.js", () => ({
   },
 }));
 
-import prisma from "../../prisma/singleton.js";
-import { stashEntityService } from "../../services/StashEntityService.js";
-import { exclusionComputationService } from "../../services/ExclusionComputationService.js";
-import {
-  scoreSceneByPreferences,
-  PERFORMER_FAVORITE_WEIGHT,
-  STUDIO_FAVORITE_WEIGHT,
-  type EntityPreferences,
-} from "../../services/RecommendationScoringService.js";
+const mockPrisma = vi.mocked(prisma, true);
 
-const mockPrisma = vi.mocked(prisma);
-
-const createEmptyPrefs = (): EntityPreferences => ({
+const createEmptyPrefs = (): LightweightEntityPreferences => ({
   favoritePerformers: new Set(),
   highlyRatedPerformers: new Set(),
   favoriteStudios: new Set(),
@@ -79,191 +63,48 @@ const createEmptyPrefs = (): EntityPreferences => ({
 describe("Multi-Instance Isolation", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    stashEntityService.invalidateStudioNameCache();
-  });
-
-  describe("StashEntityService.getPerformer with instanceId", () => {
-    it("returns the correct performer when same ID exists in two instances", async () => {
-      // Instance A has performer "perf1" named "Alice"
-      mockPrisma.stashPerformer.findFirst.mockResolvedValue({
-        id: "perf1",
-        stashInstanceId: "inst-a",
-        name: "Alice",
-        disambiguation: null,
-        url: null,
-        gender: null,
-        birthdate: null,
-        ethnicity: null,
-        country: null,
-        hair_color: null,
-        eye_color: null,
-        height_cm: null,
-        weight: null,
-        measurements: null,
-        fake_tits: null,
-        career_length: null,
-        tattoos: null,
-        piercings: null,
-        alias_list: "[]",
-        details: null,
-        death_date: null,
-        image_path: null,
-        favorite: false,
-        rating100: null,
-        ignore_auto_tag: false,
-        scene_count: 5,
-        image_count: 0,
-        gallery_count: 0,
-        group_count: 0,
-        performer_count: 0,
-        o_counter: 0,
-        tags: undefined,
-        stash_ids: "[]",
-        created_at: "2024-01-01",
-        updated_at: "2024-01-01",
-        deletedAt: null,
-        circumcised: null,
-        penis_length: null,
-      } as any);
-      mockPrisma.scenePerformer.count.mockResolvedValue(5);
-      mockPrisma.galleryPerformer.count.mockResolvedValue(0);
-      mockPrisma.$queryRaw.mockResolvedValue([{ count: 0 }]);
-
-      const performer = await stashEntityService.getPerformer("perf1", "inst-a");
-
-      expect(performer).not.toBeNull();
-      expect(performer!.name).toBe("Alice");
-      expect(performer!.instanceId).toBe("inst-a");
-
-      // Verify the query filtered by instanceId
-      expect(mockPrisma.stashPerformer.findFirst).toHaveBeenCalledWith({
-        where: {
-          id: "perf1",
-          deletedAt: null,
-          stashInstanceId: "inst-a",
-        },
-      });
-    });
-
-    it("always filters by instanceId when specified (required parameter)", async () => {
-      mockPrisma.stashPerformer.findFirst.mockResolvedValue({
-        id: "perf1",
-        stashInstanceId: "inst-b",
-        name: "Bob",
-        disambiguation: null,
-        url: null,
-        gender: null,
-        birthdate: null,
-        ethnicity: null,
-        country: null,
-        hair_color: null,
-        eye_color: null,
-        height_cm: null,
-        weight: null,
-        measurements: null,
-        fake_tits: null,
-        career_length: null,
-        tattoos: null,
-        piercings: null,
-        alias_list: "[]",
-        details: null,
-        death_date: null,
-        image_path: null,
-        favorite: false,
-        rating100: null,
-        ignore_auto_tag: false,
-        scene_count: 3,
-        image_count: 0,
-        gallery_count: 0,
-        group_count: 0,
-        performer_count: 0,
-        o_counter: 0,
-        tags: undefined,
-        stash_ids: "[]",
-        created_at: "2024-01-01",
-        updated_at: "2024-01-01",
-        deletedAt: null,
-        circumcised: null,
-        penis_length: null,
-      } as any);
-      mockPrisma.scenePerformer.count.mockResolvedValue(3);
-      mockPrisma.galleryPerformer.count.mockResolvedValue(0);
-      mockPrisma.$queryRaw.mockResolvedValue([{ count: 0 }]);
-
-      const performer = await stashEntityService.getPerformer("perf1", "inst-b");
-
-      expect(performer).not.toBeNull();
-      // instanceId is required — query must always include stashInstanceId filter
-      expect(mockPrisma.stashPerformer.findFirst).toHaveBeenCalledWith({
-        where: {
-          id: "perf1",
-          deletedAt: null,
-          stashInstanceId: "inst-b",
-        },
-      });
-    });
-  });
-
-  describe("Studio name map composite keys", () => {
-    it("returns correct names when same studio ID has different names across instances", async () => {
-      mockPrisma.stashStudio.findMany.mockResolvedValue([
-        { id: "studio1", stashInstanceId: "inst-a", name: "Studio Alpha" },
-        { id: "studio1", stashInstanceId: "inst-b", name: "Studio Beta" },
-      ] as any);
-
-      const nameMap = await stashEntityService.getStudioNameMap();
-
-      // Composite keys should resolve to different names
-      expect(nameMap.get("studio1\0inst-a")).toBe("Studio Alpha");
-      expect(nameMap.get("studio1\0inst-b")).toBe("Studio Beta");
-
-      // Plain ID lookup returns the first one encountered (backwards compat)
-      expect(nameMap.get("studio1")).toBe("Studio Alpha");
-    });
   });
 
   describe("Recommendation scoring composite keys", () => {
     const INST_A = "inst-a";
     const INST_B = "inst-b";
 
-    const sceneFromA = {
+    // The same performer, studio and tag ids on both instances
+    const sceneFromA: SceneScoringData = {
       id: "scene1",
-      title: "Scene A",
       instanceId: INST_A,
-      performers: [{ id: "perf1", name: "Performer 1", tags: [] }],
-      studio: { id: "studio1", name: "Studio 1", tags: [] },
-      tags: [{ id: "tag1", name: "Tag 1" }],
-    } as NormalizedScene;
+      studioId: "studio1",
+      performerIds: ["12"],
+      tagIds: ["tag1"],
+      oCounter: 0,
+    };
 
-    const sceneFromB = {
+    const sceneFromB: SceneScoringData = {
       id: "scene2",
-      title: "Scene B",
       instanceId: INST_B,
-      performers: [{ id: "perf1", name: "Performer 1", tags: [] }], // same performer ID
-      studio: { id: "studio1", name: "Studio 1", tags: [] }, // same studio ID
-      tags: [{ id: "tag1", name: "Tag 1" }],
-    } as NormalizedScene;
+      studioId: "studio1",
+      performerIds: ["12"],
+      tagIds: ["tag1"],
+      oCounter: 0,
+    };
 
-    it("favorite from instance A does not boost scenes from instance B with same performer ID", () => {
+    it("favoriting performer 12 on A boosts no scene on B", () => {
       const prefs = createEmptyPrefs();
-      // Favorite performer in instance A only
-      prefs.favoritePerformers.add(`perf1\0${INST_A}`);
+      prefs.favoritePerformers.add(entityKey("12", INST_A));
 
-      const scoreA = scoreSceneByPreferences(sceneFromA, prefs);
-      const scoreB = scoreSceneByPreferences(sceneFromB, prefs);
+      const scoreA = scoreScoringDataByPreferences(sceneFromA, prefs);
+      const scoreB = scoreScoringDataByPreferences(sceneFromB, prefs);
 
-      // Scene A should get the performer favorite boost
       expect(scoreA).toBeCloseTo(PERFORMER_FAVORITE_WEIGHT, 2);
-      // Scene B should NOT get the boost (different instance)
       expect(scoreB).toBe(0);
     });
 
     it("favorite studio from instance A does not boost scenes from instance B", () => {
       const prefs = createEmptyPrefs();
-      prefs.favoriteStudios.add(`studio1\0${INST_A}`);
+      prefs.favoriteStudios.add(entityKey("studio1", INST_A));
 
-      const scoreA = scoreSceneByPreferences(sceneFromA, prefs);
-      const scoreB = scoreSceneByPreferences(sceneFromB, prefs);
+      const scoreA = scoreScoringDataByPreferences(sceneFromA, prefs);
+      const scoreB = scoreScoringDataByPreferences(sceneFromB, prefs);
 
       expect(scoreA).toBe(STUDIO_FAVORITE_WEIGHT);
       expect(scoreB).toBe(0);
@@ -271,15 +112,36 @@ describe("Multi-Instance Isolation", () => {
 
     it("favorites from both instances correctly boost their respective scenes", () => {
       const prefs = createEmptyPrefs();
-      prefs.favoritePerformers.add(`perf1\0${INST_A}`);
-      prefs.favoritePerformers.add(`perf1\0${INST_B}`);
+      prefs.favoritePerformers.add(entityKey("12", INST_A));
+      prefs.favoritePerformers.add(entityKey("12", INST_B));
 
-      const scoreA = scoreSceneByPreferences(sceneFromA, prefs);
-      const scoreB = scoreSceneByPreferences(sceneFromB, prefs);
+      const scoreA = scoreScoringDataByPreferences(sceneFromA, prefs);
+      const scoreB = scoreScoringDataByPreferences(sceneFromB, prefs);
 
-      // Both scenes should get the boost
       expect(scoreA).toBeCloseTo(PERFORMER_FAVORITE_WEIGHT, 2);
       expect(scoreB).toBeCloseTo(PERFORMER_FAVORITE_WEIGHT, 2);
+    });
+
+    it("derived and implicit weights stay on their instance", () => {
+      const prefs = createEmptyPrefs();
+      // A rated scene on A gave its performer, studio and tag a weight of 1
+      prefs.derivedPerformerWeights.set(entityKey("12", INST_A), 1);
+      prefs.derivedStudioWeights.set(entityKey("studio1", INST_A), 1);
+      prefs.derivedTagWeights.set(entityKey("tag1", INST_A), 1);
+      // Watch history on A ranked performer 12 there
+      prefs.implicitPerformerWeights.set(entityKey("12", INST_A), 1);
+
+      const scoreA = scoreScoringDataByPreferences(sceneFromA, prefs);
+      const scoreB = scoreScoringDataByPreferences(sceneFromB, prefs);
+
+      expect(scoreA).toBeCloseTo(
+        PERFORMER_FAVORITE_WEIGHT +
+          STUDIO_FAVORITE_WEIGHT +
+          TAG_SCENE_FAVORITE_WEIGHT +
+          IMPLICIT_PERFORMER_WEIGHT,
+        6
+      );
+      expect(scoreB).toBe(0);
     });
   });
 
@@ -287,184 +149,199 @@ describe("Multi-Instance Isolation", () => {
     const INST_A = "inst-a";
     const INST_B = "inst-b";
 
+    /** Route $queryRawUnsafe by SQL shape (resolution, edges); unmatched queries return nothing. */
+    function fakeRaw(routes: Array<[RegExp, unknown[]]>) {
+      mockPrisma.$queryRawUnsafe.mockImplementation(
+        prismaImpl((sql: string) => {
+          const hit = routes.find(([re]) => re.test(sql));
+          return hit ? hit[1] : [];
+        })
+      );
+    }
+
+    /** The closure loaded into the temp refs table before the edge queries. */
+    function refsFill(): string | undefined {
+      const call = mockPrisma.$executeRawUnsafe.mock.calls.find((c) =>
+        /INSERT OR IGNORE INTO _peek_refs/.test(c[0])
+      );
+      return call ? String(call[1]) : undefined;
+    }
+
+    /** A row as the _peek_result fill binds it. */
+    interface FillRow {
+      t: string;
+      id: string;
+      iid: string;
+      r: string;
+    }
+
+    /** The rows addHiddenEntities merges (the _peek_result fills), as keys. */
+    function mergedKeys(): string[] {
+      return mockPrisma.$executeRawUnsafe.mock.calls
+        .filter((c) => /INSERT OR IGNORE INTO _peek_result/.test(c[0]))
+        .flatMap((c) => JSON.parse(String(c[1])) as FillRow[])
+        .map((r) => `${r.t}:${r.id}@${r.iid}:${r.r}`);
+    }
+
     beforeEach(() => {
-      // Default empty responses for cascade-related queries
-      mockPrisma.scenePerformer.findMany.mockResolvedValue([]);
-      mockPrisma.stashScene.findMany.mockResolvedValue([]);
-      mockPrisma.sceneTag.findMany.mockResolvedValue([]);
-      mockPrisma.performerTag.findMany.mockResolvedValue([]);
-      mockPrisma.studioTag.findMany.mockResolvedValue([]);
-      mockPrisma.groupTag.findMany.mockResolvedValue([]);
-      mockPrisma.sceneGroup.findMany.mockResolvedValue([]);
-      mockPrisma.sceneGallery.findMany.mockResolvedValue([]);
-      mockPrisma.imageGallery.findMany.mockResolvedValue([]);
       mockPrisma.$queryRawUnsafe.mockResolvedValue([]);
-      mockPrisma.userExcludedEntity.upsert.mockResolvedValue({});
-      mockPrisma.$transaction.mockImplementation(async (callback: any) => {
-        return callback(mockPrisma);
-      });
+      mockPrisma.$executeRawUnsafe.mockResolvedValue(0);
     });
 
     it("hiding performer from instance A cascades only to instance A scenes", async () => {
-      // Performer perf1 in instance A has scenes scene1 and scene2
-      // Performer perf1 in instance B has scene3
-      // When hiding perf1 from inst-a, only scene1 and scene2 should cascade
-      mockPrisma.scenePerformer.findMany.mockResolvedValue([
-        { sceneId: "scene1", sceneInstanceId: INST_A, performerId: "perf1" },
-        { sceneId: "scene2", sceneInstanceId: INST_A, performerId: "perf1" },
-        // scene3 from inst-b should NOT appear because the query filters by performerInstanceId
+      // Performer perf1 exists on A and B; the hide names A, so only A's
+      // scenes cascade (the resolve is bound with the scoped ref)
+      fakeRaw([
+        [
+          /CROSS JOIN StashPerformer t ON/,
+          [{ id: "perf1", instanceId: INST_A }],
+        ],
+        [
+          /FROM ScenePerformer j/,
+          [
+            { id: "scene1", instanceId: INST_A },
+            { id: "scene2", instanceId: INST_A },
+          ],
+        ],
       ]);
 
-      await exclusionComputationService.addHiddenEntity(1, "performer", "perf1", INST_A);
+      await exclusionComputationService.addHiddenEntities(1, [
+        { entityType: "performer", entityId: "perf1", instanceId: INST_A },
+      ]);
 
-      // Verify the query included instance filtering
-      expect(mockPrisma.scenePerformer.findMany).toHaveBeenCalledWith({
-        where: { performerId: "perf1", performerInstanceId: INST_A },
-        select: { sceneId: true, sceneInstanceId: true },
-      });
-
-      // Verify direct hidden entity upsert includes instanceId
-      expect(mockPrisma.userExcludedEntity.upsert).toHaveBeenCalledWith(
-        expect.objectContaining({
-          where: {
-            userId_entityType_entityId_instanceId: {
-              userId: 1,
-              entityType: "performer",
-              entityId: "perf1",
-              instanceId: INST_A,
-            },
-          },
-          create: expect.objectContaining({
-            instanceId: INST_A,
-            reason: "hidden",
-          }),
-        })
+      // The resolve query binds the scoped ref, never a bare id
+      const resolve = mockPrisma.$queryRawUnsafe.mock.calls.find((c) =>
+        /CROSS JOIN StashPerformer t ON/.test(c[0])
       );
-
-      // Verify cascade exclusion records carry the instance's sceneInstanceId
-      expect(mockPrisma.userExcludedEntity.upsert).toHaveBeenCalledWith(
-        expect.objectContaining({
-          where: {
-            userId_entityType_entityId_instanceId: {
-              userId: 1,
-              entityType: "scene",
-              entityId: "scene1",
-              instanceId: INST_A,
-            },
-          },
-          create: expect.objectContaining({
-            instanceId: INST_A,
-            reason: "cascade",
-          }),
-        })
+      expect(resolve).toBeDefined();
+      expect(must(resolve).slice(1)).toContain(
+        JSON.stringify([["perf1", INST_A]])
       );
+      expect(must(resolve).slice(1)).toContain(JSON.stringify([]));
+      // The cascade source is the A-scoped ref only
+      expect(refsFill()).toBe(JSON.stringify([["perf1", INST_A]]));
 
-      // 1 hidden + 2 cascade scenes = 3 upserts
-      expect(mockPrisma.userExcludedEntity.upsert).toHaveBeenCalledTimes(3);
+      // Direct hidden row and the two cascades carry instance A; 3 rows
+      expect(new Set(mergedKeys())).toEqual(
+        new Set([
+          `performer:perf1@${INST_A}:hidden`,
+          `scene:scene1@${INST_A}:cascade`,
+          `scene:scene2@${INST_A}:cascade`,
+        ])
+      );
+      expect(mergedKeys()).toHaveLength(3);
     });
 
-    it("hiding performer without instanceId does not filter by instance", async () => {
-      // When no instanceId is provided, cascade should NOT filter by instance
-      mockPrisma.scenePerformer.findMany.mockResolvedValue([
-        { sceneId: "scene1", sceneInstanceId: INST_A, performerId: "perf1" },
-        { sceneId: "scene3", sceneInstanceId: INST_B, performerId: "perf1" },
+    it("hiding performer without instanceId cascades on every allowed instance", async () => {
+      // A "" hide resolves to one ref per allowed instance where the
+      // performer exists; each instance's scenes cascade with their own instance
+      fakeRaw([
+        [
+          /CROSS JOIN StashPerformer t ON/,
+          [
+            { id: "perf1", instanceId: INST_A },
+            { id: "perf1", instanceId: INST_B },
+          ],
+        ],
+        [
+          /FROM ScenePerformer j/,
+          [
+            { id: "scene1", instanceId: INST_A },
+            { id: "scene3", instanceId: INST_B },
+          ],
+        ],
       ]);
 
-      await exclusionComputationService.addHiddenEntity(1, "performer", "perf1");
+      await exclusionComputationService.addHiddenEntities(1, [
+        { entityType: "performer", entityId: "perf1", instanceId: "" },
+      ]);
 
-      // Without instanceId, query should not include instance filter
-      expect(mockPrisma.scenePerformer.findMany).toHaveBeenCalledWith({
-        where: { performerId: "perf1" },
-        select: { sceneId: true, sceneInstanceId: true },
-      });
-
-      // Cascade exclusions should have empty instanceId (global)
-      expect(mockPrisma.userExcludedEntity.upsert).toHaveBeenCalledWith(
-        expect.objectContaining({
-          where: {
-            userId_entityType_entityId_instanceId: {
-              userId: 1,
-              entityType: "scene",
-              entityId: "scene1",
-              instanceId: "",
-            },
-          },
-          create: expect.objectContaining({
-            instanceId: "",
-            reason: "cascade",
-          }),
-        })
+      const resolve = mockPrisma.$queryRawUnsafe.mock.calls.find((c) =>
+        /CROSS JOIN StashPerformer t ON/.test(c[0])
       );
+      expect(must(resolve).slice(1)).toContain(JSON.stringify(["perf1"]));
 
-      // 1 hidden + 2 cascade scenes = 3 upserts
-      expect(mockPrisma.userExcludedEntity.upsert).toHaveBeenCalledTimes(3);
+      // The stored "" row, a hidden row per instance, and scoped cascades
+      expect(new Set(mergedKeys())).toEqual(
+        new Set([
+          "performer:perf1@:hidden",
+          `performer:perf1@${INST_A}:hidden`,
+          `performer:perf1@${INST_B}:hidden`,
+          `scene:scene1@${INST_A}:cascade`,
+          `scene:scene3@${INST_B}:cascade`,
+        ])
+      );
+      expect(mergedKeys()).toHaveLength(5);
     });
 
     it("hiding studio from instance A cascades only to instance A scenes", async () => {
-      mockPrisma.stashScene.findMany.mockResolvedValue([
-        { id: "scene1", stashInstanceId: INST_A, studioId: "studio1" },
+      fakeRaw([
+        [
+          /CROSS JOIN StashStudio t ON/,
+          [{ id: "studio1", instanceId: INST_A }],
+        ],
+        [
+          /FROM StashScene x[\s\S]*JOIN _peek_refs r ON r\.id = x\.studioId/,
+          [{ id: "scene1", instanceId: INST_A }],
+        ],
       ]);
 
-      await exclusionComputationService.addHiddenEntity(1, "studio", "studio1", INST_A);
+      await exclusionComputationService.addHiddenEntities(1, [
+        { entityType: "studio", entityId: "studio1", instanceId: INST_A },
+      ]);
 
-      // Verify the query included instance + deletedAt filtering
-      expect(mockPrisma.stashScene.findMany).toHaveBeenCalledWith({
-        where: { studioId: "studio1", stashInstanceId: INST_A, deletedAt: null },
-        select: { id: true, stashInstanceId: true },
-      });
-
-      // Cascade exclusion record should carry instance A
-      expect(mockPrisma.userExcludedEntity.upsert).toHaveBeenCalledWith(
-        expect.objectContaining({
-          where: {
-            userId_entityType_entityId_instanceId: {
-              userId: 1,
-              entityType: "scene",
-              entityId: "scene1",
-              instanceId: INST_A,
-            },
-          },
-        })
+      // The studio edge filters deleted scenes and the allowed instances
+      const edge = mockPrisma.$queryRawUnsafe.mock.calls.find((c) =>
+        /FROM StashScene x[\s\S]*JOIN _peek_refs r ON r\.id = x\.studioId/.test(
+          c[0]
+        )
       );
+      expect(edge).toBeDefined();
+      expect(must(edge)[0]).toContain("x.deletedAt IS NULL");
+      expect(must(edge)[0]).toContain("r.inst = x.stashInstanceId");
+      expect(must(edge).slice(1)).toEqual([INST_A, INST_B]);
+      expect(refsFill()).toBe(JSON.stringify([["studio1", INST_A]]));
+
+      expect(mergedKeys()).toContain(`scene:scene1@${INST_A}:cascade`);
+      expect(mergedKeys().some((k) => k.includes(`@${INST_B}:`))).toBe(false);
     });
 
     it("hiding tag from instance A cascades only within that instance", async () => {
-      // Tag -> Scenes direct
-      mockPrisma.sceneTag.findMany.mockResolvedValue([
-        { sceneId: "scene1", sceneInstanceId: INST_A, tagId: "tag1" },
+      fakeRaw([
+        [/CROSS JOIN StashTag t ON/, [{ id: "tag1", instanceId: INST_A }]],
+        [/FROM SceneTag j/, [{ id: "scene1", instanceId: INST_A }]],
+        [
+          /CROSS JOIN SceneInheritedTag it ON it\.tagId = r\.id/,
+          [{ id: "scene2", instanceId: INST_A }],
+        ],
+        [/FROM PerformerTag j/, [{ id: "perf1", instanceId: INST_A }]],
       ]);
-      // Tag -> Scenes inherited
-      mockPrisma.$queryRawUnsafe.mockResolvedValue([{ id: "scene2" }]);
-      // Tag -> Performers
-      mockPrisma.performerTag.findMany.mockResolvedValue([
-        { performerId: "perf1", performerInstanceId: INST_A, tagId: "tag1" },
+
+      await exclusionComputationService.addHiddenEntities(1, [
+        { entityType: "tag", entityId: "tag1", instanceId: INST_A },
       ]);
-      // Tag -> Studios
-      mockPrisma.studioTag.findMany.mockResolvedValue([]);
-      // Tag -> Groups
-      mockPrisma.groupTag.findMany.mockResolvedValue([]);
 
-      await exclusionComputationService.addHiddenEntity(1, "tag", "tag1", INST_A);
-
-      // Verify all junction queries include instance filtering
-      expect(mockPrisma.sceneTag.findMany).toHaveBeenCalledWith({
-        where: { tagId: "tag1", tagInstanceId: INST_A },
-        select: { sceneId: true, sceneInstanceId: true },
-      });
-      expect(mockPrisma.performerTag.findMany).toHaveBeenCalledWith({
-        where: { tagId: "tag1", tagInstanceId: INST_A },
-        select: { performerId: true, performerInstanceId: true },
-      });
-
-      // Inherited tag query should include instance filter in SQL
-      expect(mockPrisma.$queryRawUnsafe).toHaveBeenCalledWith(
-        expect.stringContaining("stashInstanceId = ?"),
-        INST_A,
-        "tag1"
+      // Every edge joins the A-scoped closure; the inherited-tag query binds
+      // the allowed instances and the tag id never reaches SQL text
+      expect(refsFill()).toBe(JSON.stringify([["tag1", INST_A]]));
+      const inherited = mockPrisma.$queryRawUnsafe.mock.calls.find((c) =>
+        /CROSS JOIN SceneInheritedTag it ON it\.tagId = r\.id/.test(c[0])
       );
+      expect(inherited).toBeDefined();
+      expect(must(inherited)[0]).toContain("s.stashInstanceId IN (?, ?)");
+      expect(must(inherited)[0]).not.toContain("tag1");
+      expect(must(inherited).slice(1)).toEqual([INST_A, INST_B]);
 
-      // 1 hidden tag + 1 direct scene + 1 inherited scene + 1 performer = 4 upserts
-      expect(mockPrisma.userExcludedEntity.upsert).toHaveBeenCalledTimes(4);
+      // 1 hidden tag + 1 direct scene + 1 inherited scene + 1 performer = 4 rows
+      expect(new Set(mergedKeys())).toEqual(
+        new Set([
+          `tag:tag1@${INST_A}:hidden`,
+          `scene:scene1@${INST_A}:cascade`,
+          `scene:scene2@${INST_A}:cascade`,
+          `performer:perf1@${INST_A}:cascade`,
+        ])
+      );
+      expect(mergedKeys()).toHaveLength(4);
     });
   });
 
@@ -490,17 +367,17 @@ describe("Multi-Instance Isolation", () => {
 
       const resolved = watchHistory.map((wh) => ({
         ...wh,
-        scene: sceneMap.get(`${wh.sceneId}\0${wh.instanceId || ""}`) || null,
+        scene: sceneMap.get(`${wh.sceneId}\0${wh.instanceId || ""}`) ?? null,
       }));
 
       // inst-a scene1 → Scene A
-      expect(resolved[0].scene?.title).toBe("Scene A");
+      expect(must(resolved[0]).scene?.title).toBe("Scene A");
       // inst-b scene1 → Scene B (different scene despite same ID)
-      expect(resolved[1].scene?.title).toBe("Scene B");
+      expect(must(resolved[1]).scene?.title).toBe("Scene B");
       // inst-a scene2 → Scene C
-      expect(resolved[2].scene?.title).toBe("Scene C");
+      expect(must(resolved[2]).scene?.title).toBe("Scene C");
       // inst-b scene2 → null (no scene in inst-b)
-      expect(resolved[3].scene).toBeNull();
+      expect(must(resolved[3]).scene).toBeNull();
     });
 
     it("plain ID lookup would incorrectly match cross-instance scenes", () => {

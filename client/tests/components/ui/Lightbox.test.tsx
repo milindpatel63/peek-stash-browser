@@ -1,20 +1,65 @@
 // client/src/components/ui/__tests__/Lightbox.test.jsx
-import { render, screen, fireEvent, act } from "@testing-library/react";
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import type { ReactElement, ReactNode } from "react";
+import type { ImageListItem } from "@peek/shared-types";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import {
+  act,
+  fireEvent,
+  render as renderPlain,
+  screen,
+  waitFor,
+} from "@testing-library/react";
+import { permissions } from "@tests/helpers/permissions";
+import { createAuthValue, must } from "@tests/testUtils";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { apiPost, getMyPermissions, libraryApi } from "@/api";
+import { queryKeys } from "@/api/queryKeys";
 import Lightbox from "../../../src/components/ui/Lightbox";
+import { AuthContext } from "../../../src/contexts/AuthContextProvider";
+import { useRatingHotkeys } from "../../../src/hooks/useRatingHotkeys";
+import { controlMatchMedia } from "../../helpers/matchMedia";
 
-// Mock the API
-vi.mock("../../../api", () => ({
-  apiGet: vi.fn().mockResolvedValue({ settings: {} }),
-  libraryApi: {
-    updateRating: vi.fn().mockResolvedValue({}),
-    updateFavorite: vi.fn().mockResolvedValue({}),
+// Mock the API (the rating hooks reach `libraryApi` through its own module)
+const { mockLibraryApi } = vi.hoisted(() => ({
+  mockLibraryApi: {
+    updateRating: vi.fn(),
+    updateFavorite: vi.fn(),
   },
+}));
+vi.mock("@/api/library", () => ({ libraryApi: mockLibraryApi }));
+vi.mock("@/api", () => ({
+  apiGet: vi.fn().mockResolvedValue({ settings: {} }),
+  apiPost: vi.fn().mockResolvedValue({}),
+  getMyPermissions: vi.fn().mockResolvedValue({ permissions: {} }),
+  libraryApi: mockLibraryApi,
   imageViewHistoryApi: {
     recordView: vi.fn().mockResolvedValue({}),
     incrementO: vi.fn().mockResolvedValue({}),
   },
 }));
+
+/** The cache the lightbox's rating and favorite saves write into */
+let queryClient: QueryClient;
+const withClient = (ui: ReactElement) => (
+  <QueryClientProvider client={queryClient}>
+    <AuthContext.Provider
+      value={createAuthValue({
+        isAuthenticated: true,
+        user: { id: 1, username: "viewer", role: "USER", setupCompleted: true },
+      })}
+    >
+      {ui}
+    </AuthContext.Provider>
+  </QueryClientProvider>
+);
+/** Renders inside the test's QueryClientProvider; rerender keeps it */
+function render(ui: ReactElement) {
+  const result = renderPlain(withClient(ui));
+  return {
+    ...result,
+    rerender: (next: ReactElement) => result.rerender(withClient(next)),
+  };
+}
 
 // Mock useFullscreen hook
 vi.mock("../../../hooks/useFullscreen", () => ({
@@ -23,11 +68,6 @@ vi.mock("../../../hooks/useFullscreen", () => ({
     toggleFullscreen: vi.fn(),
     supportsFullscreen: true,
   }),
-}));
-
-// Mock useRatingHotkeys hook
-vi.mock("../../../hooks/useRatingHotkeys", () => ({
-  useRatingHotkeys: vi.fn(),
 }));
 
 // Mock react-swipeable
@@ -50,6 +90,20 @@ const createMockImages = (page: number, perPage = 10) => {
 describe("Lightbox", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    queryClient = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false },
+        mutations: { retry: false },
+      },
+    });
+    mockLibraryApi.updateRating.mockResolvedValue({
+      success: true,
+      rating: { id: 1, instanceId: "inst-1", rating: 80, favorite: false },
+    });
+    mockLibraryApi.updateFavorite.mockResolvedValue({
+      success: true,
+      rating: { id: 1, instanceId: "inst-1", rating: null, favorite: true },
+    });
   });
 
   describe("basic rendering", () => {
@@ -103,7 +157,12 @@ describe("Lightbox", () => {
 
       // Track all render states
       const renderLog: any[] = [];
-      const RenderTracker = ({ images, initialIndex, isPageTransitioning, ...props }: any) => {
+      const RenderTracker = ({
+        images,
+        initialIndex,
+        isPageTransitioning,
+        ...props
+      }: any) => {
         // Log every render's key values
         renderLog.push({
           timestamp: Date.now(),
@@ -166,8 +225,8 @@ describe("Lightbox", () => {
       });
 
       // Step 2: API returns - images update to page 2, THEN isPageTransitioning becomes false
-      // This simulates what GalleryDetail does:
-      //   setImages(page2Images);
+      // This simulates what a paged image list does:
+      //   its page 2 images arrive;
       //   lightbox.consumePendingLightboxIndex(); // sets isPageTransitioning=false
 
       // In React, these could be batched or could cause separate renders.
@@ -231,7 +290,9 @@ describe("Lightbox", () => {
       );
 
       // Find the image container div (has visibility style)
-      const imageContainer = container.querySelector(".w-\\[90vw\\]") as HTMLElement;
+      const imageContainer = container.querySelector(
+        ".w-\\[90vw\\]"
+      ) as HTMLElement;
       expect(imageContainer.style.visibility).toBe("visible");
 
       // Now transition
@@ -268,7 +329,8 @@ describe("Lightbox", () => {
         />
       );
 
-      const getImgSrc = () => container.querySelector("img")?.getAttribute("src");
+      const getImgSrc = () =>
+        container.querySelector("img")?.getAttribute("src");
 
       imgSrcLog.push({ step: "initial", src: getImgSrc() });
       expect(getImgSrc()).toBe("http://example.com/page1/image9.jpg");
@@ -303,7 +365,9 @@ describe("Lightbox", () => {
       expect(getImgSrc()).toBe("http://example.com/page1/image0.jpg");
 
       // Verify container is hidden
-      const imageContainer = container.querySelector(".w-\\[90vw\\]") as HTMLElement;
+      const imageContainer = container.querySelector(
+        ".w-\\[90vw\\]"
+      ) as HTMLElement;
       expect(imageContainer.style.visibility).toBe("hidden");
     });
 
@@ -332,9 +396,10 @@ describe("Lightbox", () => {
         />
       );
 
-      const getImgSrc = () => container.querySelector("img")?.getAttribute("src");
+      const getImgSrc = () =>
+        container.querySelector("img")?.getAttribute("src");
       const getVisibility = () =>
-        (container.querySelector(".w-\\[90vw\\]") as HTMLElement | null)?.style.visibility;
+        container.querySelector<HTMLElement>(".w-\\[90vw\\]")?.style.visibility;
 
       expect(getImgSrc()).toBe("http://example.com/page1/image9.jpg");
 
@@ -502,7 +567,9 @@ describe("Lightbox", () => {
 
       // FIXED: imageLoaded is now reset when images change, even if initialIndex stays 0
       // The img src has changed to page2/image0.jpg
-      expect(img.getAttribute("src")).toBe("http://example.com/page2/image0.jpg");
+      expect(img.getAttribute("src")).toBe(
+        "http://example.com/page2/image0.jpg"
+      );
 
       // With the fix, opacity should be "0" because imageLoaded was reset
       // when the image ID changed from page1-image0 to page2-image0
@@ -515,7 +582,7 @@ describe("Lightbox", () => {
   });
 
   describe("fullscreen exit behavior", () => {
-    it("exits fullscreen when close button is clicked", async () => {
+    it("exits fullscreen when close button is clicked", () => {
       const exitFullscreen = vi.fn().mockResolvedValue(undefined);
       Object.defineProperty(document, "fullscreenElement", {
         value: document.body,
@@ -530,7 +597,7 @@ describe("Lightbox", () => {
           images={[{ id: "1", paths: { image: "/test.jpg" } }] as any}
           isOpen={true}
           onClose={onClose}
-          {...{ supportsFullscreen: true } as any}
+          {...({ supportsFullscreen: true } as any)}
         />
       );
 
@@ -539,6 +606,453 @@ describe("Lightbox", () => {
 
       expect(exitFullscreen).toHaveBeenCalled();
       expect(onClose).toHaveBeenCalled();
+    });
+  });
+
+  describe("keyboard", () => {
+    const image: ImageListItem = {
+      id: "img-1",
+      instanceId: "inst-1",
+      title: "Image one",
+      code: null,
+      details: null,
+      photographer: null,
+      urls: [],
+      date: null,
+      studio: null,
+      studioId: null,
+      rating100: null,
+      favorite: false,
+      oCounter: 0,
+      viewCount: 0,
+      lastViewedAt: null,
+      organized: false,
+      filePath: null,
+      width: null,
+      height: null,
+      fileSize: null,
+      paths: { thumbnail: "/t.jpg", preview: "/p.jpg", image: "/i.jpg" },
+      performers: [],
+      tags: [],
+      galleries: [],
+      stashCreatedAt: null,
+      stashUpdatedAt: null,
+    };
+
+    /** A performer page: its own r-then-number rating hotkeys. */
+    const PerformerPage = ({ children }: { children: ReactNode }) => {
+      useRatingHotkeys({
+        setRating: (rating) =>
+          void libraryApi.updateRating("performer", "p-1", rating, "inst-1"),
+      });
+      return <>{children}</>;
+    };
+
+    const press = (key: string) => {
+      fireEvent.keyDown(document.activeElement ?? document.body, { key });
+    };
+
+    it("r then 4 with the lightbox open over a performer page rates the image once and the performer never", async () => {
+      render(
+        <PerformerPage>
+          <Lightbox images={[image]} isOpen={true} onClose={vi.fn()} />
+        </PerformerPage>
+      );
+
+      press("r");
+      press("4");
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      expect(libraryApi.updateRating).toHaveBeenCalledTimes(1);
+      expect(libraryApi.updateRating).toHaveBeenCalledWith(
+        "image",
+        "img-1",
+        80,
+        "inst-1"
+      );
+    });
+
+    it("a favorite set in the lightbox is in the cached Images page after it closes", async () => {
+      const listKey = queryKeys.images.list(undefined, { page: 1 });
+      const row = (instanceId: string, favorite: boolean) => ({
+        id: "img-1",
+        instanceId,
+        title: "Image one",
+        rating100: null,
+        favorite,
+      });
+      queryClient.setQueryData(listKey, {
+        findImages: {
+          count: 2,
+          images: [row("inst-1", false), row("inst-2", false)],
+        },
+      });
+      const lightbox = (isOpen: boolean) => (
+        <Lightbox images={[image]} isOpen={isOpen} onClose={vi.fn()} />
+      );
+      const { rerender } = render(lightbox(true));
+
+      fireEvent.keyDown(document.activeElement ?? document.body, { key: "r" });
+      fireEvent.keyDown(document.activeElement ?? document.body, { key: "f" });
+      await waitFor(() =>
+        expect(libraryApi.updateFavorite).toHaveBeenCalledWith(
+          "image",
+          "img-1",
+          true,
+          "inst-1"
+        )
+      );
+      rerender(lightbox(false));
+
+      await waitFor(() =>
+        expect(queryClient.getQueryData(listKey)).toEqual({
+          findImages: {
+            count: 2,
+            images: [row("inst-1", true), row("inst-2", false)],
+          },
+        })
+      );
+    });
+
+    it("is a modal dialog that holds focus while open", () => {
+      render(<Lightbox images={[image]} isOpen={true} onClose={vi.fn()} />);
+
+      const dialog = screen.getByRole("dialog", { name: "Image viewer" });
+      expect(dialog.getAttribute("aria-modal")).toBe("true");
+      expect(dialog.contains(document.activeElement)).toBe(true);
+    });
+
+    it("Escape closes it and the arrows page through its images", () => {
+      const onClose = vi.fn();
+      const second: ImageListItem = {
+        ...image,
+        id: "img-2",
+        paths: { thumbnail: "/t2.jpg", preview: "/p2.jpg", image: "/i2.jpg" },
+      };
+      render(
+        <Lightbox images={[image, second]} isOpen={true} onClose={onClose} />
+      );
+      const src = () =>
+        screen.getByRole("img", { name: "Image one" }).getAttribute("src");
+
+      press("ArrowRight");
+      expect(src()).toBe("/i2.jpg");
+      press("ArrowLeft");
+      expect(src()).toBe("/i.jpg");
+
+      press("Escape");
+      expect(onClose).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("device queries", () => {
+    it("the arrows move to the portrait position when a phone turns upright", () => {
+      const media = controlMatchMedia();
+      try {
+        render(
+          <Lightbox
+            images={createMockImages(1, 3)}
+            initialIndex={0}
+            isOpen={true}
+            onClose={vi.fn()}
+          />
+        );
+        const next = () => screen.getByRole("button", { name: "Next image" });
+        expect(next().style.top).toBe("50%");
+
+        // A matchMedia change event, with no window resize
+        act(() =>
+          media.set("(max-width: 768px) and (orientation: portrait)", true)
+        );
+        expect(next().style.top).toBe("62%");
+
+        act(() =>
+          media.set("(max-width: 768px) and (orientation: portrait)", false)
+        );
+        expect(next().style.top).toBe("50%");
+      } finally {
+        media.restore();
+      }
+    });
+
+    it("adds no window resize or orientation listener", () => {
+      const media = controlMatchMedia();
+      const addSpy = vi.spyOn(window, "addEventListener");
+      try {
+        render(
+          <Lightbox
+            images={createMockImages(1, 3)}
+            initialIndex={0}
+            isOpen={false}
+            onClose={vi.fn()}
+          />
+        );
+        const events = addSpy.mock.calls.map(([type]) => type);
+        expect(events).not.toContain("resize");
+        expect(events).not.toContain("orientationchange");
+      } finally {
+        addSpy.mockRestore();
+        media.restore();
+      }
+    });
+  });
+
+  describe("media element", () => {
+    it("an mp4 image entry renders a video, not an img", () => {
+      const images = createMockImages(1, 1) as ImageListItem[];
+      images[0] = {
+        ...images[0],
+        filePath: "/data/clip.mp4",
+      } as ImageListItem;
+      const { container } = render(
+        <Lightbox
+          images={images}
+          initialIndex={0}
+          isOpen={true}
+          onClose={vi.fn()}
+        />
+      );
+
+      const video = container.querySelector("video");
+      expect(video).not.toBeNull();
+      expect(video?.getAttribute("src")).toBe(images[0].paths.image);
+      expect(video?.hasAttribute("controls")).toBe(true);
+      expect(video?.getAttribute("tabindex")).toBe("-1");
+      expect(container.querySelector("img")).toBeNull();
+    });
+
+    it("an img fills the frame with object-contain", () => {
+      const images = createMockImages(1, 1) as ImageListItem[];
+      const { container } = render(
+        <Lightbox
+          images={images}
+          initialIndex={0}
+          isOpen={true}
+          onClose={vi.fn()}
+        />
+      );
+
+      const img = container.querySelector("img");
+      expect(img?.className).toContain("w-full");
+      expect(img?.className).toContain("h-full");
+      expect(img?.className).toContain("object-contain");
+    });
+
+    it("a video entry becomes visible on loadeddata", () => {
+      const images = createMockImages(1, 1) as ImageListItem[];
+      images[0] = {
+        ...images[0],
+        filePath: "/data/clip.webm",
+      } as ImageListItem;
+      const { container } = render(
+        <Lightbox
+          images={images}
+          initialIndex={0}
+          isOpen={true}
+          onClose={vi.fn()}
+        />
+      );
+
+      const video = container.querySelector("video");
+      if (!video) throw new Error("no video element");
+      expect(video.style.opacity).toBe("0");
+      fireEvent.loadedData(video);
+      expect(video.style.opacity).toBe("1");
+    });
+
+    it("a video entry becomes visible on error", () => {
+      const images = createMockImages(1, 1) as ImageListItem[];
+      images[0] = {
+        ...images[0],
+        filePath: "/data/clip.webm",
+      } as ImageListItem;
+      const { container } = render(
+        <Lightbox
+          images={images}
+          initialIndex={0}
+          isOpen={true}
+          onClose={vi.fn()}
+        />
+      );
+
+      const video = container.querySelector("video");
+      if (!video) throw new Error("no video element");
+      fireEvent.error(video);
+      expect(video.style.opacity).toBe("1");
+    });
+  });
+
+  describe("prefetch", () => {
+    const created: Array<{
+      src: string;
+      decoding: string;
+      fetchPriority: string;
+    }> = [];
+    const RealImage = globalThis.Image;
+
+    beforeEach(() => {
+      created.length = 0;
+      class FakeImage {
+        src = "";
+        decoding = "";
+        fetchPriority = "";
+        constructor() {
+          created.push(this);
+        }
+      }
+      globalThis.Image = FakeImage as unknown as typeof Image;
+    });
+
+    afterEach(() => {
+      globalThis.Image = RealImage;
+      vi.unstubAllGlobals();
+    });
+
+    it("prefetch creates Image objects for the neighbours' URLs and calls no fetch", () => {
+      const fetchSpy = vi.fn().mockResolvedValue({});
+      vi.stubGlobal("fetch", fetchSpy);
+      const current = createMockImages(1, 1) as ImageListItem[];
+      const next = createMockImages(2, 2) as ImageListItem[];
+      render(
+        <Lightbox
+          images={current}
+          prefetchImages={next}
+          initialIndex={0}
+          isOpen={true}
+          onClose={vi.fn()}
+        />
+      );
+
+      expect(created.map((i) => i.src)).toEqual([
+        next[0]?.paths.image,
+        next[1]?.paths.image,
+      ]);
+      expect(created.every((i) => i.decoding === "async")).toBe(true);
+      expect(created.every((i) => i.fetchPriority === "low")).toBe(true);
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
+    it("prefetch skips video entries, whose file is the whole mp4", () => {
+      const current = createMockImages(1, 1) as ImageListItem[];
+      const next = createMockImages(2, 2) as ImageListItem[];
+      const photo = must(next[0], "the photo");
+      const video = {
+        ...must(next[1], "the video"),
+        filePath: "/data/clip.mp4",
+      } as ImageListItem;
+      render(
+        <Lightbox
+          images={current}
+          prefetchImages={[photo, video]}
+          initialIndex={0}
+          isOpen={true}
+          onClose={vi.fn()}
+        />
+      );
+
+      expect(created.map((i) => i.src)).toEqual([photo.paths.image]);
+    });
+
+    it("closing clears the prefetch images' src", () => {
+      const current = createMockImages(1, 1) as ImageListItem[];
+      const next = createMockImages(2, 2) as ImageListItem[];
+      const { rerender } = render(
+        <Lightbox
+          images={current}
+          prefetchImages={next}
+          initialIndex={0}
+          isOpen={true}
+          onClose={vi.fn()}
+        />
+      );
+      expect(created.length).toBe(2);
+
+      rerender(
+        <Lightbox
+          images={current}
+          prefetchImages={next}
+          initialIndex={0}
+          isOpen={false}
+          onClose={vi.fn()}
+        />
+      );
+
+      expect(created.map((i) => i.src)).toEqual(["", ""]);
+    });
+  });
+
+  describe("download", () => {
+    const realLocation = window.location;
+
+    beforeEach(() => {
+      Object.defineProperty(window, "location", {
+        configurable: true,
+        writable: true,
+        value: { href: "" },
+      });
+    });
+
+    afterEach(() => {
+      Object.defineProperty(window, "location", {
+        configurable: true,
+        writable: true,
+        value: realLocation,
+      });
+    });
+
+    const renderOpen = () => {
+      const base = createMockImages(1, 2) as ImageListItem[];
+      const images = base.map((image, i) => ({
+        ...image,
+        id: `img-${i}`,
+        instanceId: "inst-b",
+      }));
+      render(
+        <Lightbox
+          images={images}
+          initialIndex={0}
+          isOpen={true}
+          onClose={vi.fn()}
+        />
+      );
+    };
+
+    it("the Download button shows only with Can Download Files", async () => {
+      vi.mocked(getMyPermissions).mockResolvedValue({
+        permissions: permissions({ canDownloadFiles: false }),
+      });
+      renderOpen();
+      await waitFor(() => expect(getMyPermissions).toHaveBeenCalled());
+      expect(screen.queryByLabelText("Download image")).toBeNull();
+    });
+
+    it("shows the Download button with Can Download Files", async () => {
+      vi.mocked(getMyPermissions).mockResolvedValue({
+        permissions: permissions({ canDownloadFiles: true }),
+      });
+      renderOpen();
+      expect(await screen.findByLabelText("Download image")).toBeTruthy();
+    });
+
+    it("Download posts the image's instance and navigates to the file", async () => {
+      vi.mocked(getMyPermissions).mockResolvedValue({
+        permissions: permissions({ canDownloadFiles: true }),
+      });
+      vi.mocked(apiPost).mockResolvedValue({
+        download: { id: 31, status: "COMPLETED" },
+      });
+      renderOpen();
+
+      fireEvent.click(await screen.findByLabelText("Download image"));
+
+      await waitFor(() => {
+        expect(window.location.href).toBe("/api/downloads/31/file");
+      });
+      expect(apiPost).toHaveBeenCalledWith("/downloads/image/img-0", {
+        instanceId: "inst-b",
+      });
     });
   });
 });

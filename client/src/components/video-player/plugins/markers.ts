@@ -1,17 +1,34 @@
 import videojs from "video.js";
-import CryptoJS from "crypto-js";
+import { clipTitle } from "../../../utils/clipTitle";
+import { sha256Hex } from "../../../utils/sha256";
 
 interface MarkerSet {
   dot?: HTMLElement;
-  range?: HTMLElement;
 }
 
 interface Marker {
   seconds: number;
-  end_seconds?: number;
   title: string;
   primaryTag?: { name: string } | null;
+  /** The clip has no generated preview yet: its dot is hollow */
+  ungenerated?: boolean;
 }
+
+/** A clip as the timeline reads it (`GET /scenes/:id/clips`) */
+export interface ClipMarkerInput {
+  seconds: number;
+  title?: string | null;
+  primaryTag?: { name: string } | null;
+  isGenerated?: boolean;
+}
+
+/** The two calls the timeline placement makes on the (untyped) player */
+interface TimelinePlayer {
+  duration(): number;
+  on(events: string[], handler: () => void): void;
+}
+
+const UNGENERATED_CLASS = "vjs-marker-ungenerated";
 
 class MarkersPlugin extends videojs.getPlugin("plugin") {
   markers: Marker[];
@@ -47,6 +64,25 @@ class MarkersPlugin extends videojs.getPlugin("plugin") {
         .el()
         .querySelector(".vjs-progress-holder .vjs-mouse-display .vjs-time-tooltip");
     });
+
+    // The duration is unknown until the source's metadata loads, and a source
+    // swap changes it: place every dot again whenever it does
+    (player as TimelinePlayer).on(["durationchange", "loadedmetadata"], () => {
+      this.positionDots();
+    });
+  }
+
+  /** Put every dot where its second falls on the timeline, once the duration is known */
+  positionDots() {
+    const duration = (this.player as TimelinePlayer).duration();
+    if (!Number.isFinite(duration) || duration <= 0) return;
+    this.markers.forEach((marker, i) => {
+      const dot = this.markerDivs[i]?.dot;
+      if (!dot) return;
+      // marker is 6px wide - adjust by 3px to align to center not left side
+      dot.style.left = `calc(${(marker.seconds / duration) * 100}% - 3px)`;
+      dot.style.visibility = "visible";
+    });
   }
 
   showMarkerTooltip(title: string, layer = 0) {
@@ -64,18 +100,12 @@ class MarkersPlugin extends videojs.getPlugin("plugin") {
   }
 
   addDotMarker(marker: Marker) {
-    const duration = this.player.duration();
     const seekBar = this.player.el().querySelector(".vjs-progress-holder");
 
     const dot: HTMLElement = videojs.dom.createEl("div");
-    dot.className = "vjs-marker";
-    if (duration) {
-      // marker is 6px wide - adjust by 3px to align to center not left side
-      dot.style.left = `calc(${
-        (marker.seconds / duration) * 100
-      }% - 3px)`;
-      dot.style.visibility = "visible";
-    }
+    dot.className = marker.ungenerated
+      ? `vjs-marker ${UNGENERATED_CLASS}`
+      : "vjs-marker";
 
     // Add event listeners to dot
     dot.addEventListener("click", () =>
@@ -84,13 +114,13 @@ class MarkersPlugin extends videojs.getPlugin("plugin") {
     dot.toggleAttribute("marker-tooltip-shown", true);
 
     // Set background color based on tag (if available)
-    if (
-      marker.primaryTag &&
-      marker.primaryTag.name &&
-      this.tagColors[marker.primaryTag.name]
-    ) {
-      dot.style.backgroundColor =
-        this.tagColors[marker.primaryTag.name];
+    const dotColor = marker.primaryTag?.name
+      ? this.tagColors[marker.primaryTag.name]
+      : undefined;
+    if (dotColor) {
+      // A hollow dot keeps its tag color on the outline
+      if (marker.ungenerated) dot.style.borderColor = dotColor;
+      else dot.style.backgroundColor = dotColor;
     }
     dot.addEventListener("mouseenter", () => {
       this.showMarkerTooltip(marker.title);
@@ -108,171 +138,43 @@ class MarkersPlugin extends videojs.getPlugin("plugin") {
     }
     this.markers.push(marker);
     this.markerDivs.push(markerSet);
+    this.positionDots();
   }
 
   addDotMarkers(markers: Marker[]) {
-    markers.forEach(this.addDotMarker, this);
+    markers.forEach((marker) => {
+      this.addDotMarker(marker);
+    });
   }
 
   /**
    * Add clip markers to the timeline
    * Clips are converted to marker format with generated colors based on tag names
-   * @param {Array} clips - Array of clip objects with seconds, title, and primaryTag
+   * @param clips - Clip objects with seconds, title, primaryTag and isGenerated
    */
-  addClipMarkers(clips: any[]) {
-    if (!clips || clips.length === 0) return;
+  addClipMarkers(clips: ClipMarkerInput[]) {
+    if (clips.length === 0) return;
 
     // Extract unique tag names and generate colors
-    const tagNames = [...new Set(
-      clips
-        .filter((clip: any) => clip.primaryTag?.name)
-        .map((clip: any) => clip.primaryTag.name)
-    )] as string[];
+    const tagNames = [
+      ...new Set(
+        clips.flatMap((clip) => (clip.primaryTag?.name ? [clip.primaryTag.name] : []))
+      ),
+    ];
 
     if (tagNames.length > 0) {
       this.findColors(tagNames);
     }
 
     // Convert clips to marker format and add them
-    const markers = clips.map((clip: any) => ({
+    const markers: Marker[] = clips.map((clip) => ({
       seconds: clip.seconds,
-      title: clip.title || "Untitled",
-      primaryTag: clip.primaryTag,
+      title: clipTitle(clip),
+      primaryTag: clip.primaryTag ?? null,
+      ungenerated: clip.isGenerated === false,
     }));
 
     this.addDotMarkers(markers);
-  }
-
-  renderRangeMarkers(markers: Marker[], layer: number) {
-    const duration = this.player.duration();
-    const parent = this.player.el().querySelector(".vjs-progress-control");
-    const seekBar = this.player.el().querySelector(".vjs-progress-holder");
-    if (!seekBar || !parent || !duration) return;
-
-    markers.forEach((marker: Marker) => {
-      this.renderRangeMarker(marker, layer, duration, seekBar, parent);
-    });
-  }
-
-  renderRangeMarker(marker: Marker, layer: number, duration: number, seekBar: HTMLElement, parent: HTMLElement) {
-    if (!marker.end_seconds) return;
-
-    const rangeDiv = videojs.dom.createEl("div");
-    rangeDiv.className = "vjs-marker-range";
-
-    // start/end percent is relative to the parent element, which is the vjs-progress-control
-    // vjs-progress-control has 15px margins on each side
-    const left = seekBar.clientWidth * (marker.seconds / duration) + 15;
-
-    // minimum width of 8px
-    const width = Math.max(
-      seekBar.clientWidth * ((marker.end_seconds - marker.seconds) / duration),
-      8
-    );
-
-    rangeDiv.style.left = `${left}px`;
-    rangeDiv.style.width = `${width}px`;
-    rangeDiv.style.bottom = `${layer * this.layerHeight}px`; // Adjust height based on layer
-    rangeDiv.style.display = "none"; // Initially hidden
-
-    // Set background color based on tag (if available)
-    if (
-      marker.primaryTag &&
-      marker.primaryTag.name &&
-      this.tagColors[marker.primaryTag.name]
-    ) {
-      rangeDiv.style.backgroundColor = this.tagColors[marker.primaryTag.name];
-    }
-
-    const range: HTMLElement = rangeDiv;
-    range.style.display = "block";
-    range.addEventListener("pointermove", (e: Event) => {
-      e.stopPropagation();
-    });
-    range.addEventListener("pointerover", (e: Event) => {
-      e.stopPropagation();
-    });
-    range.addEventListener("pointerout", (e: Event) => {
-      e.stopPropagation();
-    });
-    range.addEventListener("mouseenter", () => {
-      this.showMarkerTooltip(marker.title, layer);
-      range.toggleAttribute("marker-tooltip-shown", true);
-    });
-
-    range.addEventListener("mouseout", () => {
-      this.hideMarkerTooltip();
-      range.toggleAttribute("marker-tooltip-shown", false);
-    });
-    parent.appendChild(rangeDiv);
-    const markerSet: MarkerSet = { range };
-    this.markers.push(marker);
-    this.markerDivs.push(markerSet);
-  }
-
-  addRangeMarkers(markers: Marker[]) {
-    let remainingMarkers = [...markers];
-    let layerNum = 0;
-
-    while (remainingMarkers.length > 0) {
-      // Get the set of markers that currently have the highest total duration that don't overlap. We do this layer by layer to prioritize filling
-      // the lower layers when possible
-      const mwis = this.findMWIS(remainingMarkers);
-      if (!mwis.length) break;
-
-      this.renderRangeMarkers(mwis, layerNum);
-      remainingMarkers = remainingMarkers.filter(
-        (marker) => !mwis.includes(marker)
-      );
-      layerNum++;
-    }
-  }
-
-  // Use dynamic programming to find maximum weight independent set (ie the set of markers that have the highest total duration that don't overlap)
-  findMWIS(markers: Marker[]): Marker[] {
-    if (!markers.length) return [];
-
-    // Sort markers by end time
-    markers = markers
-      .slice()
-      .sort((a: Marker, b: Marker) => (a.end_seconds || 0) - (b.end_seconds || 0));
-    const n = markers.length;
-
-    // Compute p(j) for each marker. This is the index of the marker that has the highest end time that doesn't overlap with marker j
-    const p = new Array(n).fill(-1);
-    for (let j = 0; j < n; j++) {
-      for (let i = j - 1; i >= 0; i--) {
-        if ((markers[i].end_seconds || 0) <= markers[j].seconds) {
-          p[j] = i;
-          break;
-        }
-      }
-    }
-
-    // Initialize M[j]
-    // Compute M[j] for each marker. This is the maximum total duration of markers that don't overlap with marker j
-    const M = new Array(n).fill(0);
-    for (let j = 0; j < n; j++) {
-      const include =
-        (markers[j].end_seconds || 0) - markers[j].seconds + (M[p[j]] || 0);
-      const exclude = j > 0 ? M[j - 1] : 0;
-      M[j] = Math.max(include, exclude);
-    }
-
-    // Reconstruct optimal solution
-    const findSolution = (j: number): Marker[] => {
-      if (j < 0) return [];
-      const include =
-        (markers[j].end_seconds || 0) - markers[j].seconds + (M[p[j]] || 0);
-      const exclude = j > 0 ? M[j - 1] : 0;
-      if (include >= exclude) {
-        return [...findSolution(p[j]), markers[j]];
-      } else {
-        return findSolution(j - 1);
-      }
-    };
-
-    return findSolution(n - 1);
   }
 
   removeMarker(marker: Marker) {
@@ -281,17 +183,19 @@ class MarkersPlugin extends videojs.getPlugin("plugin") {
 
     this.markers.splice(i, 1);
     const markerSet = this.markerDivs.splice(i, 1)[0];
+    if (!markerSet) return;
 
     if (markerSet.dot && markerSet.dot.hasAttribute("marker-tooltip-shown")) {
       this.hideMarkerTooltip();
     }
 
     if (markerSet.dot) markerSet.dot.remove();
-    if (markerSet.range) markerSet.range.remove();
   }
 
   removeMarkers(markers: Marker[]) {
-    markers.forEach(this.removeMarker, this);
+    markers.forEach((marker) => {
+      this.removeMarker(marker);
+    });
   }
 
   clearMarkers() {
@@ -301,8 +205,7 @@ class MarkersPlugin extends videojs.getPlugin("plugin") {
       }
 
       if (markerSet.dot) markerSet.dot.remove();
-      if (markerSet.range) markerSet.range.remove();
-    }
+      }
     this.markers = [];
     this.markerDivs = [];
   }
@@ -320,7 +223,8 @@ class MarkersPlugin extends videojs.getPlugin("plugin") {
 
     // Convert adjusted hues to colors and store in tagColors dictionary
     for (const tag of tagNames) {
-      this.tagColors[tag] = this.hueToColor(adjustedHues[tag]);
+      const hue = adjustedHues[tag];
+      if (hue !== undefined) this.tagColors[tag] = this.hueToColor(hue);
     }
   }
 
@@ -328,8 +232,7 @@ class MarkersPlugin extends videojs.getPlugin("plugin") {
 
   // Compute base hue from tag name
   computeBaseHue(tag: string) {
-    const hash = CryptoJS.SHA256(tag);
-    const hashHex = hash.toString(CryptoJS.enc.Hex);
+    const hashHex = sha256Hex(tag);
     const hashInt = BigInt(`0x${hashHex}`);
     const baseHue = Number(hashInt % BigInt(360)); // Map to [0, 360)
     return baseHue;
@@ -360,47 +263,66 @@ class MarkersPlugin extends videojs.getPlugin("plugin") {
     const deltaMin = this.calculateDeltaMin(N);
 
     // Sort the tags by base hue
-    const sortedTags = tags.sort((a, b) => baseHues[a] - baseHues[b]);
+    const sortedEntries = Object.entries(baseHues).sort(
+      ([, a], [, b]) => a - b
+    );
+    const sortedTags = sortedEntries.map(([tag]) => tag);
     // Get sorted base hues
-    const baseHuesSorted = sortedTags.map((tag) => baseHues[tag]);
+    const baseHuesSorted = sortedEntries.map(([, hue]) => hue);
 
     // Unwrap hues to handle circular nature
     const unwrappedHues = [...baseHuesSorted];
     for (let i = 1; i < N; i++) {
-      if (unwrappedHues[i] <= unwrappedHues[i - 1]) {
-        unwrappedHues[i] += 360; // Unwrap by adding 360 degrees
+      const hue = unwrappedHues[i];
+      const previousHue = unwrappedHues[i - 1];
+      if (hue === undefined || previousHue === undefined) continue;
+      if (hue <= previousHue) {
+        unwrappedHues[i] = hue + 360; // Unwrap by adding 360 degrees
       }
     }
 
     // Adjust hues to ensure minimum difference
     for (let i = 1; i < N; i++) {
-      const requiredHue = unwrappedHues[i - 1] + deltaMin;
-      if (unwrappedHues[i] < requiredHue) {
+      const hue = unwrappedHues[i];
+      const previousHue = unwrappedHues[i - 1];
+      if (hue === undefined || previousHue === undefined) continue;
+      const requiredHue = previousHue + deltaMin;
+      if (hue < requiredHue) {
         unwrappedHues[i] = requiredHue; // Adjust hue minimally
       }
     }
 
-    // Handle wrap-around difference
-    const endGap = unwrappedHues[0] + 360 - unwrappedHues[N - 1];
-    if (endGap < deltaMin) {
-      // Adjust first and last hues minimally to increase end gap
-      const adjustmentNeeded = (deltaMin - endGap) / 2;
-      // Adjust the first hue backward, ensure it doesn't go below other hues
-      unwrappedHues[0] = Math.max(
-        unwrappedHues[0] - adjustmentNeeded,
-        unwrappedHues[1] - 360 + deltaMin
-      );
-      // Adjust the last hue forward
-      unwrappedHues[N - 1] += adjustmentNeeded;
+    // Handle wrap-around difference (needs at least two hues)
+    const firstHue = unwrappedHues[0];
+    const secondHue = unwrappedHues[1];
+    const lastHue = unwrappedHues[N - 1];
+    if (
+      firstHue !== undefined &&
+      secondHue !== undefined &&
+      lastHue !== undefined
+    ) {
+      const endGap = firstHue + 360 - lastHue;
+      if (endGap < deltaMin) {
+        // Adjust first and last hues minimally to increase end gap
+        const adjustmentNeeded = (deltaMin - endGap) / 2;
+        // Adjust the first hue backward, ensure it doesn't go below other hues
+        unwrappedHues[0] = Math.max(
+          firstHue - adjustmentNeeded,
+          secondHue - 360 + deltaMin
+        );
+        // Adjust the last hue forward
+        unwrappedHues[N - 1] = lastHue + adjustmentNeeded;
+      }
     }
 
     // Wrap adjusted hues back to [0, 360)
     const adjustedHuesList = unwrappedHues.map((hue) => hue % 360);
 
     // Map adjusted hues back to tags
-    for (let i = 0; i < N; i++) {
-      adjustedHues[sortedTags[i]] = adjustedHuesList[i];
-    }
+    sortedTags.forEach((tag, i) => {
+      const hue = adjustedHuesList[i];
+      if (hue !== undefined) adjustedHues[tag] = hue;
+    });
 
     return adjustedHues;
   }
@@ -420,7 +342,7 @@ class MarkersPlugin extends videojs.getPlugin("plugin") {
   }
 
   // Convert HSV to RGB
-  hsvToRgb(h: number, s: number, v: number) {
+  hsvToRgb(h: number, s: number, v: number): [number, number, number] {
     const i = Math.floor(h * 6);
     const f = h * 6 - i;
     const p = v * (1 - s);

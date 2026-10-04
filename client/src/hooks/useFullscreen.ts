@@ -25,14 +25,17 @@ const doc = document as VendorDocument;
  * @param {boolean} options.enabled - Whether the hook is active (default: true)
  * @returns {{ isFullscreen: boolean, toggleFullscreen: () => void, supportsFullscreen: boolean }}
  */
-export function useFullscreen({ autoOnLandscape = false, enabled = true } = {}) {
+export function useFullscreen({
+  autoOnLandscape = false,
+  enabled = true,
+} = {}) {
   const [isFullscreen, setIsFullscreen] = useState(false);
   const userDeclinedRef = useRef(false);
   const supportsFullscreen = Boolean(
     doc.fullscreenEnabled ||
-      doc.webkitFullscreenEnabled ||
-      doc.mozFullScreenEnabled ||
-      doc.msFullscreenEnabled
+    doc.webkitFullscreenEnabled ||
+    doc.mozFullScreenEnabled ||
+    doc.msFullscreenEnabled
   );
 
   const enterFullscreen = useCallback(async () => {
@@ -97,9 +100,18 @@ export function useFullscreen({ autoOnLandscape = false, enabled = true } = {}) 
 
     return () => {
       document.removeEventListener("fullscreenchange", handleFullscreenChange);
-      document.removeEventListener("webkitfullscreenchange", handleFullscreenChange);
-      document.removeEventListener("mozfullscreenchange", handleFullscreenChange);
-      document.removeEventListener("MSFullscreenChange", handleFullscreenChange);
+      document.removeEventListener(
+        "webkitfullscreenchange",
+        handleFullscreenChange
+      );
+      document.removeEventListener(
+        "mozfullscreenchange",
+        handleFullscreenChange
+      );
+      document.removeEventListener(
+        "MSFullscreenChange",
+        handleFullscreenChange
+      );
     };
   }, [autoOnLandscape]);
 
@@ -120,7 +132,7 @@ export function useFullscreen({ autoOnLandscape = false, enabled = true } = {}) 
 
         // Auto-fullscreen on landscape if: not already fullscreen and user hasn't declined
         if (isLandscape && !isCurrentlyFullscreen && !userDeclinedRef.current) {
-          enterFullscreen();
+          void enterFullscreen();
         }
       }, 150); // 150ms delay for dimensions to settle
     };

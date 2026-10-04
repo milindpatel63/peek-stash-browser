@@ -1,0 +1,338 @@
+/**
+ * EntityAccessService: may this user see this entity?
+ *
+ * The single read helper for decisions about one id, or a batch of ids, that
+ * came in a request (ratings, history writes, downloads and media). Lists
+ * and reads of many entities keep their LEFT JOIN on UserExcludedEntity (the
+ * query builders and their nested refs, the tooltips, the tag tree, the
+ * pickers, the playlist reads).
+ *
+ * An entity (entityId, instanceId) is accessible to userId when all of these
+ * hold:
+ * 1. Its cached row exists with that id and stashInstanceId, and deletedAt
+ *    IS NULL.
+ * 2. StashInstance.enabled = 1 for that instance, and its first sync has
+ *    finished with its users' exclusions computed (firstSyncedAt IS NOT
+ *    NULL): until then nobody, admins included, is served its content.
+ * 3. The instance is allowed: a user whose UserStashInstance rows name no
+ *    enabled instance (none at all, or only disabled ones) may use every
+ *    enabled instance, otherwise only their selected ones. Rules 2 and 3
+ *    mirror UserInstanceService.getUserAllowedInstanceIds and must change
+ *    with it (item 12); the integration test "agrees with
+ *    getUserAllowedInstanceIds" fails when one side changes alone.
+ * 4. No UserExcludedEntity row for (userId, entityType, entityId) has an
+ *    instanceId of '' or the entity's instance.
+ * 5. Clips only: the clip's scene is not soft-deleted and has no scene
+ *    exclusion row, under the same instance rule. A clip is hidden when the
+ *    clip or its scene is hidden.
+ *
+ * No role logic, by design: the exclusion compute already settles admins (an
+ * admin's rows hold only their own hides and cascades, never restriction
+ * output), so reading UserExcludedEntity for every user is exactly the policy.
+ *
+ * resolveVisibleApartFromOwnHides applies the same rules with rule 4 read as
+ * if the user had hidden nothing, for the Hidden Items list.
+ *
+ * Every value is bound; the table name and the clip fragments come from a
+ * fixed map keyed by the typed entity type. A database error throws: access
+ * is never allowed because a query failed.
+ */
+import prisma from "../prisma/singleton.js";
+import { type EntityRef, entityKey, pairsJson } from "../utils/entityRef.js";
+
+export type AccessEntityType =
+  | "scene"
+  | "performer"
+  | "studio"
+  | "tag"
+  | "group"
+  | "gallery"
+  | "image"
+  | "clip";
+
+interface EntitySource {
+  table: string;
+  join: string;
+  where: string;
+  /** The clip's scene exclusion check binds one more userId. */
+  extraUserParam: boolean;
+}
+
+const plain = (table: string): EntitySource => ({
+  table,
+  join: "",
+  where: "",
+  extraUserParam: false,
+});
+
+const ENTITY_SOURCES: Record<AccessEntityType, EntitySource> = {
+  scene: plain("StashScene"),
+  performer: plain("StashPerformer"),
+  studio: plain("StashStudio"),
+  tag: plain("StashTag"),
+  group: plain("StashGroup"),
+  gallery: plain("StashGallery"),
+  image: plain("StashImage"),
+  clip: {
+    table: "StashClip",
+    join: "JOIN StashScene cs ON cs.id = x.sceneId AND cs.stashInstanceId = x.sceneInstanceId AND cs.deletedAt IS NULL",
+    where:
+      "AND NOT EXISTS (SELECT 1 FROM UserExcludedEntity es WHERE es.userId = ? AND es.entityType = 'scene' AND es.entityId = cs.id AND (es.instanceId = '' OR es.instanceId = cs.stashInstanceId))",
+    extraUserParam: true,
+  },
+};
+
+/**
+ * Rules 1, 2 and 3 for the row aliased `x`. Binds userId, userId. The
+ * queries' own JOIN on StashInstance checks rule 2's enabled part too; the
+ * probe here keeps every query that uses the clause on both parts. Rule 3's
+ * first probe does not depend on `x`, so SQLite runs it once per statement.
+ */
+const LIVE_AND_ALLOWED_WHERE = `x.deletedAt IS NULL
+  AND EXISTS (SELECT 1 FROM StashInstance ri WHERE ri.id = x.stashInstanceId AND ri.enabled = 1 AND ri.firstSyncedAt IS NOT NULL)
+  AND (NOT EXISTS (SELECT 1 FROM UserStashInstance usi JOIN StashInstance si ON si.id = usi.instanceId AND si.enabled = 1 WHERE usi.userId = ?)
+       OR EXISTS (SELECT 1 FROM UserStashInstance usi WHERE usi.userId = ? AND usi.instanceId = x.stashInstanceId))`;
+
+/**
+ * Rule 4's probe for the row aliased `x`. Binds userId, entityType. Any
+ * reason excludes, `pending` included: a hold a sync batch wrote for a
+ * changed entity, replaced by the user's next recompute.
+ */
+const EXCLUSION_PROBE = `SELECT 1 FROM UserExcludedEntity e
+                  WHERE e.userId = ? AND e.entityType = ? AND e.entityId = x.id
+                    AND (e.instanceId = '' OR e.instanceId = x.stashInstanceId)`;
+
+/**
+ * Rules 1 to 4 for the row aliased `x`, shared by every query here so the
+ * single and batch checks can't drift. Binds userId, userId, userId,
+ * entityType. Each probe hits an index: StashInstance's primary key,
+ * UserStashInstance (userId, instanceId) and UserExcludedEntity (userId,
+ * entityType, entityId, instanceId).
+ */
+const ACCESS_WHERE = `${LIVE_AND_ALLOWED_WHERE}
+  AND NOT EXISTS (${EXCLUSION_PROBE})`;
+
+/**
+ * ACCESS_WHERE as if the user had hidden nothing: rule 4 ignores rows whose
+ * reason is 'hidden'. Same binds.
+ *
+ * This reads the user's own hides apart from everything else because of how
+ * the compute stores reasons (ExclusionComputationService, "Reason
+ * precedence"): every restriction-derived reason ('restricted', a cascade
+ * of a restriction, a content rule, 'empty' under the restrictions alone) is
+ * stored ahead of 'hidden', and the incremental hide never overwrites a row.
+ * So a key whose row is 'hidden' is one the user would see if they had
+ * hidden nothing. Any other row still excludes, including a 'cascade' or
+ * 'empty' row that the user's own hides produced for an entity they never
+ * hid themselves: at worst a visible entity reads as not visible, never the
+ * reverse. A `pending` row is such a row too: a sync batch wrote it to hold
+ * a changed entity from the user until their recompute (C18), so the entity
+ * is not visible, on the Hidden Items list included, until the recompute
+ * settles what it is.
+ */
+const ACCESS_WHERE_APART_FROM_OWN_HIDES = `${LIVE_AND_ALLOWED_WHERE}
+  AND NOT EXISTS (${EXCLUSION_PROBE}
+                    AND e.reason <> 'hidden')`;
+
+function sourceFor(entityType: AccessEntityType): EntitySource {
+  if (!Object.prototype.hasOwnProperty.call(ENTITY_SOURCES, entityType)) {
+    throw new Error(`Unknown entity type: ${entityType}`);
+  }
+  return ENTITY_SOURCES[entityType];
+}
+
+/** The params ACCESS_WHERE and the source's own clause bind, in order. */
+function accessParams(
+  source: EntitySource,
+  userId: number,
+  entityType: AccessEntityType
+): unknown[] {
+  const params: unknown[] = [userId, userId, userId, entityType];
+  if (source.extraUserParam) params.push(userId);
+  return params;
+}
+
+/** May this user see this one entity? One SQL round trip. */
+export function canUserAccessEntity(
+  userId: number,
+  entityType: AccessEntityType,
+  entityId: string,
+  instanceId: string
+): Promise<boolean> {
+  return checkOne(ACCESS_WHERE, userId, entityType, entityId, instanceId);
+}
+
+/**
+ * Could this user see this one entity if they had hidden nothing? Rules 1 to
+ * 4 with only the user's own 'hidden' rows set aside, as the Hidden Items
+ * list reads them (resolveVisibleApartFromOwnHides): a restriction, its
+ * cascades, a hide's cascade or a sync hold still refuses. For the media of
+ * an entity the user hid, so its Hidden Items thumbnail loads. One SQL round
+ * trip.
+ */
+export function canUserSeeApartFromOwnHides(
+  userId: number,
+  entityType: AccessEntityType,
+  entityId: string,
+  instanceId: string
+): Promise<boolean> {
+  return checkOne(
+    ACCESS_WHERE_APART_FROM_OWN_HIDES,
+    userId,
+    entityType,
+    entityId,
+    instanceId
+  );
+}
+
+async function checkOne(
+  accessWhere: string,
+  userId: number,
+  entityType: AccessEntityType,
+  entityId: string,
+  instanceId: string
+): Promise<boolean> {
+  const source = sourceFor(entityType);
+  if (!entityId || !instanceId) return false;
+
+  const sql = `SELECT 1 AS ok
+FROM ${source.table} x
+JOIN StashInstance si ON si.id = x.stashInstanceId AND si.enabled = 1
+${source.join}
+WHERE x.id = ? AND x.stashInstanceId = ?
+  AND ${accessWhere}
+  ${source.where}
+LIMIT 1`;
+
+  const rows = await prisma.$queryRawUnsafe<{ ok: number }[]>(
+    sql,
+    entityId,
+    instanceId,
+    ...accessParams(source, userId, entityType)
+  );
+  return rows.length > 0;
+}
+
+/**
+ * Batch form: the entityKey()s of the refs the user may see. One SQL round
+ * trip, one bound JSON parameter for all refs, so a large batch never hits
+ * SQLite's bound-parameter limit.
+ */
+export async function getVisibleEntityKeys(
+  userId: number,
+  entityType: AccessEntityType,
+  refs: ReadonlyArray<EntityRef>
+): Promise<Set<string>> {
+  const source = sourceFor(entityType);
+
+  const unique = new Map<string, EntityRef>();
+  for (const ref of refs) {
+    const { id, instanceId } = ref;
+    if (!id || !instanceId) continue;
+    unique.set(entityKey(id, instanceId), { id, instanceId });
+  }
+  if (unique.size === 0) return new Set();
+
+  // CROSS JOIN makes SQLite keep json_each as the outer loop, so each ref
+  // probes the entity primary key. With a plain JOIN the planner can scan the
+  // whole table by deletedAt and re-read the JSON for every row (27 s for
+  // 5,000 refs against 26k scenes).
+  const sql = `SELECT x.id AS id, x.stashInstanceId AS instanceId
+FROM json_each(?) j
+CROSS JOIN ${source.table} x ON x.id = json_extract(j.value, '$[0]') AND x.stashInstanceId = json_extract(j.value, '$[1]')
+JOIN StashInstance si ON si.id = x.stashInstanceId AND si.enabled = 1
+${source.join}
+WHERE ${ACCESS_WHERE}
+  ${source.where}`;
+
+  const rows = await prisma.$queryRawUnsafe<EntityRef[]>(
+    sql,
+    pairsJson([...unique.values()]),
+    ...accessParams(source, userId, entityType)
+  );
+  return new Set(rows.map((r) => entityKey(r.id, r.instanceId)));
+}
+
+/**
+ * For per-user writes: the request's instance if canUserAccessEntity passes,
+ * else null. The instance is always the request's; the server never guesses
+ * one.
+ */
+export async function resolveAccessibleInstanceId(
+  userId: number,
+  entityType: Exclude<AccessEntityType, "clip">,
+  entityId: string,
+  requestInstanceId: string
+): Promise<string | null> {
+  return (await canUserAccessEntity(
+    userId,
+    entityType,
+    entityId,
+    requestInstanceId
+  ))
+    ? requestInstanceId
+    : null;
+}
+
+/**
+ * The entity types a user can hide: every one, clips included (a hidden
+ * clip is hidden alone; a hidden scene hides its clips too).
+ */
+export type HideableEntityType = AccessEntityType;
+
+/**
+ * For hidden rows: where could this user see each entity if they had hidden
+ * nothing? Returns, keyed by entityKey(ref.id, ref.instanceId) as passed
+ * in, the instance to show the entity from; a ref with no entry has no such
+ * instance (restricted for the user, empty for them, deleted, or on an
+ * instance they do not use). A ref with instanceId '' (a hide stored for
+ * every instance) resolves to the first qualifying instance by
+ * StashInstance.priority, then id. One SQL round trip, one bound JSON parameter for all refs.
+ */
+export async function resolveVisibleApartFromOwnHides(
+  userId: number,
+  entityType: HideableEntityType,
+  refs: ReadonlyArray<EntityRef>
+): Promise<Map<string, string>> {
+  const source = sourceFor(entityType);
+
+  const unique = new Map<string, EntityRef>();
+  for (const ref of refs) {
+    const { id, instanceId } = ref;
+    if (!id) continue;
+    unique.set(entityKey(id, instanceId), { id, instanceId });
+  }
+  if (unique.size === 0) return new Map();
+
+  // The CTE comes first so the JSON is the first bound parameter; each ref
+  // then probes the entity primary key (id, stashInstanceId) by its id.
+  const sql = `WITH r(id, inst) AS (
+  SELECT json_extract(j.value, '$[0]'), json_extract(j.value, '$[1]') FROM json_each(?) j
+)
+SELECT r.id AS id, r.inst AS requested,
+  (SELECT x.stashInstanceId
+     FROM ${source.table} x
+     JOIN StashInstance si ON si.id = x.stashInstanceId AND si.enabled = 1
+     ${source.join}
+    WHERE x.id = r.id AND (r.inst = '' OR x.stashInstanceId = r.inst)
+      AND ${ACCESS_WHERE_APART_FROM_OWN_HIDES}
+      ${source.where}
+    ORDER BY si.priority, x.stashInstanceId
+    LIMIT 1) AS instanceId
+FROM r`;
+
+  const rows = await prisma.$queryRawUnsafe<
+    Array<{ id: string; requested: string; instanceId: string | null }>
+  >(
+    sql,
+    pairsJson([...unique.values()]),
+    ...accessParams(source, userId, entityType)
+  );
+  const resolved = new Map<string, string>();
+  for (const row of rows) {
+    if (row.instanceId) {
+      resolved.set(entityKey(row.id, row.requested), row.instanceId);
+    }
+  }
+  return resolved;
+}

@@ -1,63 +1,62 @@
-import { useEffect, useState } from "react";
+import { useRef, useState } from "react";
 import { getClipPreviewUrl } from "../../api";
+import { useHoverCapable } from "../../hooks/useHoverCapable";
+import { useInView } from "../../hooks/useInView";
+import { usePreviewVideoRef } from "../../hooks/usePreviewVideoRef";
+import { clipTitle } from "../../utils/clipTitle";
 import type { Clip } from "./ClipCard";
 
 interface Props {
   clip: Clip;
   objectFit?: "contain" | "cover";
+  /**
+   * Preview while the card is in view (a single-column touch layout, where
+   * nothing hovers) instead of while the pointer is over it
+   */
+  autoplayOnScroll?: boolean;
 }
 
-const ClipCardPreview = ({ clip, objectFit = "cover" }: Props) => {
+const ClipCardPreview = ({
+  clip,
+  objectFit = "cover",
+  autoplayOnScroll = false,
+}: Props) => {
   const [isHovering, setIsHovering] = useState(false);
-  const [hasHoverCapability, setHasHoverCapability] = useState(true);
-  const [shouldLoadScreenshot, setShouldLoadScreenshot] = useState(false);
-  const [containerElement, setContainerElement] = useState<HTMLDivElement | null>(null);
+  const hasHoverCapability = useHoverCapable();
+  const containerRef = useRef<HTMLDivElement>(null);
+  // The screenshot loads once the card comes within 200px of the viewport
+  const shouldLoadScreenshot = useInView(containerRef, {
+    rootMargin: "200px",
+    once: true,
+  });
+  // Scroll autoplay, as on the scene cards: the thumbnail is 90% visible,
+  // clear of the viewport's top and bottom 5%
+  const isInView = useInView(containerRef, {
+    rootMargin: "-5% 0px",
+    threshold: [0, 0.5, 0.9, 1.0],
+    minRatio: 0.9,
+    skip: !autoplayOnScroll,
+  });
 
-  // Get preview URLs
-  const previewUrl = clip.isGenerated ? getClipPreviewUrl(clip.id) : null;
-  // pathScreenshot is already transformed to a proxy URL by the server
-  const screenshotUrl = clip.scene?.pathScreenshot || null;
+  // Get preview URLs (every clip from the API carries its instance)
+  const previewUrl = clip.isGenerated
+    ? getClipPreviewUrl(clip.id, clip.instanceId)
+    : null;
+  // The video's ref loads the preview and releases it on leave
+  const previewVideoRef = usePreviewVideoRef(previewUrl);
+  // Prefer the marker's own screenshot over the scene cover
+  const screenshotUrl =
+    clip.screenshotUrl || clip.scene?.pathScreenshot || null;
 
-  // Detect hover capability (mouse/trackpad vs touch-only)
-  useEffect(() => {
-    const mediaQuery = window.matchMedia("(hover: hover)");
-    setHasHoverCapability(mediaQuery.matches);
-
-    const handleChange = (e: MediaQueryListEvent) => {
-      setHasHoverCapability(e.matches);
-    };
-    mediaQuery.addEventListener("change", handleChange);
-
-    return () => mediaQuery.removeEventListener("change", handleChange);
-  }, []);
-
-  // Lazy loading for screenshots - only load when card enters viewport
-  useEffect(() => {
-    if (!containerElement || shouldLoadScreenshot) return;
-
-    const observer = new IntersectionObserver(
-      ([entry]) => {
-        if (entry.isIntersecting) {
-          setShouldLoadScreenshot(true);
-          observer.disconnect();
-        }
-      },
-      {
-        rootMargin: "200px",
-        threshold: 0,
-      }
-    );
-    observer.observe(containerElement);
-
-    return () => observer.disconnect();
-  }, [containerElement, shouldLoadScreenshot]);
-
-  const shouldShowVideo = isHovering && hasHoverCapability && previewUrl;
-  const objectFitClass = objectFit === "cover" ? "object-cover" : "object-contain";
+  const shouldShowVideo =
+    (autoplayOnScroll ? isInView : isHovering && hasHoverCapability) &&
+    previewUrl;
+  const objectFitClass =
+    objectFit === "cover" ? "object-cover" : "object-contain";
 
   return (
     <div
-      ref={setContainerElement}
+      ref={containerRef}
       className="w-full h-full relative overflow-hidden"
       onMouseEnter={() => hasHoverCapability && setIsHovering(true)}
       onMouseLeave={() => hasHoverCapability && setIsHovering(false)}
@@ -66,7 +65,7 @@ const ClipCardPreview = ({ clip, objectFit = "cover" }: Props) => {
       {screenshotUrl ? (
         <img
           src={shouldLoadScreenshot ? screenshotUrl : undefined}
-          alt={clip.title || "Clip"}
+          alt={clipTitle(clip)}
           className={`w-full h-full pointer-events-none ${objectFitClass}`}
           style={{ backgroundColor: "var(--bg-secondary)" }}
         />
@@ -82,7 +81,7 @@ const ClipCardPreview = ({ clip, objectFit = "cover" }: Props) => {
       {/* Video preview overlay - only render when hovering to trigger load */}
       {shouldShowVideo && (
         <video
-          src={previewUrl}
+          ref={previewVideoRef}
           className={`absolute inset-0 w-full h-full pointer-events-none ${objectFitClass}`}
           style={{ backgroundColor: "var(--bg-secondary)" }}
           autoPlay

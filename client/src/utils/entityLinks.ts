@@ -5,21 +5,33 @@
  * the instance ID as a query parameter to disambiguate entities with
  * the same ID across different instances.
  */
+import { makeCompositeKey } from "./compositeKey";
+import {
+  CLIP_FILTER_OPTIONS,
+  type FilterOption,
+  GALLERY_FILTER_OPTIONS,
+  GROUP_FILTER_OPTIONS,
+  IMAGE_FILTER_OPTIONS,
+  PERFORMER_FILTER_OPTIONS,
+  SCENE_FILTER_OPTIONS,
+  STUDIO_FILTER_OPTIONS,
+  TAG_FILTER_OPTIONS,
+} from "./filterConfig";
+import { IMAGE_PARAM, entityParamFor } from "./urlParams";
 
 const ENTITY_PATHS: Record<string, string> = {
-  performer: '/performer',
-  scene: '/scene',
-  studio: '/studio',
-  tag: '/tag',
-  group: '/collection',
-  gallery: '/gallery',
-  image: '/image',
+  performer: "/performer",
+  scene: "/scene",
+  studio: "/studio",
+  tag: "/tag",
+  group: "/collection",
+  gallery: "/gallery",
 };
 
 /**
  * Generate a path for an entity detail page.
  *
- * @param {string} entityType - Type of entity (performer, scene, studio, tag, group, gallery, image)
+ * @param {string} entityType - Type of entity (performer, scene, studio, tag, group, gallery, image); an image has no page, so its link is getImagePath's
  * @param {Object|string} entity - Entity object with id and instanceId, or just the id string
  * @param {boolean} hasMultipleInstances - Whether multiple Stash instances are configured
  * @returns {string} The path to the entity detail page
@@ -29,20 +41,136 @@ interface EntityLike {
   instanceId?: string;
 }
 
-export function getEntityPath(entityType: string, entity: EntityLike | string, hasMultipleInstances: boolean) {
+export function getEntityPath(
+  entityType: string,
+  entity: EntityLike | string,
+  hasMultipleInstances: boolean
+) {
+  // Every caller that links an entity by type (the wall, stats, tooltips)
+  // reaches an image this way, so it gets the image's own link
+  if (entityType === "image") {
+    return getImagePath(typeof entity === "string" ? { id: entity } : entity);
+  }
   const basePath = ENTITY_PATHS[entityType];
   if (!basePath) {
     console.warn(`Unknown entity type: ${entityType}`);
-    return '#';
+    return "#";
   }
 
-  const id = typeof entity === 'string' ? entity : entity?.id ?? entity;
+  const id = typeof entity === "string" ? entity : entity?.id;
+  // An entity without an id has no page
+  if (id == null) return "#";
   const base = `${basePath}/${id}`;
 
-  if (hasMultipleInstances && typeof entity !== 'string' && entity?.instanceId) {
+  if (
+    hasMultipleInstances &&
+    typeof entity !== "string" &&
+    entity?.instanceId
+  ) {
     return `${base}?instance=${encodeURIComponent(entity.instanceId)}`;
   }
   return base;
+}
+
+/**
+ * The link to one image: images have no page of their own, so it opens the
+ * Images page with the image in its viewer (the list's `image` param, the
+ * image's "id:instanceId"; two servers can hold the same id, so the instance
+ * is always named). "#" for an image without an id.
+ *
+ * @param {Object} image - Image with id and instanceId
+ * @returns {string} The path of the Images page showing the image
+ */
+export function getImagePath(image: EntityLike): string {
+  if (image.id == null) return "#";
+  const key = makeCompositeKey(String(image.id), image.instanceId);
+  return `/images?${IMAGE_PARAM}=${encodeURIComponent(key)}`;
+}
+
+/**
+ * The link to one image from a list that shows images (the Images page, a
+ * detail page's Images tab): the list's own address, its filters, sort and
+ * page kept, with the image in its viewer. Links from elsewhere use
+ * `getImagePath`. "#" for an image without an id.
+ */
+export function getImagePathInList(
+  image: EntityLike,
+  list: { pathname: string; search: string }
+): string {
+  if (image.id == null) return "#";
+  const params = new URLSearchParams(list.search);
+  params.set(IMAGE_PARAM, makeCompositeKey(String(image.id), image.instanceId));
+  return `${list.pathname}?${params.toString()}`;
+}
+
+/**
+ * Adds the entity's instance to a list link when there are several servers;
+ * the list page joins it with the link's entity param into "id:instance".
+ */
+function appendInstanceParam(
+  url: string,
+  entity: EntityLike,
+  hasMultipleInstances: boolean
+) {
+  if (hasMultipleInstances && entity.instanceId) {
+    return `${url}&instance=${encodeURIComponent(entity.instanceId)}`;
+  }
+  return url;
+}
+
+/** The list pages a card's count can open, with the filters each declares */
+const LIST_PAGE_FILTERS = {
+  "/scenes": SCENE_FILTER_OPTIONS,
+  "/performers": PERFORMER_FILTER_OPTIONS,
+  "/studios": STUDIO_FILTER_OPTIONS,
+  "/tags": TAG_FILTER_OPTIONS,
+  "/collections": GROUP_FILTER_OPTIONS,
+  "/galleries": GALLERY_FILTER_OPTIONS,
+  "/images": IMAGE_FILTER_OPTIONS,
+  // The clip's own tags: a tag page's Markers statistic
+  "/clips": CLIP_FILTER_OPTIONS,
+} satisfies Record<string, readonly FilterOption[]>;
+
+type ListPage = keyof typeof LIST_PAGE_FILTERS;
+
+/** An entity type as the filter options name it (`entityType`) */
+type FilterEntityType =
+  | "scenes"
+  | "performers"
+  | "studios"
+  | "tags"
+  | "groups"
+  | "galleries";
+
+/**
+ * The link a card's count opens: the list page filtered to one entity through
+ * the page's own filter for that entity type, in the singular param the page
+ * reads (`/scenes?tagId=5` for the Scenes page's `tagIds`), with the entity's
+ * instance when there are several servers. Undefined when the page has no
+ * filter for that type, so a count never opens an unfiltered list.
+ *
+ * @param listPage - The list page to open
+ * @param entityType - The card's entity type, as the filter options name it
+ * @param entity - The card's entity, with its instance
+ * @param hasMultipleInstances - Whether multiple Stash instances are configured
+ */
+export function getFilteredListPath(
+  listPage: ListPage,
+  entityType: FilterEntityType,
+  entity: EntityLike,
+  hasMultipleInstances: boolean
+): string | undefined {
+  const options: readonly FilterOption[] = LIST_PAGE_FILTERS[listPage];
+  const option = options.find(
+    (each) =>
+      each.type === "searchable-select" && each.entityType === entityType
+  );
+  if (!option || entity.id == null) return undefined;
+  return appendInstanceParam(
+    `${listPage}?${entityParamFor(option.key)}=${encodeURIComponent(String(entity.id))}`,
+    entity,
+    hasMultipleInstances
+  );
 }
 
 /**
@@ -54,29 +182,18 @@ export function getEntityPath(entityType: string, entity: EntityLike | string, h
  * @param {boolean} hasMultipleInstances - Whether multiple Stash instances are configured
  * @returns {string} The path to the scene at the specified time
  */
-/**
- * Append instance query parameter to a filter URL for multi-instance disambiguation.
- * Used by card indicator click handlers that navigate to filtered list views
- * (e.g., /scenes?performerId=2&instance=abc-123).
- *
- * @param {string} url - Base URL with existing query params (e.g., "/scenes?performerId=2")
- * @param {Object} entity - Entity object with instanceId
- * @param {boolean} hasMultipleInstances - Whether multiple Stash instances are configured
- * @returns {string} URL with instance param appended if needed
- */
-export function appendInstanceParam(url: string, entity: EntityLike, hasMultipleInstances: boolean) {
-  if (hasMultipleInstances && entity?.instanceId) {
-    return `${url}&instance=${encodeURIComponent(entity.instanceId)}`;
-  }
-  return url;
-}
-
-export function getScenePathWithTime(scene: EntityLike | string, time: number, hasMultipleInstances: boolean) {
-  const id = typeof scene === 'string' ? scene : scene?.id ?? scene;
+export function getScenePathWithTime(
+  scene: EntityLike | string,
+  time: number,
+  hasMultipleInstances: boolean
+) {
+  const id = typeof scene === "string" ? scene : scene?.id;
+  // A scene without an id has no page
+  if (id == null) return "#";
   const base = `/scene/${id}`;
   const timeParam = `t=${Math.floor(time)}`;
 
-  if (hasMultipleInstances && typeof scene !== 'string' && scene?.instanceId) {
+  if (hasMultipleInstances && typeof scene !== "string" && scene?.instanceId) {
     return `${base}?instance=${encodeURIComponent(scene.instanceId)}&${timeParam}`;
   }
   return `${base}?${timeParam}`;

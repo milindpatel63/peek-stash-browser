@@ -1,5 +1,4 @@
 import videojs from "video.js";
-
 // Import duration middleware (registers via videojs.use)
 import "./durationMiddleware.js";
 
@@ -31,7 +30,12 @@ export const togglePlaybackRateControl = (player: any, show: boolean) => {
  * Adds text tracks via sourceSelector for proper lifecycle management
  * Video.js automatically shows/hides the caption button based on available tracks
  */
-export const setupSubtitles = (player: any, sceneId: string, captions: any[], instanceId?: string) => {
+export const setupSubtitles = (
+  player: any,
+  sceneId: string,
+  captions: any[],
+  instanceId: string
+) => {
   if (!player || player.isDisposed()) return;
   if (!captions || captions.length === 0) return;
 
@@ -57,12 +61,13 @@ export const setupSubtitles = (player: any, sceneId: string, captions: any[], in
   const getDefaultLanguageCode = () => {
     let languageCode = window.navigator.language;
 
+    // split() always returns a first part, so the fallbacks never apply
     if (languageCode.indexOf("-") !== -1) {
-      languageCode = languageCode.split("-")[0];
+      languageCode = languageCode.split("-")[0] ?? languageCode;
     }
 
     if (languageCode.indexOf("_") !== -1) {
-      languageCode = languageCode.split("_")[0];
+      languageCode = languageCode.split("_")[0] ?? languageCode;
     }
 
     return languageCode;
@@ -81,7 +86,7 @@ export const setupSubtitles = (player: any, sceneId: string, captions: any[], in
     }
 
     // Include caption type in label (matching Stash)
-    label = label + " (" + caption.caption_type + ")";
+    label = `${label} (${caption.caption_type})`;
 
     // Set first matching browser language as default
     const setAsDefault = !hasDefault && defaultLanguageCode === lang;
@@ -91,7 +96,7 @@ export const setupSubtitles = (player: any, sceneId: string, captions: any[], in
 
     const trackOptions = {
       kind: "captions", // Use "captions" not "subtitles" to match Stash
-      src: `/api/scene/${sceneId}/caption?lang=${lang}&type=${caption.caption_type}${instanceId ? `&instanceId=${instanceId}` : ""}`,
+      src: `/api/scene/${sceneId}/caption?lang=${lang}&type=${caption.caption_type}&instanceId=${encodeURIComponent(instanceId)}`,
       srclang: lang,
       label: label,
       default: setAsDefault,

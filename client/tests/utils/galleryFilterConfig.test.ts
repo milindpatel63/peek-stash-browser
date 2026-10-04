@@ -4,7 +4,7 @@
  * Tests that buildGalleryFilter correctly transforms UI filter values
  * into the GraphQL filter format expected by the backend
  */
-import { describe, it, expect } from "vitest";
+import { describe, expect, it } from "vitest";
 import { buildGalleryFilter } from "../../src/utils/filterConfig";
 
 describe("buildGalleryFilter", () => {
@@ -41,25 +41,25 @@ describe("buildGalleryFilter", () => {
       });
     });
 
-    it("should build rating filter with GREATER_THAN modifier (min only)", () => {
+    it("should build rating filter with a lone minimum as BETWEEN (min only)", () => {
       const uiFilters = {
         rating: { min: 70 },
       };
       const result = buildGalleryFilter(uiFilters);
       expect(result.rating100).toEqual({
-        modifier: "GREATER_THAN",
-        value: 69, // min - 1
+        modifier: "BETWEEN",
+        value: 70,
       });
     });
 
-    it("should build rating filter with LESS_THAN modifier (max only)", () => {
+    it("should build rating filter with a lone maximum as BETWEEN (max only)", () => {
       const uiFilters = {
         rating: { max: 50 },
       };
       const result = buildGalleryFilter(uiFilters);
       expect(result.rating100).toEqual({
-        modifier: "LESS_THAN",
-        value: 51, // max + 1
+        modifier: "BETWEEN",
+        value2: 50,
       });
     });
 
@@ -85,25 +85,25 @@ describe("buildGalleryFilter", () => {
       });
     });
 
-    it("should build image_count filter with GREATER_THAN modifier (min only)", () => {
+    it("should build image_count filter with a lone minimum as BETWEEN (min only)", () => {
       const uiFilters = {
         imageCount: { min: 100 },
       };
       const result = buildGalleryFilter(uiFilters);
       expect(result.image_count).toEqual({
-        modifier: "GREATER_THAN",
-        value: 99, // min - 1
+        modifier: "BETWEEN",
+        value: 100,
       });
     });
 
-    it("should build image_count filter with LESS_THAN modifier (max only)", () => {
+    it("should build image_count filter with a lone maximum as BETWEEN (max only)", () => {
       const uiFilters = {
         imageCount: { max: 75 },
       };
       const result = buildGalleryFilter(uiFilters);
       expect(result.image_count).toEqual({
-        modifier: "LESS_THAN",
-        value: 76, // max + 1
+        modifier: "BETWEEN",
+        value2: 75,
       });
     });
   });
@@ -210,14 +210,14 @@ describe("buildGalleryFilter", () => {
   });
 
   describe("Tags Filter", () => {
-    it("should build tags filter with INCLUDES modifier (default)", () => {
+    it("should build tags filter with INCLUDES_ALL modifier (the option's default)", () => {
       const uiFilters = {
         tagIds: ["1", "2"],
       };
       const result = buildGalleryFilter(uiFilters);
       expect(result.tags).toEqual({
         value: ["1", "2"],
-        modifier: "INCLUDES",
+        modifier: "INCLUDES_ALL",
       });
     });
 
@@ -252,7 +252,7 @@ describe("buildGalleryFilter", () => {
       const result = buildGalleryFilter(uiFilters);
       expect(result.tags).toEqual({
         value: ["1", "2", "3"],
-        modifier: "INCLUDES",
+        modifier: "INCLUDES_ALL",
       });
     });
 
@@ -281,8 +281,8 @@ describe("buildGalleryFilter", () => {
         value2: 100,
       });
       expect(result.image_count).toEqual({
-        modifier: "GREATER_THAN",
-        value: 49,
+        modifier: "BETWEEN",
+        value: 50,
       });
       expect(result.studios).toEqual({
         value: ["1"],
@@ -294,7 +294,7 @@ describe("buildGalleryFilter", () => {
       });
       expect(result.tags).toEqual({
         value: ["4", "5"],
-        modifier: "INCLUDES",
+        modifier: "INCLUDES_ALL",
       });
     });
 
@@ -305,6 +305,7 @@ describe("buildGalleryFilter", () => {
         imageCount: { min: 100, max: 500 },
         title: "Beach",
         studioIds: ["1", "2"],
+        // A gallery has one studio: a stale Has ALL falls back to Has ANY
         studioIdsModifier: "INCLUDES_ALL",
         performerIds: ["3"],
         performerIdsModifier: "INCLUDES",
@@ -315,8 +316,8 @@ describe("buildGalleryFilter", () => {
 
       expect(result.favorite).toBe(true);
       expect(result.rating100).toEqual({
-        modifier: "GREATER_THAN",
-        value: 79,
+        modifier: "BETWEEN",
+        value: 80,
       });
       expect(result.image_count).toEqual({
         modifier: "BETWEEN",
@@ -329,7 +330,7 @@ describe("buildGalleryFilter", () => {
       });
       expect(result.studios).toEqual({
         value: ["1", "2"],
-        modifier: "INCLUDES_ALL",
+        modifier: "INCLUDES",
       });
       expect(result.performers).toEqual({
         value: ["3"],
@@ -384,8 +385,8 @@ describe("buildGalleryFilter", () => {
         value2: 50,
       });
       expect(result.image_count).toEqual({
-        modifier: "GREATER_THAN",
-        value: -1, // 0 - 1
+        modifier: "BETWEEN",
+        value: 0, // 0 - 1
       });
     });
   });

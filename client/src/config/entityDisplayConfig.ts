@@ -1,19 +1,15 @@
 /**
  * Shared configuration for entity display settings.
  * Used by CardDisplaySettingsContext, CardDisplaySettings UI, and page components.
- * Single source of truth for available view modes and settings per entity type.
+ * Single source of truth for settings per entity type; each type's view modes
+ * are the ones its list page renders (`LIST_VIEW_MODES`).
  */
+import { viewModeSettingOptions } from "../components/list/listViewModes";
 
 export const ENTITY_DISPLAY_CONFIG = {
   scene: {
     label: "Scene",
-    viewModes: [
-      { id: "grid", label: "Grid" },
-      { id: "wall", label: "Wall" },
-      { id: "table", label: "Table" },
-      { id: "timeline", label: "Timeline" },
-      { id: "folder", label: "Folder" },
-    ],
+    viewModes: viewModeSettingOptions("scene"),
     defaultSettings: {
       defaultViewMode: "grid",
       defaultGridDensity: "medium",
@@ -48,13 +44,7 @@ export const ENTITY_DISPLAY_CONFIG = {
   },
   gallery: {
     label: "Gallery",
-    viewModes: [
-      { id: "grid", label: "Grid" },
-      { id: "wall", label: "Wall" },
-      { id: "table", label: "Table" },
-      { id: "timeline", label: "Timeline" },
-      { id: "folder", label: "Folder" },
-    ],
+    viewModes: viewModeSettingOptions("gallery"),
     defaultSettings: {
       defaultViewMode: "grid",
       defaultGridDensity: "medium",
@@ -87,12 +77,7 @@ export const ENTITY_DISPLAY_CONFIG = {
   },
   image: {
     label: "Image",
-    viewModes: [
-      { id: "grid", label: "Grid" },
-      { id: "wall", label: "Wall" },
-      { id: "timeline", label: "Timeline" },
-      { id: "folder", label: "Folder" },
-    ],
+    viewModes: viewModeSettingOptions("image"),
     defaultSettings: {
       defaultViewMode: "grid",
       defaultGridDensity: "medium",
@@ -125,11 +110,7 @@ export const ENTITY_DISPLAY_CONFIG = {
   },
   performer: {
     label: "Performer",
-    viewModes: [
-      { id: "grid", label: "Grid" },
-      { id: "wall", label: "Wall" },
-      { id: "table", label: "Table" },
-    ],
+    viewModes: viewModeSettingOptions("performer"),
     defaultSettings: {
       defaultViewMode: "grid",
       defaultGridDensity: "medium",
@@ -157,11 +138,7 @@ export const ENTITY_DISPLAY_CONFIG = {
   },
   studio: {
     label: "Studio",
-    viewModes: [
-      { id: "grid", label: "Grid" },
-      { id: "wall", label: "Wall" },
-      { id: "table", label: "Table" },
-    ],
+    viewModes: viewModeSettingOptions("studio"),
     defaultSettings: {
       defaultViewMode: "grid",
       defaultGridDensity: "medium",
@@ -189,11 +166,7 @@ export const ENTITY_DISPLAY_CONFIG = {
   },
   tag: {
     label: "Tag",
-    viewModes: [
-      { id: "grid", label: "Grid" },
-      { id: "table", label: "Table" },
-      { id: "hierarchy", label: "Hierarchy" },
-    ],
+    viewModes: viewModeSettingOptions("tag"),
     defaultSettings: {
       defaultViewMode: "grid",
       defaultGridDensity: "medium",
@@ -201,6 +174,9 @@ export const ENTITY_DISPLAY_CONFIG = {
       showDescriptionOnCard: true,
       showDescriptionOnDetail: true,
       showRelationshipIndicators: true,
+      showRating: true,
+      showFavorite: true,
+      showOCounter: true,
       showMenu: true,
     },
     availableSettings: [
@@ -210,16 +186,15 @@ export const ENTITY_DISPLAY_CONFIG = {
       "showDescriptionOnCard",
       "showDescriptionOnDetail",
       "showRelationshipIndicators",
+      "showRating",
+      "showFavorite",
+      "showOCounter",
       "showMenu",
     ],
   },
   group: {
     label: "Group",
-    viewModes: [
-      { id: "grid", label: "Grid" },
-      { id: "wall", label: "Wall" },
-      { id: "table", label: "Table" },
-    ],
+    viewModes: viewModeSettingOptions("group"),
     defaultSettings: {
       defaultViewMode: "grid",
       defaultGridDensity: "medium",
@@ -251,9 +226,7 @@ export const ENTITY_DISPLAY_CONFIG = {
   },
   clip: {
     label: "Clip",
-    viewModes: [
-      { id: "grid", label: "Grid" },
-    ],
+    viewModes: viewModeSettingOptions("clip"),
     defaultSettings: {
       defaultViewMode: "grid",
       defaultGridDensity: "medium",
@@ -289,21 +262,33 @@ export const getEntityTypes = () => Object.keys(ENTITY_DISPLAY_CONFIG);
  * Get default settings for an entity type
  */
 export const getDefaultSettings = (entityType: string) => {
-  return (ENTITY_DISPLAY_CONFIG as Record<string, Record<string, unknown>>)[entityType]?.defaultSettings || {};
+  return (
+    (ENTITY_DISPLAY_CONFIG as Record<string, Record<string, unknown>>)[
+      entityType
+    ]?.defaultSettings || {}
+  );
 };
 
 /**
  * Get available view modes for an entity type
  */
 export const getViewModes = (entityType: string) => {
-  return (ENTITY_DISPLAY_CONFIG as Record<string, Record<string, unknown>>)[entityType]?.viewModes || [{ id: "grid", label: "Grid" }];
+  return (
+    (ENTITY_DISPLAY_CONFIG as Record<string, Record<string, unknown>>)[
+      entityType
+    ]?.viewModes || [{ id: "grid", label: "Grid" }]
+  );
 };
 
 /**
  * Get available settings for an entity type (for UI rendering)
  */
 export const getAvailableSettings = (entityType: string) => {
-  return (ENTITY_DISPLAY_CONFIG as Record<string, Record<string, unknown>>)[entityType]?.availableSettings || [];
+  return (
+    (ENTITY_DISPLAY_CONFIG as Record<string, Record<string, unknown>>)[
+      entityType
+    ]?.availableSettings || []
+  );
 };
 
 /**

@@ -1,21 +1,43 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+/**
+ * Unit tests for GroupQueryBuilder on the base builder (item 74): the
+ * statements it records for a parsed request. The base owns the instance
+ * filter, the exclusion join, the `ids` pairs, the random sort and the
+ * joined count; this file pins what the group adds on top (its rating join,
+ * the sub-group count in the select list with its user id, sort map and
+ * tiebreak, filter clauses and search), that the base's clauses reach its
+ * statements, and the card's relations.
+ */
+import { GROUP_FIELDS } from "@peek/shared-types/filters/index.js";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import prisma from "../../prisma/singleton.js";
+import { groupQueryBuilder } from "../../services/GroupQueryBuilder.js";
+import { loadTooltipRelations } from "../../services/TooltipRelations.js";
+import type { GroupQueryRow } from "../../types/internal/queryRows.js";
+import type {
+  FilterRef,
+  ParsedListRequest,
+} from "../../types/parsedFilters.js";
+import { entityKey, pairsJson } from "../../utils/entityRef.js";
+import { expandRefs } from "../../utils/hierarchyUtils.js";
+import { jsonListArm } from "../../utils/sqlHelpers.js";
+import {
+  alternatesOf,
+  filterOf,
+  firstMissingBound,
+  samplesOf,
+  whereOf,
+} from "../helpers/fieldSamples.js";
+import { parsedListRequest } from "../helpers/fixtures.js";
+import { arrayContaining } from "../helpers/matchers.js";
+import { must } from "../helpers/must.js";
+import { partialRow } from "../helpers/prismaMock.js";
+import { untrusted } from "../helpers/untrusted.js";
 
-// Mock prisma
-vi.mock("../../prisma/singleton.js", () => ({
-  default: {
-    $queryRawUnsafe: vi.fn().mockResolvedValue([]),
-    groupTag: { findMany: vi.fn().mockResolvedValue([]) },
-    sceneGroup: { findMany: vi.fn().mockResolvedValue([]) },
-    scenePerformer: { findMany: vi.fn().mockResolvedValue([]) },
-    sceneGallery: { findMany: vi.fn().mockResolvedValue([]) },
-    stashTag: { findMany: vi.fn().mockResolvedValue([]) },
-    stashStudio: { findMany: vi.fn().mockResolvedValue([]) },
-    stashPerformer: { findMany: vi.fn().mockResolvedValue([]) },
-    stashGallery: { findMany: vi.fn().mockResolvedValue([]) },
-  },
-}));
+vi.mock(
+  "../../prisma/singleton.js",
+  () => import("../helpers/prismaSingletonMock.js")
+);
 
-// Mock logger
 vi.mock("../../utils/logger.js", () => ({
   logger: {
     error: vi.fn(),
@@ -26,66 +48,721 @@ vi.mock("../../utils/logger.js", () => ({
   },
 }));
 
-// Mock hierarchy utils (expandTagIds)
-vi.mock("../../utils/hierarchyUtils.js", () => ({
-  expandTagIds: vi.fn().mockResolvedValue([]),
+// Each ref expands to itself and one descendant, "99", on its own instance
+vi.mock(
+  "../../utils/hierarchyUtils.js",
+  () => import("../helpers/hierarchyMock.js")
+);
+
+vi.mock("../../services/TooltipRelations.js", () => ({
+  loadTooltipRelations: vi.fn(() => Promise.resolve(new Map())),
 }));
 
-// Mock titleUtils
-vi.mock("../../utils/titleUtils.js", () => ({
-  getGalleryFallbackTitle: vi.fn().mockReturnValue("Untitled Gallery"),
-}));
+const mockPrisma = vi.mocked(prisma, true);
+const mockTooltips = vi.mocked(loadTooltipRelations);
 
-import prisma from "../../prisma/singleton.js";
-import { groupQueryBuilder } from "../../services/GroupQueryBuilder.js";
+const ALLOWED = ["inst-a", "inst-b"];
+const ref = (id: string, instanceId = "inst-a"): FilterRef => ({
+  id,
+  instanceId,
+});
+const bare = (id: string): FilterRef => ({ id, instanceId: undefined });
 
-const mockPrisma = vi.mocked(prisma);
+/** Runs one list request for user 1 */
+async function run(
+  overrides: Partial<ParsedListRequest<"group">> = {},
+  options: { allowedInstanceIds?: string[]; applyExclusions?: boolean } = {}
+) {
+  const request = parsedListRequest("group", overrides);
+  return groupQueryBuilder.execute({
+    userId: 1,
+    allowedInstanceIds: options.allowedInstanceIds ?? ALLOWED,
+    ...(options.applyExclusions === undefined
+      ? {}
+      : { applyExclusions: options.applyExclusions }),
+    request,
+  });
+}
+
+/** The page statement's SQL and parameters */
+function pageStatement(): { sql: string; params: unknown[] } {
+  const [sql, ...params] = must(mockPrisma.$queryRawUnsafe.mock.calls[0]);
+  return { sql, params };
+}
+
+/** The count statement's SQL and parameters */
+function countStatement(): { sql: string; params: unknown[] } {
+  const [sql, ...params] = must(mockPrisma.$queryRawUnsafe.mock.calls[1]);
+  return { sql, params };
+}
+
+/** A page row as Prisma's raw query returns it from SQLite */
+function groupRow(overrides: Partial<GroupQueryRow> = {}): GroupQueryRow {
+  return {
+    id: "1",
+    stashInstanceId: "inst-a",
+    name: "Box Set",
+    date: "",
+    studioId: "41",
+    stashRating100: 80,
+    duration: null,
+    sceneCount: 3,
+    performerCount: null,
+    director: "",
+    synopsis: "Three parts",
+    urls: null,
+    aliases: null,
+    frontImagePath: "/group/1/frontimage",
+    backImagePath: null,
+    stashCreatedAt: null,
+    stashUpdatedAt: new Date("2026-01-02T03:04:05.000Z"),
+    userRating: null,
+    userFavorite: true,
+    subGroupCount: 2n,
+    ...overrides,
+  };
+}
 
 describe("GroupQueryBuilder", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    // Default: main query returns empty, count query returns {total: 0}
+    mockPrisma.$queryRawUnsafe.mockResolvedValue([]);
     mockPrisma.$queryRawUnsafe
-      .mockResolvedValueOnce([]) // main query
-      .mockResolvedValueOnce([{ total: 0 }]); // count query
+      .mockResolvedValueOnce([]) // page
+      .mockResolvedValueOnce([{ total: 0n }]); // count
   });
 
-  describe("multi-instance support", () => {
-    it("filters to a specific instance when specificInstanceId is provided", async () => {
-      await groupQueryBuilder.execute({
-        userId: 1,
-        sort: "name",
-        sortDirection: "ASC",
-        page: 1,
-        perPage: 10,
-        specificInstanceId: "instance-abc",
-      });
+  describe("the statement", () => {
+    it("selects the sub-group count with its user id first, joins the viewer's rating on (id, instance), and binds params in text order", async () => {
+      await run({ page: 3, perPage: 10 });
 
-      const mainQuerySql = mockPrisma.$queryRawUnsafe.mock
-        .calls[0][0] as string;
-
-      // Must contain a WHERE clause pinning to the specific instance
-      expect(mainQuerySql).toContain("g.stashInstanceId = ?");
-
-      // The instance ID must be in the params
-      const mainQueryParams = mockPrisma.$queryRawUnsafe.mock.calls[0].slice(1);
-      expect(mainQueryParams).toContain("instance-abc");
+      const { sql, params } = pageStatement();
+      expect(sql).toContain(
+        "LEFT JOIN UserExcludedEntity gsc_x ON gsc_x.userId = ? AND gsc_x.entityType = 'group' AND gsc_x.entityId = gsc.id AND (gsc_x.instanceId = '' OR gsc_x.instanceId = gsc.stashInstanceId)"
+      );
+      expect(sql).toContain(
+        "WHERE gsr.containingId = g.id AND gsr.containingInstanceId = g.stashInstanceId AND gsr.subInstanceId = g.stashInstanceId AND gsc.deletedAt IS NULL AND gsc_x.id IS NULL) AS subGroupCount"
+      );
+      expect(sql.indexOf("AS subGroupCount")).toBeLessThan(
+        sql.indexOf("FROM StashGroup g")
+      );
+      expect(sql).toContain(
+        "LEFT JOIN GroupRating r ON g.id = r.groupId AND g.stashInstanceId = r.instanceId AND r.userId = ?"
+      );
+      expect(sql).toContain("entityType = 'group' AND e.entityId = g.id");
+      // Sub-group exclusion, rating and exclusion user ids, the instances, the page
+      // The viewer's excluded links per collection, for the counts (B13b)
+      expect(sql).toContain(
+        "LEFT JOIN UserExcludedContentCount d ON d.userId = ? AND d.entityType = 'group' AND d.entityId = g.id AND d.instanceId = g.stashInstanceId"
+      );
+      expect(params).toEqual([1, 1, 1, 1, "inst-a", "inst-b", 10, 20]);
     });
 
-    it("does not add specific instance filter when specificInstanceId is not provided", async () => {
-      await groupQueryBuilder.execute({
-        userId: 1,
-        sort: "name",
-        sortDirection: "ASC",
-        page: 1,
-        perPage: 10,
-      });
+    it("without exclusions the sub-group count leaves out only deleted sub-groups and binds no user id", async () => {
+      await run({}, { applyExclusions: false });
 
-      const mainQuerySql = mockPrisma.$queryRawUnsafe.mock
-        .calls[0][0] as string;
+      const { sql, params } = pageStatement();
+      expect(sql).toContain(
+        "JOIN StashGroup gsc ON gsc.id = gsr.subId AND gsc.stashInstanceId = gsr.subInstanceId WHERE gsr.containingId = g.id AND gsr.containingInstanceId = g.stashInstanceId AND gsr.subInstanceId = g.stashInstanceId AND gsc.deletedAt IS NULL) AS subGroupCount"
+      );
+      expect(sql).not.toContain("UserExcludedEntity");
+      expect(params).toEqual([1, "inst-a", "inst-b", 10, 0]);
+    });
 
-      // Should NOT have a bare equality check for stashInstanceId
-      expect(mainQuerySql).not.toContain("g.stashInstanceId = ?");
+    it("filters to the allowed instances, with no NULL arm", async () => {
+      await run();
+
+      const { sql } = pageStatement();
+      expect(sql).toContain("g.stashInstanceId IN (?, ?)");
+      expect(sql).not.toContain("g.stashInstanceId IS NULL");
+    });
+
+    it("an empty allowed list matches nothing", async () => {
+      await run({}, { allowedInstanceIds: [] });
+
+      const { sql } = pageStatement();
+      expect(sql).toContain("1 = 0");
+      expect(sql).not.toContain("g.stashInstanceId IN");
+    });
+
+    it("a specific instance narrows the list to it", async () => {
+      await run({ specificInstanceId: "instance-abc" });
+
+      const { sql, params } = pageStatement();
+      expect(sql).toContain("g.stashInstanceId = ?");
+      expect(params).toContain("instance-abc");
     });
   });
+
+  describe("sort", () => {
+    it("sorts by scene_count with the name tiebreak and by name with the id tiebreak", async () => {
+      await run({
+        sort: { field: "scene_count", direction: "DESC", seed: undefined },
+      });
+      await run({
+        sort: { field: "name", direction: "ASC", seed: undefined },
+      });
+
+      const [byCount, byName] = mockPrisma.$queryRawUnsafe.mock.calls
+        .map(([sql]) => sql)
+        .filter((sql) => sql.includes("ORDER BY"));
+      expect(byCount).toContain(
+        "ORDER BY MAX(g.sceneCount - COALESCE(d.scenes, 0), 0) DESC, g.name COLLATE NOCASE ASC"
+      );
+      expect(byName).toContain(
+        "ORDER BY g.name COLLATE NOCASE ASC, g.id ASC, g.stashInstanceId ASC"
+      );
+    });
+
+    it("the viewer's rating sorts through the rating join", async () => {
+      await run({
+        sort: { field: "rating", direction: "DESC", seed: undefined },
+      });
+
+      expect(pageStatement().sql).toContain(
+        "ORDER BY COALESCE(r.rating, 0) DESC, g.name COLLATE NOCASE ASC"
+      );
+    });
+
+    it("sub_group_order joins the one (containing, sub) row of the first including parent, on the collection's own instance, and keeps the join in the count", async () => {
+      const sort = {
+        field: "sub_group_order",
+        direction: "ASC",
+        seed: undefined,
+      } as never;
+      await run({
+        sort,
+        filter: {
+          containing_groups: {
+            refs: [bare("9"), ref("10")],
+            modifier: "INCLUDES",
+            depth: 0,
+          },
+        },
+      });
+
+      const page = pageStatement();
+      expect(page.sql).toContain(
+        "LEFT JOIN GroupRelation sgo ON sgo.containingId = ? AND sgo.containingInstanceId = g.stashInstanceId AND sgo.subId = g.id AND sgo.subInstanceId = g.stashInstanceId"
+      );
+      expect(page.sql).toContain(
+        "ORDER BY sgo.orderIndex IS NULL, sgo.orderIndex ASC, g.name COLLATE NOCASE ASC"
+      );
+      // The sort's join binds the first ref (the filter binds both)
+      expect(page.params).toContain("9");
+      expect(countStatement().sql).toContain("LEFT JOIN GroupRelation sgo");
+    });
+
+    it("sub_group_order with a parent on an instance names it, and without an including parent falls back to the default sort", async () => {
+      const sort = {
+        field: "sub_group_order",
+        direction: "DESC",
+        seed: undefined,
+      } as never;
+      await run({
+        sort,
+        filter: {
+          containing_groups: {
+            refs: [ref("9", "inst-b")],
+            modifier: "INCLUDES_ALL",
+            depth: 0,
+          },
+        },
+      });
+      expect(pageStatement().sql).toContain(
+        "sgo.containingInstanceId = ? AND sgo.subId = g.id"
+      );
+      expect(pageStatement().params).toContain("inst-b");
+
+      vi.clearAllMocks();
+      mockPrisma.$queryRawUnsafe.mockResolvedValue([]);
+      await run({
+        sort,
+        filter: {
+          containing_groups: {
+            refs: [ref("9")],
+            modifier: "EXCLUDES",
+            depth: 0,
+          },
+        },
+      });
+      expect(pageStatement().sql).not.toContain("GroupRelation sgo");
+      expect(pageStatement().sql).toContain(
+        "ORDER BY g.name COLLATE NOCASE DESC"
+      );
+    });
+
+    it("binds a random sort's seed and never interpolates it", async () => {
+      await run({
+        sort: { field: "random", direction: "DESC", seed: 87654321 },
+      });
+
+      const { sql, params } = pageStatement();
+      expect(sql).not.toContain("87654321");
+      expect(params.filter((p) => p === 87654321)).toHaveLength(3);
+    });
+  });
+
+  describe("count", () => {
+    it("counts with the joined COUNT(*), with and without the exclusion join, without the select list's user id", async () => {
+      await run();
+      const withExclusions = countStatement();
+      mockPrisma.$queryRawUnsafe.mockClear();
+      await run({}, { applyExclusions: false });
+      const without = countStatement();
+
+      for (const { sql } of [withExclusions, without]) {
+        expect(sql).toMatch(/SELECT COUNT\(\*\) AS total/i);
+        expect(sql).not.toMatch(/COUNT\(DISTINCT/);
+        expect(sql).not.toContain("subGroupCount");
+        expect(sql).toContain("LEFT JOIN GroupRating r");
+      }
+      expect(withExclusions.sql).toContain("LEFT JOIN UserExcludedEntity e");
+      expect(withExclusions.sql).toContain(
+        "LEFT JOIN UserExcludedContentCount d"
+      );
+      expect(withExclusions.params).toEqual([1, 1, 1, "inst-a", "inst-b"]);
+      expect(without.sql).not.toContain("UserExcludedEntity");
+      expect(without.sql).not.toContain("UserExcludedContentCount");
+    });
+  });
+
+  describe("filters", () => {
+    it("ids with composite values match pairs, and a bare id every instance", async () => {
+      await run({
+        filter: {
+          ids: { refs: [ref("5"), bare("6")], modifier: "EXCLUDES", depth: 0 },
+        },
+      });
+
+      const { sql, params } = pageStatement();
+      expect(sql).toContain(
+        "NOT ((g.id = ? AND g.stashInstanceId = ?) OR (g.id = ?))"
+      );
+      expect(sql).not.toContain("g.id NOT IN (");
+      expect(params).toEqual(arrayContaining(["5", "inst-a", "6"]));
+    });
+
+    it("containing_groups match a visible containing group's pairs, with the group as the sub-group", async () => {
+      await run({
+        filter: {
+          containing_groups: {
+            refs: [ref("10"), bare("11")],
+            modifier: "INCLUDES",
+            depth: 0,
+          },
+        },
+      });
+
+      const { sql, params } = pageStatement();
+      expect(sql).toContain(
+        "EXISTS (SELECT 1 FROM GroupRelation gcr JOIN StashGroup gcp ON gcp.id = gcr.containingId AND gcp.stashInstanceId = gcr.containingInstanceId LEFT JOIN UserExcludedEntity gcp_x ON gcp_x.userId = ? AND gcp_x.entityType = 'group' AND gcp_x.entityId = gcp.id AND (gcp_x.instanceId = '' OR gcp_x.instanceId = gcp.stashInstanceId) WHERE gcr.subId = g.id AND gcr.subInstanceId = g.stashInstanceId AND gcr.containingInstanceId = g.stashInstanceId AND gcp.deletedAt IS NULL AND gcp_x.id IS NULL AND ((gcp.id = ? AND gcp.stashInstanceId = ?) OR (gcp.id = ?)))"
+      );
+      expect(params).toEqual(arrayContaining([1, "10", "inst-a", "11"]));
+    });
+
+    it("sub_groups expand the refs upwards and match a visible sub-group; EXCLUDES is NOT EXISTS", async () => {
+      await run({
+        filter: {
+          sub_groups: { refs: [ref("10")], modifier: "EXCLUDES", depth: 1 },
+        },
+      });
+
+      const { sql } = pageStatement();
+      expect(sql).toContain(
+        "NOT EXISTS (SELECT 1 FROM GroupRelation gsr JOIN StashGroup gsc ON gsc.id = gsr.subId"
+      );
+      expect(sql).toContain(
+        "((gsc.stashInstanceId = ? AND gsc.id IN (?, ?))))"
+      );
+      expect(must(vi.mocked(expandRefs).mock.calls[0])[4]).toBe("up");
+    });
+
+    it("performer_favorite is one EXISTS keyed on the collection over the viewer's favourites; none matches nothing", async () => {
+      mockPrisma.performerRating.findMany.mockResolvedValue([
+        partialRow({ performerId: "7", instanceId: "inst-a" }),
+      ]);
+      mockPrisma.userExcludedEntity.findMany.mockResolvedValue([]);
+      await run({ filter: { performer_favorite: false } });
+
+      const { sql, params } = pageStatement();
+      expect(sql).toContain(
+        "NOT EXISTS (SELECT 1 FROM SceneGroup gfg JOIN StashScene gfs ON gfs.id = gfg.sceneId AND gfs.stashInstanceId = gfg.sceneInstanceId LEFT JOIN UserExcludedEntity gfs_x"
+      );
+      expect(sql).toContain(
+        "WHERE gfg.groupId = g.id AND gfg.groupInstanceId = g.stashInstanceId AND gfs.deletedAt IS NULL AND gfs_x.id IS NULL AND gfp.deletedAt IS NULL AND gfp_x.id IS NULL AND ((gfsp.performerId = ? AND gfsp.performerInstanceId = ?)))"
+      );
+      expect(params).toEqual(arrayContaining(["7", "inst-a"]));
+
+      vi.clearAllMocks();
+      mockPrisma.performerRating.findMany.mockResolvedValue([]);
+      mockPrisma.$queryRawUnsafe
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([{ total: 0n }]);
+      await run({ filter: { performer_favorite: true } });
+      expect(pageStatement().sql).toContain("1 = 0");
+    });
+
+    it("o_counter and play_count sum the viewer's own history, the count's ids bound before the value", async () => {
+      await run({
+        filter: { o_counter: { modifier: "GREATER_THAN", value: 4 } },
+      });
+
+      const { sql, params } = pageStatement();
+      expect(sql).toContain(
+        "(SELECT COALESCE(SUM(gw.oCount), 0) FROM SceneGroup gwg JOIN StashScene gws ON gws.id = gwg.sceneId AND gws.stashInstanceId = gwg.sceneInstanceId LEFT JOIN UserExcludedEntity gws_x ON gws_x.userId = ? AND gws_x.entityType = 'scene' AND gws_x.entityId = gws.id AND (gws_x.instanceId = '' OR gws_x.instanceId = gws.stashInstanceId) JOIN WatchHistory gw ON gw.userId = ? AND gw.instanceId = gws.stashInstanceId AND gw.sceneId = gws.id WHERE gwg.groupId = g.id AND gwg.groupInstanceId = g.stashInstanceId AND gws.deletedAt IS NULL AND gws_x.id IS NULL) > ?"
+      );
+      const at = sql.indexOf("SUM(gw.oCount)");
+      const before = sql.slice(0, at).split("?").length - 1;
+      expect(params.slice(before, before + 3)).toEqual([1, 1, 4]);
+    });
+
+    it("studios match the group's studio column, the selected studio and its descendants on its instance", async () => {
+      await run({
+        filter: {
+          studios: { refs: [ref("41")], modifier: "INCLUDES", depth: 1 },
+        },
+      });
+
+      const { sql, params } = pageStatement();
+      expect(sql).toContain(
+        "((g.stashInstanceId = ? AND g.studioId IN (?, ?)))"
+      );
+      // The ids never match without their instance
+      expect(sql).not.toContain("(g.studioId IN (");
+      expect(params).toEqual(arrayContaining(["inst-a", "41", "99"]));
+      expect(sql).not.toMatch(/\.(tagId|studioId) = \?\)/);
+    });
+
+    it("tags match GroupTag pairs, the selected tag and its descendants on its instance", async () => {
+      await run({
+        filter: {
+          tags: { refs: [ref("284")], modifier: "EXCLUDES", depth: -1 },
+        },
+      });
+
+      const { sql, params } = pageStatement();
+      expect(sql).toMatch(
+        /NOT EXISTS \(SELECT 1 FROM GroupTag (\w+) WHERE \1\.groupId = g\.id AND \1\.groupInstanceId = g\.stashInstanceId AND \(\(\1\.tagInstanceId = \? AND \1\.tagId IN \(\?, \?\)\)\)\)/
+      );
+      expect(params).toEqual(arrayContaining(["inst-a", "284", "99"]));
+      expect(sql).not.toMatch(/\.(tagId|studioId) = \?\)/);
+    });
+
+    it("scenes match through SceneGroup, performers through their scenes, each with the scene live and not excluded for the viewer", async () => {
+      await run({
+        filter: {
+          scenes: { refs: [ref("3")], modifier: "EXCLUDES", depth: 0 },
+          performers: { refs: [ref("7")], modifier: "INCLUDES", depth: 0 },
+        },
+      });
+
+      const { sql, params } = pageStatement();
+      expect(sql).toContain(
+        "NOT EXISTS (SELECT 1 FROM SceneGroup sg JOIN StashScene lsc ON lsc.id = sg.sceneId AND lsc.stashInstanceId = sg.sceneInstanceId LEFT JOIN UserExcludedEntity vse ON vse.userId = ? AND vse.entityType = 'scene' AND vse.entityId = lsc.id AND (vse.instanceId = '' OR vse.instanceId = lsc.stashInstanceId) WHERE sg.groupId = g.id AND sg.groupInstanceId = g.stashInstanceId AND lsc.deletedAt IS NULL AND vse.id IS NULL AND ((sg.sceneId = ? AND sg.sceneInstanceId = ?)))"
+      );
+      expect(sql).toContain(
+        "(g.id, g.stashInstanceId) IN (SELECT sg.groupId, sg.groupInstanceId FROM ScenePerformer sp JOIN SceneGroup sg ON sg.sceneId = sp.sceneId AND sg.sceneInstanceId = sp.sceneInstanceId JOIN StashScene lsc ON lsc.id = sp.sceneId AND lsc.stashInstanceId = sp.sceneInstanceId LEFT JOIN UserExcludedEntity vse ON vse.userId = ? AND vse.entityType = 'scene' AND vse.entityId = lsc.id AND (vse.instanceId = '' OR vse.instanceId = lsc.stashInstanceId) WHERE lsc.deletedAt IS NULL AND vse.id IS NULL AND ((sp.performerId = ? AND sp.performerInstanceId = ?)))"
+      );
+      // Each clause binds the viewer's id before its refs
+      expect(params.join("|")).toContain(
+        ["1", "3", "inst-a", "1", "7", "inst-a"].join("|")
+      );
+    });
+
+    it("the viewer's rating and favorite, the counts and the text and date fields each reach SQL", async () => {
+      await run({
+        filter: {
+          favorite: false,
+          rating100: { modifier: "BETWEEN", value: 20, value2: 80 },
+          scene_count: { modifier: "GREATER_THAN", value: 2 },
+          duration: { modifier: "LESS_THAN", value: 3600 },
+          name: { modifier: "EQUALS", value: "Box Set" },
+          synopsis: { modifier: "INCLUDES", value: "three" },
+          director: { modifier: "NOT_NULL" },
+          aliases: { modifier: "INCLUDES", value: "old" },
+          url: { modifier: "INCLUDES", value: "example" },
+          date: { modifier: "IS_NULL" },
+          created_at: { modifier: "EQUALS", value: "2025-01-01" },
+          updated_at: {
+            modifier: "BETWEEN",
+            value: "2025-01-01",
+            value2: "2025-12-31",
+          },
+        },
+      });
+
+      const { sql } = pageStatement();
+      for (const fragment of [
+        "(r.favorite = 0 OR r.favorite IS NULL)",
+        "r.rating BETWEEN ? AND ?",
+        "MAX(g.sceneCount - COALESCE(d.scenes, 0), 0) > ?",
+        "g.duration < ?",
+        "LOWER(g.name) = LOWER(?)",
+        "(g.synopsis LIKE ? ESCAPE '\\')",
+        "(g.director IS NOT NULL AND g.director != '')",
+        "(g.aliases LIKE ? ESCAPE '\\')",
+        `(${jsonListArm("g.urls")})`,
+        "g.date IS NULL",
+        "g.stashCreatedAt",
+        "(g.stashUpdatedAt >= ? AND g.stashUpdatedAt < ?)",
+      ]) {
+        expect(sql).toContain(fragment);
+      }
+    });
+
+    it("the search matches the name, synopsis and aliases text, a % in it matching itself", async () => {
+      await run({ q: '"100% Real"' });
+
+      const { sql, params } = pageStatement();
+      expect(sql).toContain(
+        "(g.name LIKE ? ESCAPE '\\' OR g.synopsis LIKE ? ESCAPE '\\' OR g.aliases LIKE ? ESCAPE '\\')"
+      );
+      expect(sql).not.toContain("LOWER(");
+      expect(params.filter((p) => p === "%100\\% Real%")).toHaveLength(3);
+    });
+
+    it("two words are two AND-ed groups", async () => {
+      await run({ q: "sea side" });
+
+      const { params } = pageStatement();
+      expect(params.filter((p) => p === "%sea%")).toHaveLength(3);
+      expect(params.filter((p) => p === "%side%")).toHaveLength(3);
+    });
+
+    it("the search clause sits after the field clauses", async () => {
+      await run({
+        q: "sea",
+        filter: { scene_count: { modifier: "EQUALS", value: 4242 } },
+      });
+
+      const { params } = pageStatement();
+      expect(params.indexOf(4242)).toBeGreaterThan(-1);
+      expect(params.indexOf(4242)).toBeLessThan(params.indexOf("%sea%"));
+    });
+  });
+
+  describe("rows and relations", () => {
+    it("returns aliases: Stash's free text as it is, an empty or absent one as null", async () => {
+      mockPrisma.$queryRawUnsafe.mockReset();
+      mockPrisma.$queryRawUnsafe
+        .mockResolvedValueOnce([
+          groupRow({ aliases: "A, B" }),
+          groupRow({ id: "2", aliases: "" }),
+          groupRow({ id: "3", aliases: null }),
+        ])
+        .mockResolvedValueOnce([{ total: 3n }])
+        .mockResolvedValue([]);
+
+      const { items } = await run();
+
+      expect(pageStatement().sql).toContain("g.aliases");
+      expect(items.map((row) => row.aliases)).toEqual(["A, B", null, null]);
+    });
+
+    it("a row reads as the viewer's group, with its tooltip relations and its visible studio", async () => {
+      mockPrisma.$queryRawUnsafe.mockReset();
+      mockPrisma.$queryRawUnsafe
+        .mockResolvedValueOnce([groupRow()])
+        .mockResolvedValueOnce([{ total: 1n }])
+        // The studio, live and not excluded for the viewer; Stash's own
+        // favorite never reaches the ref
+        .mockResolvedValueOnce([
+          {
+            id: "41",
+            stashInstanceId: "inst-a",
+            name: "Studio",
+            imagePath: null,
+            parentId: null,
+            favorite: true,
+          },
+        ]);
+      mockTooltips.mockResolvedValueOnce(
+        new Map([
+          [
+            entityKey("1", "inst-a"),
+            { tags: [], performers: [], relation_totals: { performers: 4 } },
+          ],
+        ])
+      );
+      const result = await run();
+
+      expect(result).toMatchObject({ total: 1 });
+      const group = must(result.items[0]);
+      expect(group).toMatchObject({
+        id: "1",
+        instanceId: "inst-a",
+        name: "Box Set",
+        date: null,
+        director: null,
+        synopsis: "Three parts",
+        urls: [],
+        scene_count: 3,
+        performer_count: 0,
+        sub_group_count: 2,
+        duration: 0,
+        back_image_path: null,
+        created_at: null,
+        updated_at: "2026-01-02T03:04:05.000Z",
+        rating: null,
+        rating100: null,
+        favorite: true,
+        relation_totals: { performers: 4 },
+      });
+      expect(group.studio).toEqual({
+        id: "41",
+        instanceId: "inst-a",
+        name: "Studio",
+        image_path: null,
+        parent_studio: null,
+      });
+      expect(mockTooltips).toHaveBeenCalledWith("group", result.items, 1);
+      const [studioSql, ...studioParams] = must(
+        mockPrisma.$queryRawUnsafe.mock.calls[2],
+        "the studio statement"
+      );
+      expect(studioSql).toContain(
+        "CROSS JOIN StashStudio x ON x.id = r.rid AND x.stashInstanceId = r.rinst"
+      );
+      expect(studioSql).toContain("WHERE x.deletedAt IS NULL AND e.id IS NULL");
+      expect(studioParams).toEqual([
+        pairsJson([{ id: "41", instanceId: "inst-a" }]),
+        1,
+      ]);
+    });
+
+    it("a studio the viewer cannot see is none, though the row names its id", async () => {
+      mockPrisma.$queryRawUnsafe.mockReset();
+      mockPrisma.$queryRawUnsafe
+        .mockResolvedValueOnce([groupRow()])
+        .mockResolvedValueOnce([{ total: 1n }])
+        .mockResolvedValueOnce([]);
+
+      const { items } = await run();
+
+      expect(must(items[0])).toMatchObject({ studioId: "41", studio: null });
+    });
+  });
+});
+
+describe("the group field table", () => {
+  it("has a clause for every field but the base's", () => {
+    const fields = Object.keys(GROUP_FIELDS).filter(
+      (field) => field !== "ids" && field !== "instance_id"
+    );
+
+    expect(Object.keys(groupQueryBuilder["fieldClauses"]).sort()).toEqual(
+      fields.sort()
+    );
+  });
+});
+
+/** What each group field's clause adds to the WHERE, as the shared spec's sample binds it */
+const GROUP_CLAUSES: Record<
+  Exclude<keyof typeof GROUP_FIELDS, "instance_id">,
+  string
+> = {
+  ids: "(g.id = ? AND g.stashInstanceId = ?)",
+  name: "g.name LIKE ?",
+  synopsis: "g.synopsis LIKE ?",
+  director: "g.director LIKE ?",
+  aliases: "g.aliases LIKE ?",
+  url: "json_valid(g.urls)",
+  tags: "FROM GroupTag gt WHERE gt.groupId = g.id",
+  studios: "(g.stashInstanceId = ? AND g.studioId IN (?, ?))",
+  scenes: "FROM SceneGroup sg JOIN StashScene lsc",
+  performers: "FROM ScenePerformer sp JOIN SceneGroup sg",
+  containing_groups: "FROM GroupRelation gcr JOIN StashGroup gcp",
+  sub_groups: "FROM GroupRelation gsr JOIN StashGroup gsc",
+  performer_favorite: "FROM SceneGroup gfg JOIN StashScene gfs",
+  rating100: "r.rating > ?",
+  o_counter: "SUM(gw.oCount)",
+  play_count: "SUM(gw.playCount)",
+  scene_count: "MAX(g.sceneCount - COALESCE(d.scenes, 0), 0) > ?",
+  sub_group_count: "(SELECT COUNT(*) FROM GroupRelation gsr",
+  containing_group_count: "(SELECT COUNT(*) FROM GroupRelation gcr",
+  tag_count: "(SELECT COUNT(*) FROM GroupTag gtc",
+  duration: "g.duration > ?",
+  date: "END, 1, 10) > ?",
+  created_at: "g.stashCreatedAt >= ?",
+  updated_at: "g.stashUpdatedAt >= ?",
+  favorite: "r.favorite = 1",
+};
+
+describe("every group field clause", () => {
+  /** The viewer's one favourite of each kind, on the instance the samples allow */
+  function seedFavourites(): void {
+    mockPrisma.tagRating.findMany.mockResolvedValue([
+      partialRow({ tagId: "8", instanceId: "inst-a" }),
+    ]);
+    mockPrisma.studioRating.findMany.mockResolvedValue([
+      partialRow({ studioId: "8", instanceId: "inst-a" }),
+    ]);
+    mockPrisma.performerRating.findMany.mockResolvedValue([
+      partialRow({ performerId: "8", instanceId: "inst-a" }),
+    ]);
+    mockPrisma.userExcludedEntity.findMany.mockResolvedValue([]);
+  }
+
+  const BOUND = {
+    performer_favorite: ["8", "inst-a"],
+  };
+
+  const SAMPLES = new Map(samplesOf(GROUP_FIELDS, BOUND));
+
+  /** The page statement for a filter alone, with nothing else answered */
+  async function statementFor(
+    filter: Record<string, unknown>,
+    applyExclusions = true
+  ): Promise<{ sql: string; params: unknown[] }> {
+    mockPrisma.$queryRawUnsafe.mockReset();
+    mockPrisma.$queryRawUnsafe.mockResolvedValue([]);
+    seedFavourites();
+    await run(
+      { filter: untrusted<ParsedListRequest<"group">["filter"]>(filter) },
+      { applyExclusions }
+    );
+    return pageStatement();
+  }
+
+  it("has a sample for every field the table carries", () => {
+    expect([...SAMPLES.keys()].sort()).toEqual(
+      Object.keys(GROUP_CLAUSES).sort()
+    );
+  });
+
+  it.each(Object.entries(GROUP_CLAUSES))(
+    "%s adds its clause to the WHERE and binds its sample in order",
+    async (field, fragment) => {
+      const sample = must(SAMPLES.get(field), `a sample for ${field}`);
+
+      const { sql, params } = await statementFor(filterOf(sample));
+
+      expect(whereOf(sql)).toContain(fragment);
+      expect(firstMissingBound(params, sample.bound)).toBeNull();
+    }
+  );
+
+  it.each(alternatesOf(GROUP_FIELDS, BOUND))(
+    "%s builds a clause of its own and binds its values in order",
+    async (_label, sample) => {
+      const baseline = whereOf((await statementFor({})).sql);
+
+      const { sql, params } = await statementFor(filterOf(sample));
+
+      expect(whereOf(sql)).not.toBe(baseline);
+      expect(firstMissingBound(params, sample.bound)).toBeNull();
+    }
+  );
+
+  it.each(Object.keys(GROUP_CLAUSES))(
+    "%s takes no exclusion join when the viewer's exclusions do not apply",
+    async (field) => {
+      const sample = must(SAMPLES.get(field), `a sample for ${field}`);
+
+      const { sql } = await statementFor(filterOf(sample), false);
+
+      expect(whereOf(sql)).not.toContain("UserExcludedEntity");
+    }
+  );
 });

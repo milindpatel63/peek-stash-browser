@@ -1,10 +1,10 @@
 import React, { useState } from "react";
 import { Link } from "react-router-dom";
+import { LOGIN_MESSAGE_STORAGE_KEY, REDIRECT_STORAGE_KEY } from "../../api";
+import { getLandingPage } from "../../constants/navigation";
 import { useAuth } from "../../hooks/useAuth";
 import { useTheme } from "../../themes/useTheme";
-import { Button } from "../ui/index";
-import { REDIRECT_STORAGE_KEY } from "../../api";
-import { getLandingPage } from "../../constants/navigation";
+import Button from "../ui/Button";
 
 const Login = () => {
   const { login } = useAuth();
@@ -15,8 +15,15 @@ const Login = () => {
   });
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  // A one-time notice left by redirectToLogin (a session that expired while
+  // a video was paused); read once and cleared
+  const [notice] = useState(() => {
+    const message = sessionStorage.getItem(LOGIN_MESSAGE_STORAGE_KEY);
+    if (message) sessionStorage.removeItem(LOGIN_MESSAGE_STORAGE_KEY);
+    return message ?? "";
+  });
 
-  const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
+  const handleSubmit = async (e: React.SubmitEvent<HTMLFormElement>) => {
     e.preventDefault();
     setIsLoading(true);
     setError("");
@@ -32,7 +39,7 @@ const Login = () => {
           window.location.href = redirectUrl;
         } else {
           // Use landing page preference if available
-          const destination = getLandingPage(result.user?.landingPagePreference);
+          const destination = getLandingPage(result.landingPagePreference);
           window.location.href = destination;
         }
       } else {
@@ -79,7 +86,17 @@ const Login = () => {
           </p>
         </div>
 
-        <form className="mt-8 space-y-6" onSubmit={handleSubmit}>
+        {notice && (
+          <div
+            role="status"
+            className="text-sm text-center"
+            style={{ color: "var(--text-secondary)" }}
+          >
+            {notice}
+          </div>
+        )}
+
+        <form className="mt-8 space-y-6" onSubmit={(e) => void handleSubmit(e)}>
           <div className="rounded-md shadow-sm -space-y-px">
             <div>
               <label htmlFor="username" className="sr-only">

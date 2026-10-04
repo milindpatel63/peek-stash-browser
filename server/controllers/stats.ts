@@ -2,15 +2,23 @@ import { promises as fs } from "fs";
 import os from "os";
 import { stashEntityService } from "../services/StashEntityService.js";
 import { stashSyncService } from "../services/StashSyncService.js";
+import type { ApiErrorResponse } from "../types/api/common.js";
 import type { TypedRequest, TypedResponse } from "../types/api/express.js";
-import type { GetStatsResponse, RefreshCacheResponse } from "../types/api/stats.js";
+import type {
+  GetStatsResponse,
+  RefreshCacheResponse,
+} from "../types/api/stats.js";
 import { logger } from "../utils/logger.js";
+import { logSyncFailure } from "../utils/syncLog.js";
 
 /**
  * Get comprehensive server statistics
  * Includes system metrics, cache stats, and database size
  */
-export const getStats = async (_req: TypedRequest, res: TypedResponse<GetStatsResponse>) => {
+export const getStats = async (
+  _req: TypedRequest,
+  res: TypedResponse<GetStatsResponse>
+) => {
   try {
     // Get cache stats with fallback
     let cacheStats;
@@ -23,7 +31,7 @@ export const getStats = async (_req: TypedRequest, res: TypedResponse<GetStatsRe
       cacheStats = {
         isInitialized: isReady,
         isRefreshing: stashSyncService.isSyncing(),
-        lastRefreshed: lastRefreshed?.toISOString() || null,
+        lastRefreshed: lastRefreshed?.toISOString() ?? null,
         counts: {
           scenes: counts.scenes,
           performers: counts.performers,
@@ -45,13 +53,23 @@ export const getStats = async (_req: TypedRequest, res: TypedResponse<GetStatsRe
         isInitialized: false,
         isRefreshing: false,
         lastRefreshed: null,
-        counts: { scenes: 0, performers: 0, studios: 0, tags: 0, galleries: 0, groups: 0, images: 0, clips: 0, ungeneratedClips: 0 },
+        counts: {
+          scenes: 0,
+          performers: 0,
+          studios: 0,
+          tags: 0,
+          galleries: 0,
+          groups: 0,
+          images: 0,
+          clips: 0,
+          ungeneratedClips: 0,
+        },
         estimatedCacheSize: "0 MB",
       };
     }
 
     // Get database size with fallback
-    const dbPath = process.env.DATABASE_URL?.replace("file:", "") || "";
+    const dbPath = process.env.DATABASE_URL?.replace("file:", "") ?? "";
     let dbSize = 0;
     try {
       if (dbPath) {
@@ -153,7 +171,17 @@ export const getStats = async (_req: TypedRequest, res: TypedResponse<GetStatsRe
         isInitialized: false,
         isRefreshing: false,
         lastRefreshed: null,
-        counts: { scenes: 0, performers: 0, studios: 0, tags: 0, galleries: 0, groups: 0, images: 0, clips: 0, ungeneratedClips: 0 },
+        counts: {
+          scenes: 0,
+          performers: 0,
+          studios: 0,
+          tags: 0,
+          galleries: 0,
+          groups: 0,
+          images: 0,
+          clips: 0,
+          ungeneratedClips: 0,
+        },
         estimatedSize: "0 MB",
       },
       database: { size: "0 B", sizeBytes: 0, path: "" },
@@ -192,30 +220,27 @@ function formatUptime(seconds: number): string {
 
 /**
  * Manually refresh the Stash cache
- * Admin-only endpoint to trigger cache refresh on demand
+ * Admin-only endpoint to trigger cache refresh on demand. While a sync (or an
+ * instance deletion) runs it answers 409 and starts nothing, as
+ * /api/sync/trigger does: the admin clicked, so they hear that it did not start.
  */
-export const refreshCache = (_req: TypedRequest, res: TypedResponse<RefreshCacheResponse>) => {
-  try {
-    logger.info("Manual cache refresh triggered by admin");
-    // Trigger a full sync (non-blocking - runs in background)
-    stashSyncService.fullSync().catch((err: Error) => {
-      logger.error("Background full sync failed", { error: err.message });
-    });
-
-    res.json({
-      success: true,
-      message: "Cache refresh initiated",
-    });
-  } catch (error) {
-    logger.error("Error refreshing cache", {
-      error: (error as Error).message,
-      stack: (error as Error).stack,
-    });
-
-    res.status(500).json({
-      success: false,
-      message: "Failed to refresh cache",
-      error: "Failed to refresh cache",
-    });
+export const refreshCache = (
+  _req: TypedRequest,
+  res: TypedResponse<RefreshCacheResponse | ApiErrorResponse>
+) => {
+  if (stashSyncService.isSyncing()) {
+    res.status(409).json({ error: "A sync is already running" });
+    return;
   }
+
+  logger.info("Manual cache refresh triggered by admin");
+  // Trigger a full sync (non-blocking - runs in background)
+  stashSyncService.fullSync().catch((err: unknown) => {
+    logSyncFailure("Background full sync failed", err);
+  });
+
+  res.json({
+    success: true,
+    message: "Cache refresh initiated",
+  });
 };

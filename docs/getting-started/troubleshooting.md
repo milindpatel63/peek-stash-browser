@@ -22,11 +22,33 @@ docker logs peek-stash-browser
 
 **Common causes:**
 
-- Missing `JWT_SECRET` environment variable
+- `/app/data` not writable (Peek stores its generated session secret there)
 - Port 6969 already in use
 - Volume mount issues for `/app/data`
 
 **Solution:** Recreate the container with correct configuration. See [Installation](../getting-started/installation.md).
+
+**`[entrypoint] ERROR: /app/data is not writable by UID:GID`**
+
+The data directory could not be given to Peek's user, usually because it cannot change owner (NFS with root squash, SMB/CIFS, a read-only mount). Set `PUID`/`PGID` to the owner that `ls -ln` shows for your data directory. On rootless Docker or Podman, set `PUID=0`. See [File ownership](installation.md#file-ownership-puidpgid).
+
+**`[entrypoint] ERROR: this image manages its own user: remove --user ...`**
+
+Remove `--user` from `docker run` (or `user:` from your Compose file) and set `PUID`/`PGID` instead.
+
+## "Peek is starting"
+
+The page shows **Peek is starting. Waiting for the server...** while the server is starting, or applying an upgrade's database migrations, and cannot answer yet. The HTTP status in brackets, such as `(HTTP 502)`, is the last answer the page got; a reverse proxy answers 502 while Peek is down. Nothing needs doing: the page keeps asking on its own and opens as soon as the server answers. If you see a panel that says **Something went wrong** instead, see [An error panel instead of a page](#an-error-panel-instead-of-a-page).
+
+After a minute it adds **Still waiting. If this lasts, check the server's log.** Look there (see [Viewing Logs](#viewing-logs)) for a migration that is still running, or for an error that stopped the server from starting (see [Container Won't Start](#container-wont-start)).
+
+## An error panel instead of a page
+
+If a page fails while it draws, or its code cannot be loaded, Peek shows a panel that says **Something went wrong** inside the app, with the sidebar still in place, instead of a blank screen. **Reload** loads the page again; **Home** goes to the start page. The panel clears by itself when you open another page.
+
+After an upgrade, a tab that was left open asks for files the new version no longer has. Peek reloads that tab once on its own to pick up the new version. If the files are still missing after that reload, the panel says **Peek was updated**; Reload again, and if it keeps coming back, check that your reverse proxy is not serving an old copy of Peek.
+
+If the panel keeps returning, open the browser's console (F12), copy the line that starts with `[route]` and report it when you ask for help (see [Getting Help](#getting-help)). This is different from ["Peek is starting"](#peek-is-starting), which is the server not answering yet; the panel means the page itself failed.
 
 ## Can't Connect to Stash
 
@@ -43,10 +65,31 @@ docker exec peek-stash-browser curl -X POST http://your-stash-ip:9999/graphql \
 
 **Checklist:**
 
-- [ ] Stash URL is correct in Settings → Server Settings
+- [ ] Stash URL is correct in Settings → Server Settings → Server Configuration → Stash Instances
 - [ ] API key is valid (Stash → Settings → Security)
 - [ ] Stash is reachable from Peek container (check Docker networking)
 - [ ] No firewall blocking the connection
+
+## Sync Problems
+
+**Where to look:** Settings → Server Settings → Server Configuration → Sync status. Each Stash instance has a table with one row per type (tags, studios, performers, collections, galleries, scenes, clips, images): when it last had a full sync, the newest change Peek has from Stash, how many items the last run synced and how long it took, and the problem the last run had with that type, if any. A type that fails does not stop the others: the next sync retries it from where it left off, and its problem clears once it syncs cleanly.
+
+- **A Stash error on one type**, such as `FindStudios: runtime error: invalid memory address or nil pointer dereference (at findStudios.studios.3.image_path) (HTTP 200)`: Stash failed to answer for that type. The part in brackets names the field that broke (a studio's `image_path` here).
+- **`Stash request FindStudios timed out after 120 s`**: every request to Stash gives up after two minutes, so a Stash that hangs cannot hold the sync forever. Check that Stash is running and answers in its own web UI, then let the next sync try again.
+- **A running sync takes too long**: the **Abort sync** button next to Sync status stops it at its next step, including a request to Stash that is still waiting. The types that finished keep their progress; the next sync picks up the rest.
+- **`Cleanup refused: Stash no longer lists 812 of 1,200 scenes (more than half); ...`**: after each sync Peek removes what Stash no longer lists, but it holds back when more than half of a type would go (and more than 50 items), because an incomplete list from Stash would otherwise empty your library. If you did delete that many in Stash, press **Apply deletions** on that row and confirm: Peek asks Stash for the list again and removes only what Stash still does not list. It stops again if the list comes back incomplete. A Full Sync brings back anything Stash lists again later.
+- **`Cleanup skipped: ...`**: Stash's list came back incomplete or empty, so Peek removed nothing. The next sync checks again.
+- **A Stash on a blocked port**: Peek reaches Stash with `fetch`, which refuses the ports browsers block (6665-6669, 10080 and the others in the Fetch standard's "bad ports" list), so a Stash listening on one of them cannot be reached. Move Stash to another port, such as its default 9999.
+
+## Starting Setup Over
+
+If setup stops before it is finished (for example, you forgot the admin password before connecting Stash), start it over:
+
+1. Stop the container.
+2. In the data directory (`/app/data`), delete `peek-stash-browser.db`, and any `peek-stash-browser.db-wal` or `peek-stash-browser.db-shm` file next to it.
+3. Start the container again.
+
+The setup wizard starts from the beginning. The generated `.jwt-secret` file can stay.
 
 ## Videos Won't Play
 
@@ -57,6 +100,12 @@ Peek proxies streams through Stash. If videos don't play:
 3. **Check browser console** - Press F12, look for errors
 
 If videos work in Stash but not Peek, check the Stash connection settings.
+
+## Server Restarted on Its Own
+
+On an unexpected error, the server logs `Uncaught exception, shutting down` followed by a stack trace, then exits. Docker starts it again when the container has a restart policy: add `--restart unless-stopped` to your `docker run` command (the unRAID template sets it in Extra Parameters). In Docker Compose, set `restart: unless-stopped` on the service.
+
+Please [report the bug](https://github.com/carrotwaxr/peek-stash-browser/issues) and include that stack trace from the logs (see [Viewing Logs](#viewing-logs)).
 
 ## Viewing Logs
 
@@ -79,11 +128,11 @@ If your container starts, connects to Stash, and the web UI loads - most things 
 
 1. Check container logs for errors
 2. Check browser console (F12 → Console)
-3. Note your Peek version (Settings → Server Settings)
+3. Note your Peek version (Settings → Server Settings → Server Configuration → Version Information)
 
 **Report issues:**
 
-- [GitHub Issues](https://github.com/carrotwaxr/peek-stash-browser/issues)
-- [Stash Discord](https://discord.gg/2TsNFKt) - #third-party-integrations channel
+- [GitHub Issues](https://github.com/carrotwaxr/peek-stash-browser/issues) for bugs
+- [Peek on the Stash community forum](https://discourse.stashapp.cc/t/peek-stash-browser/4018) for questions
 
 Include: Peek version, Stash version, relevant logs, and steps to reproduce.

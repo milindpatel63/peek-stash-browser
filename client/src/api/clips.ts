@@ -1,49 +1,43 @@
 /**
  * Clips API endpoints.
  */
-import { apiGet } from "./client";
+import type {
+  FindClipsRequest,
+  FindClipsResponse,
+  GetClipsForSceneResponse,
+  ListCount,
+} from "@peek/shared-types";
+import { apiGet, apiPost } from "./client";
 
-export interface GetClipsOptions {
-  page?: number;
-  perPage?: number;
-  sortBy?: string;
-  sortDir?: string;
-  isGenerated?: boolean;
-  sceneId?: string;
-  tagIds?: string[];
-  sceneTagIds?: string[];
-  performerIds?: string[];
-  studioId?: string;
-  q?: string;
+/**
+ * `POST /api/library/clips`: a page of the clip list, its filter in
+ * `clip_filter` (`buildClipFilter`), paging, sort and search in `filter`;
+ * `filter.count: false` asks for the page alone (`total` and `totalPages`
+ * null)
+ */
+export async function findClips(request: FindClipsRequest) {
+  return apiPost<FindClipsResponse<ListCount>>("/library/clips", request);
 }
 
-export async function getClips(options: GetClipsOptions = {}) {
-  const params = new URLSearchParams();
-
-  if (options.page) params.set("page", String(options.page));
-  if (options.perPage) params.set("perPage", String(options.perPage));
-  if (options.sortBy) params.set("sortBy", options.sortBy);
-  if (options.sortDir) params.set("sortDir", options.sortDir);
-  if (options.isGenerated !== undefined) params.set("isGenerated", String(options.isGenerated));
-  if (options.sceneId) params.set("sceneId", options.sceneId);
-  if (options.tagIds?.length) params.set("tagIds", options.tagIds.join(","));
-  if (options.sceneTagIds?.length) params.set("sceneTagIds", options.sceneTagIds.join(","));
-  if (options.performerIds?.length) params.set("performerIds", options.performerIds.join(","));
-  if (options.studioId) params.set("studioId", options.studioId);
-  if (options.q) params.set("q", options.q);
-
-  const queryString = params.toString();
-  return apiGet(`/clips${queryString ? `?${queryString}` : ""}`);
-}
-
-export async function getClipsForScene(sceneId: string, instanceId?: string, includeUngenerated = false) {
-  const params = new URLSearchParams();
+/** `GET /api/scenes/:id/clips`: the scene on its own instance, which the server requires */
+export async function getClipsForScene(
+  sceneId: string,
+  instanceId: string,
+  includeUngenerated = false,
+  signal?: AbortSignal
+) {
+  const params = new URLSearchParams({ instanceId });
   if (includeUngenerated) params.set("includeUngenerated", "true");
-  if (instanceId) params.set("instanceId", instanceId);
-  const queryString = params.toString();
-  return apiGet(`/scenes/${sceneId}/clips${queryString ? `?${queryString}` : ""}`);
+  return apiGet<GetClipsForSceneResponse>(
+    `/scenes/${sceneId}/clips?${params.toString()}`,
+    signal
+  );
 }
 
-export function getClipPreviewUrl(clipId: string): string {
-  return `/api/proxy/clip/${clipId}/preview`;
+/**
+ * The clip preview proxy URL, on the clip's own instance: the server serves
+ * a media request only from the instance it names.
+ */
+export function getClipPreviewUrl(clipId: string, instanceId: string): string {
+  return `/api/proxy/clip/${clipId}/preview?instanceId=${encodeURIComponent(instanceId)}`;
 }

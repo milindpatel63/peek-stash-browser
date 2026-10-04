@@ -38,6 +38,10 @@
       "types": "./dist/api/imageViewHistory.d.ts",
       "default": "./dist/api/imageViewHistory.js"
     },
+    "./api/library.js": {
+      "types": "./dist/api/library.d.ts",
+      "default": "./dist/api/library.js"
+    },
     "./api/ratings.js": {
       "types": "./dist/api/ratings.d.ts",
       "default": "./dist/api/ratings.js"
@@ -62,15 +66,24 @@
       "types": "./dist/api/userStats.d.ts",
       "default": "./dist/api/userStats.js"
     },
+    "./api/video.js": {
+      "types": "./dist/api/video.d.ts",
+      "default": "./dist/api/video.js"
+    },
     "./api/watchHistory.js": {
       "types": "./dist/api/watchHistory.d.ts",
       "default": "./dist/api/watchHistory.js"
     }
   },
   "scripts": {
-    "build": "tsc"
+    "build": "tsc",
+    "lint": "eslint ."
   },
   "devDependencies": {
-    "typescript": "~5.8.3"
+    "@eslint/js": "^9.39.2",
+    "eslint": "^9.39.2",
+    "globals": "^16.5.0",
+    "typescript": "~5.8.3",
+    "typescript-eslint": "^8.56.1"
   }
 }

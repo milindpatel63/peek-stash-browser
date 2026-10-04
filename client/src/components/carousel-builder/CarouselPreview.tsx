@@ -1,6 +1,6 @@
-import { AlertCircle, Eye, Loader2, ImageOff } from "lucide-react";
 import type { NormalizedScene } from "@peek/shared-types";
-import { getSceneTitle } from "../../utils/format";
+import { AlertCircle, Eye, ImageOff, Loader2 } from "lucide-react";
+import { formatDuration, getSceneTitle } from "../../utils/format";
 import { useLazyLoad } from "../ui/CardComponents";
 
 interface Props {
@@ -24,7 +24,10 @@ const CarouselPreview = ({ scenes, error, loading }: Props) => {
       }}
     >
       <div className="flex items-center justify-between">
-        <h2 className="text-sm font-semibold" style={{ color: "var(--text-secondary)" }}>
+        <h2
+          className="text-sm font-semibold"
+          style={{ color: "var(--text-secondary)" }}
+        >
           Preview
         </h2>
         {scenes && (
@@ -131,7 +134,10 @@ const PreviewCard = ({ scene }: PreviewCardProps) => {
           />
         ) : (
           <div className="w-full h-full flex items-center justify-center">
-            <ImageOff className="w-8 h-8" style={{ color: "var(--text-muted)" }} />
+            <ImageOff
+              className="w-8 h-8"
+              style={{ color: "var(--text-muted)" }}
+            />
           </div>
         )}
 
@@ -161,20 +167,6 @@ const PreviewCard = ({ scene }: PreviewCardProps) => {
       </div>
     </div>
   );
-};
-
-/**
- * Format duration from seconds to HH:MM:SS or MM:SS
- */
-const formatDuration = (seconds: number): string => {
-  const hrs = Math.floor(seconds / 3600);
-  const mins = Math.floor((seconds % 3600) / 60);
-  const secs = Math.floor(seconds % 60);
-
-  if (hrs > 0) {
-    return `${hrs}:${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
-  }
-  return `${mins}:${secs.toString().padStart(2, "0")}`;
 };
 
 export default CarouselPreview;

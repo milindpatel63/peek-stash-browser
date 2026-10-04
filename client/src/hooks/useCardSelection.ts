@@ -1,4 +1,5 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import type React from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 /**
  * Hook for card selection behavior: long-press to select, selection mode click handling
@@ -8,10 +9,18 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
  * @param {Function} options.onToggleSelect - Callback when entity should be toggled
  * @returns {Object} - { isLongPressing, selectionHandlers, handleNavigationClick }
  */
+/** How a toggle was asked for: Shift held selects a range up to the entity */
+export interface ToggleSelectOptions {
+  range: boolean;
+}
+
 interface UseCardSelectionOptions {
   entity: Record<string, unknown>;
   selectionMode?: boolean;
-  onToggleSelect?: (entity: Record<string, unknown>) => void;
+  onToggleSelect?: (
+    entity: Record<string, unknown>,
+    options?: ToggleSelectOptions
+  ) => void;
 }
 
 export const useCardSelection = ({
@@ -23,6 +32,9 @@ export const useCardSelection = ({
   const [isLongPressing, setIsLongPressing] = useState(false);
   const startPosRef = useRef({ x: 0, y: 0 });
   const hasMovedRef = useRef(false);
+  // A finger is down on the card and its long press may still come: the
+  // browser's own long-press menu (Android's contextmenu) must not open
+  const touchArmedRef = useRef(false);
 
   // Clear timer on unmount
   useEffect(() => {
@@ -33,19 +45,28 @@ export const useCardSelection = ({
     };
   }, []);
 
-  const isInteractiveElement = useCallback((target: HTMLElement, currentTarget: HTMLElement) => {
-    const closestButton = target.closest("button");
-    const isButton = closestButton && closestButton !== currentTarget;
-    const closestLink = target.closest("a");
-    // Only count as interactive if it's a NESTED link (different from currentTarget)
-    const isNestedLink = closestLink && closestLink !== currentTarget;
-    const isInput = target.closest("input");
-    return isButton || isNestedLink || isInput;
-  }, []);
+  const isInteractiveElement = useCallback(
+    (target: HTMLElement, currentTarget: HTMLElement) => {
+      const closestButton = target.closest("button");
+      const isButton = closestButton && closestButton !== currentTarget;
+      const closestLink = target.closest("a");
+      // Only count as interactive if it's a NESTED link (different from currentTarget)
+      const isNestedLink = closestLink && closestLink !== currentTarget;
+      const isInput = target.closest("input");
+      return isButton || isNestedLink || isInput;
+    },
+    []
+  );
 
   const handleMouseDown = useCallback(
     (e: React.MouseEvent) => {
-      if (isInteractiveElement(e.target as HTMLElement, e.currentTarget as HTMLElement)) return;
+      if (
+        isInteractiveElement(
+          e.target as HTMLElement,
+          e.currentTarget as HTMLElement
+        )
+      )
+        return;
 
       longPressTimerRef.current = setTimeout(() => {
         setIsLongPressing(true);
@@ -64,11 +85,19 @@ export const useCardSelection = ({
 
   const handleTouchStart = useCallback(
     (e: React.TouchEvent) => {
-      if (isInteractiveElement(e.target as HTMLElement, e.currentTarget as HTMLElement)) return;
+      if (
+        isInteractiveElement(
+          e.target as HTMLElement,
+          e.currentTarget as HTMLElement
+        )
+      )
+        return;
 
       const touch = e.touches[0];
+      if (!touch) return;
       startPosRef.current = { x: touch.clientX, y: touch.clientY };
       hasMovedRef.current = false;
+      touchArmedRef.current = true;
 
       longPressTimerRef.current = setTimeout(() => {
         if (!hasMovedRef.current) {
@@ -81,14 +110,15 @@ export const useCardSelection = ({
   );
 
   const handleTouchMove = useCallback((e: React.TouchEvent) => {
-    if (longPressTimerRef.current && e.touches.length > 0) {
-      const touch = e.touches[0];
+    const touch = e.touches[0];
+    if (longPressTimerRef.current && touch) {
       const deltaX = Math.abs(touch.clientX - startPosRef.current.x);
       const deltaY = Math.abs(touch.clientY - startPosRef.current.y);
       const moveThreshold = 10;
 
       if (deltaX > moveThreshold || deltaY > moveThreshold) {
         hasMovedRef.current = true;
+        touchArmedRef.current = false;
         clearTimeout(longPressTimerRef.current);
         longPressTimerRef.current = null;
       }
@@ -101,6 +131,14 @@ export const useCardSelection = ({
       longPressTimerRef.current = null;
     }
     hasMovedRef.current = false;
+    touchArmedRef.current = false;
+  }, []);
+
+  // A long press on a touch screen would also open the browser's context
+  // menu (a link's open/copy sheet) over the selection it just made. A mouse's
+  // right-click is untouched: only a touch arms this.
+  const handleContextMenu = useCallback((e: React.MouseEvent) => {
+    if (touchArmedRef.current) e.preventDefault();
   }, []);
 
   // Click handler for navigation elements (CardImage, CardTitle)
@@ -117,19 +155,30 @@ export const useCardSelection = ({
       // In selection mode, toggle instead of navigate
       if (selectionMode) {
         e.preventDefault();
-        onToggleSelect?.(entity);
+        onToggleSelect?.(entity, { range: e.shiftKey });
         return;
       }
 
       // If click originated from an interactive element (button, nested link, input),
       // prevent navigation - the interactive element handles its own action
-      if (isInteractiveElement(e.target as HTMLElement, e.currentTarget as HTMLElement)) {
+      if (
+        isInteractiveElement(
+          e.target as HTMLElement,
+          e.currentTarget as HTMLElement
+        )
+      ) {
         e.preventDefault();
         return;
       }
       // Otherwise, let the Link navigate normally
     },
-    [isLongPressing, selectionMode, entity, onToggleSelect, isInteractiveElement]
+    [
+      isLongPressing,
+      selectionMode,
+      entity,
+      onToggleSelect,
+      isInteractiveElement,
+    ]
   );
 
   return {
@@ -142,6 +191,7 @@ export const useCardSelection = ({
       onTouchMove: handleTouchMove,
       onTouchEnd: handleTouchEnd,
       onTouchCancel: handleTouchEnd,
+      onContextMenu: handleContextMenu,
     },
     // Always return handler to intercept clicks from interactive elements
     handleNavigationClick,

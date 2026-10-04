@@ -1,0 +1,27 @@
+{
+  "controllers/proxy.ts": {
+    "@typescript-eslint/prefer-nullish-coalescing": {
+      "count": 1
+    }
+  },
+  "controllers/video.ts": {
+    "@typescript-eslint/prefer-nullish-coalescing": {
+      "count": 2
+    }
+  },
+  "controllers/watchHistory.ts": {
+    "@typescript-eslint/prefer-nullish-coalescing": {
+      "count": 3
+    }
+  },
+  "utils/entityInstanceId.ts": {
+    "@typescript-eslint/prefer-nullish-coalescing": {
+      "count": 1
+    }
+  },
+  "utils/nfoGenerator.ts": {
+    "@typescript-eslint/prefer-nullish-coalescing": {
+      "count": 5
+    }
+  }
+}

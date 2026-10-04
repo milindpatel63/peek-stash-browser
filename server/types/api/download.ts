@@ -1,12 +1,14 @@
 // Re-exporting stub — canonical definitions live in shared/types/api/download.ts
 export type {
   SerializedDownload,
+  StartEntityDownloadRequest,
   StartSceneDownloadParams,
   StartSceneDownloadResponse,
   StartImageDownloadParams,
   StartImageDownloadResponse,
   StartPlaylistDownloadParams,
   StartPlaylistDownloadResponse,
+  PlaylistTooLargeResponse,
   GetUserDownloadsResponse,
   GetDownloadStatusParams,
   GetDownloadStatusResponse,

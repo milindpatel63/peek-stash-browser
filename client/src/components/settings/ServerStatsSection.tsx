@@ -1,8 +1,12 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import { Clock, Cpu, Database, Film, HardDrive, RefreshCw } from "lucide-react";
 import { apiGet, apiPost } from "../../api";
-import { Clock, Cpu, Database, HardDrive, RefreshCw, Film } from "lucide-react";
-import { Button, Paper } from "../ui/index";
+import { ApiError } from "../../api/client";
 import { useAuth } from "../../hooks/useAuth";
+import { useVisibleInterval } from "../../hooks/useVisibleInterval";
+import { formatDateTime } from "../../utils/date";
+import { showError, showSuccess } from "../../utils/toast";
+import { Button, ConfirmDialog, Paper, StatusMessage } from "../ui/index";
 
 interface CacheCounts {
   scenes: number;
@@ -38,43 +42,70 @@ interface ServerStats {
   };
 }
 
-interface ReprobeResult {
-  success: boolean;
-  checked?: number;
-  updated?: number;
-  message?: string;
+type ReprobeResult =
+  | { success: true; checked: number; updated: number }
+  | { success: false; message: string };
+
+interface Props {
+  /**
+   * Called when a sync starts: this section's Full Sync, or one its poll
+   * sees begin (a scheduled sync, say), so the sync status can follow it.
+   */
+  onSyncStarted?: () => void;
 }
 
-const ServerStatsSection = () => {
+const ServerStatsSection = ({ onSyncStarted }: Props) => {
   const { user } = useAuth();
   const isAdmin = user?.role === "ADMIN";
   const [stats, setStats] = useState<ServerStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshingCache, setRefreshingCache] = useState(false);
+  const [confirmingFullSync, setConfirmingFullSync] = useState(false);
+  // Whether the last poll saw a sync running (null before the first one)
+  const wasSyncing = useRef<boolean | null>(null);
+  const syncStarted = useRef(onSyncStarted);
+  useEffect(() => {
+    syncStarted.current = onSyncStarted;
+  }, [onSyncStarted]);
   const [reprobingClips, setReprobingClips] = useState(false);
-  const [reprobeResult, setReprobeResult] = useState<ReprobeResult | null>(null);
+  const [reprobeResult, setReprobeResult] = useState<ReprobeResult | null>(
+    null
+  );
 
-  const loadStats = async () => {
+  const loadStats = useCallback(async () => {
     try {
       const data = await apiGet<ServerStats>("/stats");
       setStats(data);
+      const syncing = data.cache?.isRefreshing ?? false;
+      if (syncing && wasSyncing.current === false) syncStarted.current?.();
+      wasSyncing.current = syncing;
     } catch (err) {
       console.error("Failed to load server stats:", err);
       // Silently fail - stats are not critical
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
+  /** Full Sync, once the admin confirmed it */
   const refreshCache = async () => {
+    setConfirmingFullSync(false);
     try {
       setRefreshingCache(true);
       await apiPost("/stats/refresh-cache");
+      // Started here: the next poll's running sync is no news
+      wasSyncing.current = true;
+      syncStarted.current?.();
+      showSuccess("Full sync started");
       // Wait a moment then reload stats to show refreshing status
-      setTimeout(loadStats, 500);
+      setTimeout(() => void loadStats(), 500);
     } catch (err) {
-      console.error("Failed to refresh cache:", err);
-      // Silently fail - will show error in console
+      if (err instanceof ApiError && err.status === 409) {
+        showError("A sync is already running");
+      } else {
+        console.error("Failed to start a full sync:", err);
+        showError("Failed to start a full sync");
+      }
     } finally {
       setRefreshingCache(false);
     }
@@ -84,14 +115,17 @@ const ServerStatsSection = () => {
     try {
       setReprobingClips(true);
       setReprobeResult(null);
-      const data = await apiPost<{ checked: number; updated: number }>("/sync/reprobe-clips", {});
+      const data = await apiPost<{ checked: number; updated: number }>(
+        "/sync/reprobe-clips",
+        {}
+      );
       setReprobeResult({
         success: true,
         checked: data.checked,
         updated: data.updated,
       });
       // Reload stats to reflect updated counts
-      loadStats();
+      void loadStats();
     } catch (err) {
       console.error("Failed to re-probe clips:", err);
       setReprobeResult({
@@ -104,11 +138,10 @@ const ServerStatsSection = () => {
   };
 
   useEffect(() => {
-    loadStats();
-    // Auto-refresh every 10 seconds
-    const interval = setInterval(loadStats, 10000);
-    return () => clearInterval(interval);
-  }, []);
+    void loadStats();
+  }, [loadStats]);
+  // Auto-refresh every 10 seconds while the page is visible
+  useVisibleInterval(() => void loadStats(), 10_000);
 
   if (loading && !stats) {
     return null; // Don't show anything while initial load
@@ -117,6 +150,8 @@ const ServerStatsSection = () => {
   if (!stats) {
     return null; // Silently fail if stats unavailable
   }
+
+  const ungeneratedClips = stats.cache?.counts?.ungeneratedClips ?? 0;
 
   return (
     <Paper className="mb-6">
@@ -181,7 +216,7 @@ const ServerStatsSection = () => {
               Library Statistics
             </h3>
             <Button
-              onClick={refreshCache}
+              onClick={() => setConfirmingFullSync(true)}
               disabled={refreshingCache || stats.cache?.isRefreshing}
               variant="secondary"
               size="sm"
@@ -260,8 +295,7 @@ const ServerStatsSection = () => {
             <div className="flex items-center gap-2">
               {stats.cache?.lastRefreshed && (
                 <span>
-                  Last synced:{" "}
-                  {new Date(stats.cache.lastRefreshed).toLocaleString()}
+                  Last synced: {formatDateTime(stats.cache.lastRefreshed)}
                 </span>
               )}
             </div>
@@ -269,9 +303,12 @@ const ServerStatsSection = () => {
         </div>
 
         {/* Clips Maintenance Section - show if there are ungenerated clips */}
-        {isAdmin && (stats.cache?.counts?.ungeneratedClips ?? 0) > 0 && (
+        {isAdmin && ungeneratedClips > 0 && (
           <>
-            <hr className="my-6" style={{ borderColor: "var(--border-color)" }} />
+            <hr
+              className="my-6"
+              style={{ borderColor: "var(--border-color)" }}
+            />
             <div>
               <div className="flex items-center justify-between mb-4">
                 <div>
@@ -281,12 +318,17 @@ const ServerStatsSection = () => {
                   >
                     Clips Maintenance
                   </h3>
-                  <p className="text-xs mt-1" style={{ color: "var(--text-muted)" }}>
-                    {stats.cache!.counts.ungeneratedClips.toLocaleString()} clip{stats.cache!.counts.ungeneratedClips !== 1 ? "s" : ""} pending preview generation
+                  <p
+                    className="text-xs mt-1"
+                    style={{ color: "var(--text-muted)" }}
+                  >
+                    {ungeneratedClips.toLocaleString()} clip
+                    {ungeneratedClips !== 1 ? "s" : ""} pending preview
+                    generation
                   </p>
                 </div>
                 <Button
-                  onClick={reprobeClips}
+                  onClick={() => void reprobeClips()}
                   disabled={reprobingClips || stats.cache?.isRefreshing}
                   variant="secondary"
                   size="sm"
@@ -299,40 +341,38 @@ const ServerStatsSection = () => {
                   {reprobingClips ? "Re-probing..." : "Re-probe Clips"}
                 </Button>
               </div>
-              <div
-                className="p-3 rounded-lg text-sm"
-                style={{
-                  backgroundColor: "rgba(59, 130, 246, 0.1)",
-                  color: "var(--text-secondary)",
-                }}
-              >
-                <p>
-                  Some clips were synced before their previews were generated in Stash.
-                  Click &quot;Re-probe Clips&quot; to check if previews are now available.
-                </p>
-              </div>
+              <StatusMessage variant="info" title={null} className="text-sm">
+                Some clips were synced before their previews were generated in
+                Stash. Click &quot;Re-probe Clips&quot; to check if previews are
+                now available.
+              </StatusMessage>
               {reprobeResult && (
-                <div
-                  className="mt-3 p-3 rounded-lg text-sm"
-                  style={{
-                    backgroundColor: reprobeResult.success
-                      ? "rgba(34, 197, 94, 0.1)"
-                      : "rgba(239, 68, 68, 0.1)",
-                    color: reprobeResult.success
-                      ? "rgb(34, 197, 94)"
-                      : "rgb(239, 68, 68)",
-                  }}
-                >
-                  {reprobeResult.success
-                    ? `Checked ${reprobeResult.checked!.toLocaleString()} clips, ${reprobeResult.updated!.toLocaleString()} now have previews`
-                    : reprobeResult.message}
-                </div>
+                <StatusMessage
+                  variant={reprobeResult.success ? "success" : "error"}
+                  title={null}
+                  className="mt-3 text-sm"
+                  message={
+                    reprobeResult.success
+                      ? `Checked ${reprobeResult.checked.toLocaleString()} clips, ${reprobeResult.updated.toLocaleString()} now have previews`
+                      : reprobeResult.message
+                  }
+                />
               )}
             </div>
           </>
         )}
 
         <hr className="my-6" style={{ borderColor: "var(--border-color)" }} />
+
+        <ConfirmDialog
+          isOpen={confirmingFullSync}
+          title="Start a full sync?"
+          message="Peek fetches every item from every Stash instance again, then recomputes each user's content restrictions. On a large library this takes a while. The scheduled syncs already pick up changes, so a full sync is only needed when something looks out of date."
+          confirmText="Start Full Sync"
+          confirmStyle="primary"
+          onConfirm={() => void refreshCache()}
+          onClose={() => setConfirmingFullSync(false)}
+        />
 
         {/* Database */}
         <div className="mb-6">

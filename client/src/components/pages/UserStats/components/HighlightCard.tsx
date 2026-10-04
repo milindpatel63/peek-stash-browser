@@ -1,26 +1,29 @@
 // client/src/components/pages/UserStats/components/HighlightCard.tsx
-
 import { Link } from "react-router-dom";
-import { Paper } from "../../../ui/index";
+import type {
+  HighlightImage,
+  HighlightPerformer,
+  HighlightScene,
+} from "@peek/shared-types";
+import { useConfig } from "../../../../contexts/ConfigContext";
+import { getEntityPath } from "../../../../utils/entityLinks";
 import { getFilenameFromPath } from "../../../../utils/format";
+import { Paper } from "../../../ui/index";
 
-interface HighlightItem {
-  id: string;
-  name?: string;
-  title?: string;
-  filePath?: string;
-  imageUrl?: string;
-}
+type HighlightItem = HighlightScene | HighlightImage | HighlightPerformer;
 
 type EntityType = "scene" | "image" | "performer";
 
 interface Props {
   title: string;
   item: HighlightItem | null;
-  linkPrefix: string;
   statLabel: string;
   statValue: number;
   entityType?: EntityType;
+  /** Opens the item right here (a button) instead of linking to its page */
+  onOpen?: () => void;
+  /** The opener is working: the button waits */
+  opening?: boolean;
 }
 
 /**
@@ -30,11 +33,13 @@ interface Props {
  */
 const getDisplayName = (item: HighlightItem): string => {
   // Performers have name
-  if (item.name) return item.name;
+  if ("name" in item && item.name) return item.name;
   // Scenes/images have title
-  if (item.title) return item.title;
+  if ("title" in item && item.title) return item.title;
   // Fallback to file path basename for scenes/images
-  if (item.filePath) return getFilenameFromPath(item.filePath) || "Unknown";
+  if ("filePath" in item && item.filePath) {
+    return getFilenameFromPath(item.filePath) || "Unknown";
+  }
   return "Unknown";
 };
 
@@ -55,13 +60,62 @@ const getFallbackIcon = (entityType: EntityType): string => {
  * All cards use consistent 16/9 container height - portrait images are pillarboxed
  * @param {string} entityType - Type of entity for fallback icon (scene, image, performer)
  */
-const HighlightCard = ({ title, item, linkPrefix, statLabel, statValue, entityType = "scene" }: Props) => {
+const HighlightCard = ({
+  title,
+  item,
+  statLabel,
+  statValue,
+  entityType = "scene",
+  onOpen,
+  opening = false,
+}: Props) => {
+  const { hasMultipleInstances } = useConfig();
+
   if (!item) {
     return null;
   }
 
   const displayName = getDisplayName(item);
   const fallbackIcon = getFallbackIcon(entityType);
+
+  const content = (
+    <>
+      {/* Consistent 16/9 container for all cards - portrait images pillarboxed */}
+      <div
+        className="relative overflow-hidden flex items-center justify-center"
+        style={{
+          aspectRatio: "16/9",
+          backgroundColor: "var(--bg-secondary)",
+        }}
+      >
+        {item.imageUrl ? (
+          <img
+            src={item.imageUrl}
+            alt={displayName}
+            className="max-w-full max-h-full object-contain"
+          />
+        ) : (
+          <div
+            className="w-full h-full flex items-center justify-center"
+            style={{ color: "var(--text-muted)" }}
+          >
+            <span className="text-3xl">{fallbackIcon}</span>
+          </div>
+        )}
+      </div>
+      <div className="p-3">
+        <div
+          className="font-medium truncate"
+          style={{ color: "var(--text-primary)" }}
+        >
+          {displayName}
+        </div>
+        <div className="text-sm" style={{ color: "var(--text-muted)" }}>
+          {statValue.toLocaleString()} {statLabel}
+        </div>
+      </div>
+    </>
+  );
 
   return (
     <Paper padding="none" className="overflow-hidden">
@@ -76,45 +130,24 @@ const HighlightCard = ({ title, item, linkPrefix, statLabel, statValue, entityTy
           {title}
         </h3>
       </div>
-      <Link
-        to={`${linkPrefix}/${item.id}`}
-        className="block transition-colors hover:bg-[var(--bg-secondary)]"
-      >
-        {/* Consistent 16/9 container for all cards - portrait images pillarboxed */}
-        <div
-          className="relative overflow-hidden flex items-center justify-center"
-          style={{
-            aspectRatio: "16/9",
-            backgroundColor: "var(--bg-secondary)",
-          }}
+      {onOpen ? (
+        <button
+          type="button"
+          onClick={onOpen}
+          disabled={opening}
+          aria-busy={opening}
+          className="block w-full text-left transition-colors hover:bg-[var(--bg-secondary)] disabled:cursor-wait disabled:opacity-70"
         >
-          {item.imageUrl ? (
-            <img
-              src={item.imageUrl}
-              alt={displayName}
-              className="max-w-full max-h-full object-contain"
-            />
-          ) : (
-            <div
-              className="w-full h-full flex items-center justify-center"
-              style={{ color: "var(--text-muted)" }}
-            >
-              <span className="text-3xl">{fallbackIcon}</span>
-            </div>
-          )}
-        </div>
-        <div className="p-3">
-          <div
-            className="font-medium truncate"
-            style={{ color: "var(--text-primary)" }}
-          >
-            {displayName}
-          </div>
-          <div className="text-sm" style={{ color: "var(--text-muted)" }}>
-            {statValue.toLocaleString()} {statLabel}
-          </div>
-        </div>
-      </Link>
+          {content}
+        </button>
+      ) : (
+        <Link
+          to={getEntityPath(entityType, item, hasMultipleInstances)}
+          className="block transition-colors hover:bg-[var(--bg-secondary)]"
+        >
+          {content}
+        </Link>
+      )}
     </Paper>
   );
 };

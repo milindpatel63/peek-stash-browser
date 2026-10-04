@@ -1,20 +1,10 @@
 // client/src/components/pages/UserStats/components/LibraryOverview.tsx
-
+import type { LibraryStats } from "@peek/shared-types";
 import { ENTITY_ICONS } from "../../../../constants/entityIcons";
 import StatCard from "./StatCard";
 
-interface LibraryCounts {
-  sceneCount: number;
-  performerCount: number;
-  studioCount: number;
-  tagCount: number;
-  galleryCount: number;
-  imageCount: number;
-  clipCount: number;
-}
-
 interface Props {
-  library: LibraryCounts;
+  library: LibraryStats;
 }
 
 /**
@@ -30,12 +20,32 @@ const LibraryOverview = ({ library }: Props) => {
   const ClipIcon = ENTITY_ICONS.clip;
 
   const stats = [
-    { label: "Scenes", value: library.sceneCount, icon: <SceneIcon size={20} /> },
-    { label: "Performers", value: library.performerCount, icon: <PerformerIcon size={20} /> },
-    { label: "Studios", value: library.studioCount, icon: <StudioIcon size={20} /> },
+    {
+      label: "Scenes",
+      value: library.sceneCount,
+      icon: <SceneIcon size={20} />,
+    },
+    {
+      label: "Performers",
+      value: library.performerCount,
+      icon: <PerformerIcon size={20} />,
+    },
+    {
+      label: "Studios",
+      value: library.studioCount,
+      icon: <StudioIcon size={20} />,
+    },
     { label: "Tags", value: library.tagCount, icon: <TagIcon size={20} /> },
-    { label: "Galleries", value: library.galleryCount, icon: <GalleryIcon size={20} /> },
-    { label: "Images", value: library.imageCount, icon: <ImageIcon size={20} /> },
+    {
+      label: "Galleries",
+      value: library.galleryCount,
+      icon: <GalleryIcon size={20} />,
+    },
+    {
+      label: "Images",
+      value: library.imageCount,
+      icon: <ImageIcon size={20} />,
+    },
     { label: "Clips", value: library.clipCount, icon: <ClipIcon size={20} /> },
   ];
 

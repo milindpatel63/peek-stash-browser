@@ -1,16 +1,19 @@
 // client/src/hooks/__tests__/useNavigationState.test.jsx
-import { renderHook } from "@testing-library/react";
-import { describe, it, expect } from "vitest";
 import { MemoryRouter } from "react-router-dom";
+import { renderHook } from "@testing-library/react";
+import { describe, expect, it } from "vitest";
 import { useNavigationState } from "../../src/hooks/useNavigationState";
 
 // Wrapper to provide router context with location state
-const createWrapper = (initialEntries = ["/"], state: Record<string, unknown> | null = null) => {
+const createWrapper = (
+  initialEntries = ["/"],
+  state: Record<string, unknown> | null = null
+) => {
   const entries = state
     ? [{ pathname: initialEntries[0], state }]
     : initialEntries;
   return ({ children }: { children: React.ReactNode }) => (
-    <MemoryRouter initialEntries={entries as any}>{children}</MemoryRouter>
+    <MemoryRouter initialEntries={entries}>{children}</MemoryRouter>
   );
 };
 

@@ -1,5 +1,7 @@
-import { SearchableGrid } from "../ui/SearchableGrid";
+import type { ComponentProps } from "react";
+import { makeCompositeKey } from "../../utils/compositeKey";
 import { GalleryCard } from "../cards/index";
+import { SearchableGrid } from "../ui/SearchableGrid";
 
 interface Props {
   lockedFilters?: Record<string, unknown>;
@@ -24,13 +26,16 @@ const GalleryGrid = ({
       emptyMessage={emptyMessage}
       defaultSort="date"
       density={density}
-      renderItem={(gallery: any, _index: number, { onHideSuccess }: any) => (
-        <GalleryCard
-          key={gallery.id}
-          gallery={gallery}
-          onHideSuccess={() => onHideSuccess(gallery.id)}
-        />
-      )}
+      renderItem={(item, _index, { onHideSuccess }) => {
+        const gallery = item as ComponentProps<typeof GalleryCard>["gallery"];
+        return (
+          <GalleryCard
+            key={makeCompositeKey(gallery.id, gallery.instanceId)}
+            gallery={gallery}
+            onHideSuccess={onHideSuccess}
+          />
+        );
+      }}
       {...rest}
     />
   );

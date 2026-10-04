@@ -1,5 +1,10 @@
-import { describe, it, expect } from "vitest";
-import { formatDate, formatRelativeTime } from "../../src/utils/date";
+import { untrusted } from "@tests/helpers/untrusted";
+import { describe, expect, it } from "vitest";
+import {
+  formatDate,
+  formatDateTime,
+  formatRelativeTime,
+} from "../../src/utils/date";
 
 describe("date utilities", () => {
   describe("formatDate", () => {
@@ -25,14 +30,31 @@ describe("date utilities", () => {
     });
 
     it("returns 'Unknown' for null-like input", () => {
-      expect(formatDate(null as any)).toBe("Unknown");
-      expect(formatDate(undefined as any)).toBe("Unknown");
+      expect(formatDate(untrusted(null))).toBe("Unknown");
+      expect(formatDate(untrusted(undefined))).toBe("Unknown");
     });
 
     it("handles date-only string for each month", () => {
       expect(formatDate("2024-02-01")).toBe("Feb 1, 2024");
       expect(formatDate("2024-07-31")).toBe("Jul 31, 2024");
       expect(formatDate("2024-11-15")).toBe("Nov 15, 2024");
+    });
+  });
+
+  describe("formatDateTime", () => {
+    it("formats a timestamp with its time", () => {
+      const result = formatDateTime("2024-06-15T10:30:00Z");
+      expect(result).toBe(new Date("2024-06-15T10:30:00Z").toLocaleString());
+    });
+
+    it("takes a Date", () => {
+      const date = new Date("2024-06-15T10:30:00Z");
+      expect(formatDateTime(date)).toBe(date.toLocaleString());
+    });
+
+    it("gives the empty text for nothing", () => {
+      expect(formatDateTime(null)).toBe("Unknown");
+      expect(formatDateTime(undefined, { empty: "Never" })).toBe("Never");
     });
   });
 
@@ -53,7 +75,9 @@ describe("date utilities", () => {
     });
 
     it("returns hours ago for timestamps earlier today", () => {
-      const threeHoursAgo = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
+      const threeHoursAgo = new Date(
+        Date.now() - 3 * 60 * 60 * 1000
+      ).toISOString();
       expect(formatRelativeTime(threeHoursAgo)).toBe("3 hours ago");
     });
 

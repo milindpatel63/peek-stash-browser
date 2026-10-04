@@ -9,6 +9,7 @@ Peek automatically tracks your viewing progress and lets you resume playback exa
 Peek tracks your progress automatically while you watch:
 
 - **Progress is saved every few seconds** during playback
+- **Progress is saved when you leave**: changing scene, switching to another tab or app, or closing the page sends the seconds since the last save, so the last stretch you watched is not lost
 - **No manual action needed** - just watch normally
 - **Per-user tracking** - each user has their own watch history
 - **Syncs across devices** - resume on any device where you're logged in
@@ -18,36 +19,33 @@ Peek tracks your progress automatically while you watch:
 For each scene you watch, Peek remembers:
 
 - **Current position** - Exact timestamp where you stopped
-- **Total progress** - Percentage watched (e.g., 65% complete)
+- **Progress** - Shown as a bar on the scene's thumbnail. It is worked out from your resume point and the scene's length, not stored by itself
 - **Last watched date** - When you last viewed this scene
-- **Watch count** - How many times you've watched it
+- **Watch count** - How many times you've watched it. A watch counts as a play once you have watched the **Minimum Play Percent** of the scene (20% by default). Change it in Settings → User Preferences → Playback
+- **Watch time** - How long you have spent watching it
+
+If you stop at 98% of the scene or later, Peek takes it as finished and clears the resume point, so the scene starts from the beginning next time.
 
 ## Resume Playback
 
 ### Automatic Resume
 
-When you click Play on a scene you've partially watched:
+A scene resumes where you left off when you open it from **Continue Watching** (Home) or from the **Watch History** page:
 
-1. Video player opens
-2. You see a **"Resume from [timestamp]"** notification
-3. Player automatically jumps to where you left off
-4. Click **"Start from beginning"** if you prefer to restart
+1. Click Play on the scene
+2. The player opens and jumps to your last position
+3. The scenes after it in that queue resume the same way, each from its own last position (a scene you have not started plays from the beginning)
 
-!!! tip "Quick Resume"
-    The resume prompt appears for 5 seconds. If you do nothing, playback continues from your last position automatically!
+A scene opened from anywhere else (a scene card, a search or a playlist) starts from the beginning, even if you have watched part of it. Your saved position is replaced as you watch it again.
 
 ### From Scene Cards
 
 Scene cards show your progress visually:
 
-- **Progress bar** at the bottom of the thumbnail
-- **Percentage indicator** (e.g., "65% watched")
-- **Blue progress bar** fills from left to right as you watch
+- A thin **green progress bar** along the bottom of the thumbnail fills from left to right to where you stopped
+- Hover the bar to see "Resume from" and the time you stopped at
 
-**To resume from a scene card:**
-1. Find the scene (look for the progress bar)
-2. Click Play
-3. Playback resumes automatically
+A card's progress bar shows where you stopped, but playing from the card starts at the beginning. To pick up where you left off, use Continue Watching or Watch History.
 
 ## Continue Watching
 
@@ -58,10 +56,12 @@ The **Continue Watching** section shows all partially-watched scenes:
 **Location:** Home page (top section)
 
 **What appears here:**
-- Scenes you've started but not finished
+- Scenes you've started but not finished: you stopped before the last 10% of the scene, however little you had watched
 - Sorted by most recently watched
 - Shows progress percentage
-- Limited to your last 20 in-progress scenes
+- Up to 12 scenes, always filled from your whole history (a finished, deleted or hidden scene never takes a slot)
+
+**See more:** the link at the end of the row opens the [Watch History](#viewing-your-history) page.
 
 **To resume:**
 1. Go to Home page
@@ -75,47 +75,54 @@ The **Continue Watching** section shows all partially-watched scenes:
 ### When Scenes Disappear from Continue Watching
 
 A scene is removed from Continue Watching when:
-- You **watch to completion** (95%+ watched counts as complete)
-- You **manually clear watch history** for that scene
-- It falls outside your **last 20 in-progress scenes**
+- You **watch it to the end**: your last session stopped in the final 10% of the scene
+- You **clear your watch history**
+- It is **hidden** or restricted for you
+- Twelve scenes you watched more recently are in progress
 
 ## Managing Watch History
 
 ### Viewing Your History
 
-**Full watch history coming in future update.** Currently:
+Open **Watch History** from the navigation (or the **See more** link on Continue Watching). It lists every scene you have watched, 24 to a page, with page controls under the list.
 
-- View in-progress scenes via **Continue Watching** on home page
-- See progress bars on scene cards throughout the app
-- Check scene detail page for watch progress
+**Filter:**
+
+- **All** - every scene you have played, watched for any length of time, or left with a resume point
+- **In Progress** - scenes you stopped before the last 10% of the scene, however little you had watched (the same list as Continue Watching, and the same as the **In progress** filter on the Scenes page)
+- **Completed** - scenes you played at least once and whose last session finished, or stopped within the final 10% of the scene (the same as the **Watched** filter on the Scenes page)
+
+**Sort:** Recently Watched, Most Watched (play count) or Longest Duration (time you watched).
+
+!!! info "One rule everywhere"
+    The Watch History tabs, Continue Watching and the Scenes page's **Watched** and **In Progress** filters (Yes, No or Any) use the same two rules, so they list the same scenes. A scene is in progress when you have a resume point before its last 10%, or when its length is unknown; it is watched when you have played it and your last session ended in the final 10%. A scene you never opened is neither, so **Watched: No** lists it. Before 3.4.0-beta.8 the History page's In Progress tab also asked for 2% watched, so it left out scenes you had barely started (on one library, 897 scenes against 1,723 now); it now follows the same rule as Continue Watching. Your own history only counts: another user's progress never marks a scene for you.
+
+The header shows the number of scenes in the view and **Total watch time** for the whole view, not just the page you are on. The filter, sort and page are in the address, so the Back button steps through your choices and a page can be bookmarked.
+
+You can also see progress bars on scene cards throughout the app and watch progress on the scene detail page.
 
 ### Marking as Watched
 
-To mark a scene as fully watched without watching it:
+A scene counts as completed when you have played it and your last session ended in the final 10%:
 
 1. Open the scene detail page
-2. Seek to the end of the video (last 5%)
-3. Let it play for a few seconds
-4. Scene is marked as watched
+2. Play it to the end, or seek into the last 10% and let it play for a few seconds
+3. The scene appears under **Completed** in Watch History
 
-Or manually skip to 95%+ completion to trigger "watched" status.
+### Removing an O
+
+Pressed the O button by mistake? Choose **Remove last O** in a scene card's menu (⋮), or in the menu beside the O button on the scene page. It takes away your newest O on that scene, and the performer, studio and tag totals built from it. The item shows only while the scene's O count is above 0. With Sync to Stash on, Stash's newest O on the scene is removed too.
 
 ### Clearing Watch History
 
-**For a single scene:**
+Peek has no clear for a single scene. To clear everything:
 
-1. Open the scene detail page
-2. Click the **⋮** (three dots) menu
-3. Select **"Clear watch history"**
-4. Progress is reset to 0%
+1. Go to **Watch History**
+2. Click **Clear History**
+3. Confirm the action
+4. All scene progress is reset, and Home's Continue Watching and your stats refresh
 
-**For all scenes:**
-
-1. Go to **Settings** → **My Settings**
-2. Scroll to **Watch History** section
-3. Click **"Clear all watch history"**
-4. Confirm the action
-5. All progress is reset
+Clear History clears **scene history only**: plays, watch time, resume points and O counts, and the performer, studio and tag totals built from them. Image views and image O counts are kept. It cannot be undone.
 
 !!! warning "Cannot Be Undone"
     Clearing watch history is permanent. You cannot restore cleared progress.
@@ -131,12 +138,14 @@ Watch history is stored in Peek's database:
 - **Progress position** - Timestamp (in seconds)
 - **Last watched date** - When you last viewed it
 - **Watch count** - Total number of views
+- **Watch time** - Total time you spent watching
 
 ### What's NOT Stored
 
 - **No video file access logs** - Peek doesn't log file system access
-- **No sharing with Stash** - Watch history stays in Peek only
-- **No external tracking** - History never leaves your Peek instance
+- **No analytics or tracking services** - Peek reports your viewing to no outside service
+
+Your history stays in Peek, with one exception. If an admin has turned on **Sync to Stash** for your account (see [Sync to Stash](user-management.md#sync-to-stash-export)), Peek also sends your plays, watch time, resume points and O counts to your Stash server as you watch. Stash keeps one set of these for everyone who syncs to it, so with several users syncing, their activity adds up there. Without Sync to Stash, nothing about what you watch leaves Peek.
 
 ### Privacy Controls
 
@@ -161,14 +170,14 @@ Combine watch history with playlists:
 2. Add scenes you plan to watch later
 3. Watch them at your own pace
 4. Progress tracked automatically
-5. Resume from **Continue Watching** or the playlist
+5. Resume from **Continue Watching**; a playlist plays each scene from the beginning
 
 ### Track Rewatches
 
 Want to rewatch a favorite scene?
 
-1. Click Play on an already-watched scene
-2. Choose **"Start from beginning"** when prompted
+1. Open an already-watched scene from its card or the scene page (these start from the beginning)
+2. Watch it again
 3. Watch count increments
 4. New progress tracked
 
@@ -177,16 +186,16 @@ Want to rewatch a favorite scene?
 ### Resume not working
 
 **Solution:**
+- Open the scene from **Continue Watching** or **Watch History**: a scene opened from a card, a search or a playlist starts from the beginning
 - Make sure you're logged in (watch history is per-user)
-- Check that you watched for at least 10 seconds (minimum tracking threshold)
+- Peek saves your position every 10 seconds you play, and again when you leave the scene, switch tabs or close the page, so even a short stretch is kept
 - Verify you're using the same user account
 - Try refreshing the page
 
 ### Progress bar not showing
 
 **Solution:**
-- Progress may not appear if you only watched a few seconds
-- Progress bars require at least 5% completion to display
+- The bar shows only where you have a resume point: a scene you have not started, or watched to its last 2%, has none
 - Try playing the video for longer
 - Clear browser cache if progress seems stuck
 
@@ -194,7 +203,7 @@ Want to rewatch a favorite scene?
 
 **Possible reasons:**
 - You haven't started watching any scenes yet
-- All your in-progress scenes are completed
+- All your in-progress scenes are completed (they are under **Completed** in Watch History)
 - You cleared your watch history
 - You're using a different user account
 

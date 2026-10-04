@@ -8,6 +8,7 @@
  * format ("entityId:instanceId") at compile time, preventing multi-instance
  * collision bugs (#361, #368, #390, #400, #401).
  */
+import type { InstanceAwareId } from "@peek/shared-types/instanceAwareId.js";
 import type {
   GalleryFilterType as BaseGalleryFilterType,
   GroupFilterType as BaseGroupFilterType,
@@ -16,7 +17,6 @@ import type {
   StudioFilterType as BaseStudioFilterType,
   TagFilterType as BaseTagFilterType,
 } from "../graphql/types.js";
-import type { InstanceAwareId } from "@peek/shared-types/instanceAwareId.js";
 
 /** Entity reference filter field with branded composite keys */
 export interface EntityRefFilter {
@@ -37,7 +37,6 @@ export type PeekSceneFilter = BaseSceneFilterType & {
   groups?: EntityRefFilter;
   galleries?: EntityRefFilter;
   favorite?: boolean;
-  last_o_at?: { value?: string; value2?: string; modifier?: string };
   studio_favorite?: boolean;
   tag_favorite?: boolean;
   performer_favorite?: boolean;
@@ -48,8 +47,13 @@ export type PeekSceneFilter = BaseSceneFilterType & {
  * Peek Performer Filter
  * Adds custom Peek filter fields to base Stash performer filters.
  * Entity reference fields override base types with InstanceAwareId[].
+ * `career_length` is omitted from the base: Stash's is a string criterion,
+ * Peek's a numeric range in years.
  */
-export type PeekPerformerFilter = BasePerformerFilterType & {
+export type PeekPerformerFilter = Omit<
+  BasePerformerFilterType,
+  "career_length"
+> & {
   ids?: EntityRefFilter;
   tags?: EntityRefFilter;
   favorite?: boolean;
@@ -90,8 +94,10 @@ export type PeekStudioFilter = BaseStudioFilterType & {
 /**
  * Peek Tag Filter
  * Adds custom Peek filter fields to base Stash tag filters.
+ * `scenes_filter` is omitted from the base: Stash's is a full scene filter
+ * whose `id` is an integer criterion, Peek's takes composite scene and group ids.
  */
-export type PeekTagFilter = BaseTagFilterType & {
+export type PeekTagFilter = Omit<BaseTagFilterType, "scenes_filter"> & {
   ids?: EntityRefFilter;
   favorite?: boolean;
   instance_id?: string;
@@ -127,7 +133,7 @@ export type PeekGalleryFilter = BaseGalleryFilterType & {
  * Peek Group Filter
  * Adds custom Peek filter fields to base Stash group filters.
  */
-export type PeekGroupFilter = BaseGroupFilterType & {
+export type PeekGroupFilter = Omit<BaseGroupFilterType, "containing_groups"> & {
   ids?: EntityRefFilter;
   tags?: EntityRefFilter;
   studios?: EntityRefFilter;
@@ -135,4 +141,9 @@ export type PeekGroupFilter = BaseGroupFilterType & {
   instance_id?: string;
   scenes?: EntityRefFilter;
   scene_count?: { value?: number; value2?: number; modifier?: string };
+  /**
+   * Direct sub-groups of these groups (depth 0, as the card counts them); it
+   * replaces Stash's hierarchical form, which takes a depth
+   */
+  containing_groups?: EntityRefFilter;
 };

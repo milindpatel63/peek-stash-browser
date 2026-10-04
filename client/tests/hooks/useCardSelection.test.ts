@@ -1,7 +1,24 @@
 // client/src/hooks/__tests__/useCardSelection.test.js
-import { renderHook, act } from "@testing-library/react";
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import type { MouseEvent, TouchEvent } from "react";
+import { act, renderHook } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useCardSelection } from "../../src/hooks/useCardSelection";
+
+/** A mouse event with only the fields the hook reads */
+const mouseEvent = (
+  fields: Partial<
+    Pick<MouseEvent, "target" | "currentTarget" | "preventDefault" | "shiftKey">
+  >
+) => fields as MouseEvent;
+
+/**
+ * A touch event with only the target and touch points the hook reads; the
+ * points are a plain array, which the hook reads by index like a TouchList.
+ */
+const touchEvent = (fields: {
+  target?: EventTarget;
+  touches: Array<Pick<Touch, "clientX" | "clientY">>;
+}) => fields as unknown as TouchEvent;
 
 describe("useCardSelection", () => {
   beforeEach(() => {
@@ -26,7 +43,11 @@ describe("useCardSelection", () => {
 
     // Simulate mousedown
     act(() => {
-      result.current.selectionHandlers.onMouseDown({ target: document.body } as any);
+      result.current.selectionHandlers.onMouseDown(
+        mouseEvent({
+          target: document.body,
+        })
+      );
     });
 
     // Advance 500ms
@@ -46,7 +67,11 @@ describe("useCardSelection", () => {
     );
 
     act(() => {
-      result.current.selectionHandlers.onMouseDown({ target: document.body } as any);
+      result.current.selectionHandlers.onMouseDown(
+        mouseEvent({
+          target: document.body,
+        })
+      );
     });
 
     act(() => {
@@ -73,10 +98,12 @@ describe("useCardSelection", () => {
     );
 
     act(() => {
-      result.current.selectionHandlers.onTouchStart({
-        target: document.body,
-        touches: [{ clientX: 100, clientY: 100 }],
-      } as any);
+      result.current.selectionHandlers.onTouchStart(
+        touchEvent({
+          target: document.body,
+          touches: [{ clientX: 100, clientY: 100 }],
+        })
+      );
     });
 
     act(() => {
@@ -84,9 +111,11 @@ describe("useCardSelection", () => {
     });
 
     act(() => {
-      result.current.selectionHandlers.onTouchMove({
-        touches: [{ clientX: 115, clientY: 100 }],
-      } as any);
+      result.current.selectionHandlers.onTouchMove(
+        touchEvent({
+          touches: [{ clientX: 115, clientY: 100 }],
+        })
+      );
     });
 
     act(() => {
@@ -135,11 +164,13 @@ describe("useCardSelection", () => {
     document.body.appendChild(link);
 
     act(() => {
-      result.current.handleNavigationClick({
-        preventDefault,
-        target: button,
-        currentTarget: link,
-      } as any);
+      result.current.handleNavigationClick(
+        mouseEvent({
+          preventDefault,
+          target: button,
+          currentTarget: link,
+        })
+      );
     });
 
     // Should prevent navigation when click came from button inside link
@@ -164,11 +195,13 @@ describe("useCardSelection", () => {
     document.body.appendChild(link);
 
     act(() => {
-      result.current.handleNavigationClick({
-        preventDefault,
-        target: link,
-        currentTarget: link,
-      } as any);
+      result.current.handleNavigationClick(
+        mouseEvent({
+          preventDefault,
+          target: link,
+          currentTarget: link,
+        })
+      );
     });
 
     // Should NOT prevent navigation - this is a normal link click
@@ -188,11 +221,30 @@ describe("useCardSelection", () => {
     );
 
     act(() => {
-      result.current.handleNavigationClick({ preventDefault } as any);
+      result.current.handleNavigationClick(
+        mouseEvent({ preventDefault, shiftKey: false })
+      );
     });
 
     expect(preventDefault).toHaveBeenCalled();
-    expect(onToggleSelect).toHaveBeenCalledWith(entity);
+    expect(onToggleSelect).toHaveBeenCalledWith(entity, { range: false });
+  });
+
+  it("a shift-click in selection mode asks for a range", () => {
+    const onToggleSelect = vi.fn();
+    const entity = { id: "1" };
+
+    const { result } = renderHook(() =>
+      useCardSelection({ entity, selectionMode: true, onToggleSelect })
+    );
+
+    act(() => {
+      result.current.handleNavigationClick(
+        mouseEvent({ preventDefault: vi.fn(), shiftKey: true })
+      );
+    });
+
+    expect(onToggleSelect).toHaveBeenCalledWith(entity, { range: true });
   });
 
   it("long-press selection does not trigger navigation - click after long-press is blocked", () => {
@@ -206,7 +258,11 @@ describe("useCardSelection", () => {
 
     // Simulate long-press: mousedown, wait 500ms for selection to fire
     act(() => {
-      result.current.selectionHandlers.onMouseDown({ target: document.body } as any);
+      result.current.selectionHandlers.onMouseDown(
+        mouseEvent({
+          target: document.body,
+        })
+      );
     });
 
     act(() => {
@@ -220,7 +276,7 @@ describe("useCardSelection", () => {
     // Now the click event fires (browser behavior after mouseup)
     // This should be blocked to prevent navigation
     act(() => {
-      result.current.handleNavigationClick({ preventDefault } as any);
+      result.current.handleNavigationClick(mouseEvent({ preventDefault }));
     });
 
     expect(preventDefault).toHaveBeenCalled();
@@ -228,5 +284,98 @@ describe("useCardSelection", () => {
     expect(onToggleSelect).toHaveBeenCalledTimes(1);
     // isLongPressing should be reset
     expect(result.current.isLongPressing).toBe(false);
+  });
+
+  describe("context menu while a touch long press is armed", () => {
+    const contextMenu = () => {
+      const preventDefault = vi.fn();
+      return {
+        event: { preventDefault } as unknown as MouseEvent,
+        preventDefault,
+      };
+    };
+
+    it("a long press on a card suppresses the context menu", () => {
+      const onToggleSelect = vi.fn();
+      const { result } = renderHook(() =>
+        useCardSelection({
+          entity: { id: "1" },
+          selectionMode: false,
+          onToggleSelect,
+        })
+      );
+
+      act(() => {
+        result.current.selectionHandlers.onTouchStart(
+          touchEvent({
+            target: document.body,
+            touches: [{ clientX: 10, clientY: 10 }],
+          })
+        );
+      });
+      // The browser's own long-press menu comes at about the same time as ours
+      act(() => {
+        vi.advanceTimersByTime(500);
+      });
+      const { event, preventDefault } = contextMenu();
+      result.current.selectionHandlers.onContextMenu(event);
+
+      expect(onToggleSelect).toHaveBeenCalledTimes(1);
+      expect(preventDefault).toHaveBeenCalledTimes(1);
+    });
+
+    it("a press that moved on or ended leaves the context menu alone", () => {
+      const { result } = renderHook(() =>
+        useCardSelection({ entity: { id: "1" }, selectionMode: false })
+      );
+
+      act(() => {
+        result.current.selectionHandlers.onTouchStart(
+          touchEvent({
+            target: document.body,
+            touches: [{ clientX: 10, clientY: 10 }],
+          })
+        );
+      });
+      act(() => {
+        result.current.selectionHandlers.onTouchEnd();
+      });
+      const ended = contextMenu();
+      result.current.selectionHandlers.onContextMenu(ended.event);
+      expect(ended.preventDefault).not.toHaveBeenCalled();
+
+      act(() => {
+        result.current.selectionHandlers.onTouchStart(
+          touchEvent({
+            target: document.body,
+            touches: [{ clientX: 10, clientY: 10 }],
+          })
+        );
+      });
+      act(() => {
+        result.current.selectionHandlers.onTouchMove(
+          touchEvent({ touches: [{ clientX: 40, clientY: 10 }] })
+        );
+      });
+      const moved = contextMenu();
+      result.current.selectionHandlers.onContextMenu(moved.event);
+      expect(moved.preventDefault).not.toHaveBeenCalled();
+    });
+
+    it("a mouse right-click keeps its context menu", () => {
+      const { result } = renderHook(() =>
+        useCardSelection({ entity: { id: "1" }, selectionMode: false })
+      );
+
+      act(() => {
+        result.current.selectionHandlers.onMouseDown(
+          mouseEvent({ target: document.body })
+        );
+      });
+      const { event, preventDefault } = contextMenu();
+      result.current.selectionHandlers.onContextMenu(event);
+
+      expect(preventDefault).not.toHaveBeenCalled();
+    });
   });
 });

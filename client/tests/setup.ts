@@ -9,10 +9,13 @@
 import { vi } from "vitest";
 import "@testing-library/jest-dom";
 
-// Mock window.matchMedia (not available in happy-dom)
+// Mock window.matchMedia (not available in happy-dom). The implementation
+// is the mock's own, so `vi.restoreAllMocks()` in a test file keeps it (a
+// `mockImplementation` would be dropped, and every `useMediaQuery` reader,
+// the list controls among them, would then throw)
 Object.defineProperty(window, "matchMedia", {
   writable: true,
-  value: vi.fn().mockImplementation((query) => ({
+  value: vi.fn((query: string) => ({
     matches: false,
     media: query,
     onchange: null,
@@ -34,7 +37,8 @@ class MockIntersectionObserver {
   unobserve() {}
   disconnect() {}
 }
-globalThis.IntersectionObserver = MockIntersectionObserver as unknown as typeof IntersectionObserver;
+globalThis.IntersectionObserver =
+  MockIntersectionObserver as unknown as typeof IntersectionObserver;
 
 // Mock ResizeObserver (used by some UI components)
 class MockResizeObserver {
@@ -46,7 +50,8 @@ class MockResizeObserver {
   unobserve() {}
   disconnect() {}
 }
-globalThis.ResizeObserver = MockResizeObserver as unknown as typeof ResizeObserver;
+globalThis.ResizeObserver =
+  MockResizeObserver as unknown as typeof ResizeObserver;
 
 // Mock scrollIntoView (not implemented in happy-dom)
 Element.prototype.scrollIntoView = vi.fn();

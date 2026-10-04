@@ -1,230 +1,153 @@
-import { render, screen } from "@testing-library/react";
-import { describe, it, expect, vi, beforeEach } from "vitest";
+/**
+ * The Collections page on the list page shell: its title, its error and
+ * initializing states, its cards and its stale results. The list hook is
+ * mocked; the controls and pagination are the real ones.
+ */
+import { screen } from "@testing-library/react";
+import { renderListPage } from "@tests/testUtils";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { ApiError } from "@/api/client";
+import type * as ApiHooks from "@/api/hooks";
+import Groups from "@/components/pages/Groups";
 import { usePageTitle } from "@/hooks/usePageTitle";
 
-// Mock react-router-dom
-vi.mock("react-router-dom", async () => {
-  const actual = await vi.importActual("react-router-dom");
-  return {
-    ...actual,
-    useNavigate: vi.fn(() => vi.fn()),
-    useSearchParams: vi.fn(() => [new URLSearchParams(), vi.fn()]),
-  };
-});
+interface MockListResult {
+  data: Record<string, unknown> | undefined;
+  isPending: boolean;
+  error: Error | null;
+  isPlaceholderData: boolean;
+  refetch: () => void;
+}
 
-// Mock hooks
+const { mockList } = vi.hoisted(() => ({
+  mockList: vi.fn<(params: unknown) => MockListResult>(),
+}));
+
 vi.mock("@/hooks/usePageTitle", () => ({ usePageTitle: vi.fn() }));
-vi.mock("@/hooks/useGridPageTVNavigation", () => ({
-  useGridPageTVNavigation: vi.fn(() => ({
-    isTVMode: false,
-    searchControlsProps: {},
-    gridItemProps: () => ({ ref: vi.fn(), className: "", tabIndex: -1 }),
-    tvNavigation: { currentZone: "grid", isZoneActive: vi.fn() },
-    gridNavigation: { setItemRef: vi.fn(), isFocused: vi.fn() },
-    paginationHandlerRef: { current: null },
-  })),
+vi.mock("@/api/hooks", async (importOriginal) => ({
+  ...(await importOriginal<typeof ApiHooks>()),
+  useGroupList: (params: unknown) => mockList(params),
 }));
-vi.mock("@/hooks/useGridColumns", () => ({ useGridColumns: vi.fn(() => 6) }));
-vi.mock("@/hooks/useFocusTrap", () => ({ useInitialFocus: vi.fn() }));
-vi.mock("@/hooks/useTableColumns", () => ({
-  useTableColumns: vi.fn(() => ({
-    allColumns: [],
-    visibleColumns: [],
-    visibleColumnIds: [],
-    columnOrder: [],
-    toggleColumn: vi.fn(),
-    hideColumn: vi.fn(),
-    moveColumn: vi.fn(),
-    getColumnConfig: vi.fn(() => ({})),
-  })),
+vi.mock("@/api", () => ({
+  apiGet: vi.fn().mockResolvedValue({}),
+  apiPost: vi.fn().mockResolvedValue({}),
+  libraryApi: {},
 }));
-vi.mock("@/contexts/ConfigContext", () => ({
-  useConfig: vi.fn(() => ({ hasMultipleInstances: false })),
-}));
-vi.mock("@/constants/grids", () => ({
-  getGridClasses: vi.fn(() => "grid-classes"),
-}));
-vi.mock("@/utils/entityLinks", () => ({
-  getEntityPath: vi.fn(() => "/groups/1"),
-}));
-
-// Mock API
-const mockUseGroupList = vi.fn(() => ({
-  data: null,
-  isLoading: false,
-  error: null,
-}));
-vi.mock("@/api/hooks", () => ({
-  useGroupList: (...args: unknown[]) => mockUseGroupList(...args),
-}));
-vi.mock("@/api/client", () => ({
-  ApiError: class ApiError extends Error {
-    isInitializing = false;
-    constructor(message: string, isInitializing = false) {
-      super(message);
-      this.isInitializing = isInitializing;
-    }
-  },
-}));
-vi.mock("@/api", () => ({}));
-
-// Mock child components
-vi.mock("@/components/ui/index", () => ({
-  SearchControls: (props: Record<string, unknown>) => {
-    const { children, onQueryChange, ...rest } = props;
-    const React = require("react");
-    React.useEffect(() => {
-      if (typeof onQueryChange === "function") {
-        onQueryChange({ filter: {} });
-      }
-    }, [onQueryChange]);
-    return (
-      <div data-testid="search-controls" data-artifact-type={rest.artifactType}>
-        {typeof children === "function"
-          ? (children as Function)({
-              viewMode: "grid",
-              gridDensity: "medium",
-              sortField: "name",
-              sortDirection: "ASC",
-              onSort: vi.fn(),
-            })
-          : children}
-      </div>
-    );
-  },
-  PageLayout: ({ children }: Record<string, unknown>) => (
-    <div data-testid="page-layout">{children as React.ReactNode}</div>
-  ),
-  PageHeader: ({ title, subtitle }: Record<string, unknown>) => (
-    <div data-testid="page-header">
-      {title as string}
-      {subtitle && <span>{subtitle as string}</span>}
-    </div>
-  ),
-  ErrorMessage: ({ error }: Record<string, unknown>) => (
-    <div data-testid="error-message">
-      {(error as Error)?.message || "Error"}
-    </div>
-  ),
-  SyncProgressBanner: ({ message }: Record<string, unknown>) => (
-    <div data-testid="sync-banner">{message as string}</div>
-  ),
+// Shows itself while the library is initializing (its own test covers when)
+vi.mock("@/components/ui/LibraryInitializingBanner", () => ({
+  default: () => <div data-testid="sync-banner" />,
 }));
 vi.mock("@/components/cards/index", () => ({
-  GroupCard: (props: Record<string, unknown>) => (
-    <div data-testid="group-card">
-      {(props.group as Record<string, unknown>)?.name as string}
-    </div>
+  GroupCard: (props: { group: { name: string } }) => (
+    <div data-testid="group-card">{props.group.name}</div>
   ),
 }));
-vi.mock("@/components/table/index", () => ({
-  TableView: () => <div data-testid="table-view" />,
-  ColumnConfigPopover: () => <div data-testid="column-config" />,
-}));
 
-import Groups from "@/components/pages/Groups";
-import { ApiError } from "@/api/client";
+const result = (fields: Partial<MockListResult> = {}): MockListResult => ({
+  data: undefined,
+  isPending: false,
+  error: null,
+  isPlaceholderData: false,
+  refetch: vi.fn(),
+  ...fields,
+});
+
+const renderPage = () =>
+  renderListPage(<Groups />, { initialEntries: ["/collections"] });
 
 describe("Groups", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockUseGroupList.mockReturnValue({
-      data: null,
-      isLoading: false,
-      error: null,
-    });
+    mockList.mockReturnValue(
+      result({ data: { findGroups: { groups: [], count: 0 } } })
+    );
   });
 
   describe("Rendering", () => {
-    it("renders without crashing", () => {
-      render(<Groups />);
-      expect(screen.getByTestId("page-layout")).toBeInTheDocument();
-    });
-
     it("sets page title to 'Collections'", () => {
-      render(<Groups />);
+      renderPage();
       expect(usePageTitle).toHaveBeenCalledWith("Collections");
     });
 
-    it("shows PageHeader with title 'Collections'", () => {
-      render(<Groups />);
-      const header = screen.getByTestId("page-header");
-      expect(header).toHaveTextContent("Collections");
-    });
-
-    it("renders SearchControls with artifactType 'group'", () => {
-      render(<Groups />);
-      const controls = screen.getByTestId("search-controls");
-      expect(controls).toHaveAttribute("data-artifact-type", "group");
+    it("shows the heading 'Collections' and its controls", () => {
+      renderPage();
+      expect(
+        screen.getByRole("heading", { name: "Collections" })
+      ).toBeInTheDocument();
+      expect(screen.getByPlaceholderText("Search...")).toBeInTheDocument();
     });
   });
 
   describe("Error State", () => {
     it("shows ErrorMessage when error is present and not initializing", () => {
-      const error = new ApiError("Something went wrong");
-      error.isInitializing = false;
-      mockUseGroupList.mockReturnValue({
-        data: null,
-        isLoading: false,
-        error,
-      });
+      mockList.mockReturnValue(
+        result({ error: new ApiError("Something went wrong", 500) })
+      );
 
-      render(<Groups />);
-      expect(screen.getByTestId("error-message")).toHaveTextContent(
+      renderPage();
+      expect(screen.getByRole("alert")).toHaveTextContent(
         "Something went wrong"
       );
     });
 
-    it("shows SyncProgressBanner when error is initializing", () => {
-      const error = new ApiError("init", true);
-      error.isInitializing = true;
-      mockUseGroupList.mockReturnValue({
-        data: null,
-        isLoading: false,
-        error,
-      });
-
-      render(<Groups />);
-      expect(screen.getByTestId("sync-banner")).toHaveTextContent(
-        "Server is syncing library, please wait..."
+    it("an initializing 503 shows the sync banner, not the error page", () => {
+      mockList.mockReturnValue(
+        result({ error: new ApiError("init", 503, { ready: false }) })
       );
+
+      renderPage();
+      expect(screen.getByTestId("sync-banner")).toBeInTheDocument();
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+      expect(screen.getByPlaceholderText("Search...")).toBeInTheDocument();
     });
   });
 
   describe("Loading State", () => {
     it("renders loading skeletons when loading", () => {
-      mockUseGroupList.mockReturnValue({
-        data: null,
-        isLoading: true,
-        error: null,
-      });
+      mockList.mockReturnValue(result({ isPending: true }));
 
-      const { container } = render(<Groups />);
-      const skeletons = container.querySelectorAll(".animate-pulse");
-      expect(skeletons.length).toBeGreaterThan(0);
+      renderPage();
+      expect(screen.getAllByTestId("list-skeleton").length).toBeGreaterThan(0);
     });
   });
 
   describe("Data State", () => {
     it("renders GroupCard when data is present", () => {
-      mockUseGroupList.mockReturnValue({
-        data: {
-          findGroups: {
-            groups: [
-              { id: "1", name: "Test Collection" },
-              { id: "2", name: "Another Collection" },
-            ],
-            count: 2,
+      mockList.mockReturnValue(
+        result({
+          data: {
+            findGroups: {
+              groups: [
+                { id: "1", instanceId: "a", name: "Test Collection" },
+                { id: "2", instanceId: "a", name: "Another Collection" },
+              ],
+              count: 2,
+            },
           },
-        },
-        isLoading: false,
-        error: null,
-      });
+        })
+      );
 
-      render(<Groups />);
+      renderPage();
       const cards = screen.getAllByTestId("group-card");
       expect(cards).toHaveLength(2);
       expect(cards[0]).toHaveTextContent("Test Collection");
+    });
+  });
+
+  describe("Stale results", () => {
+    it("dims the results while the list shows placeholder data", () => {
+      mockList.mockReturnValue(
+        result({
+          data: { findGroups: { groups: [], count: 0 } },
+          isPlaceholderData: true,
+        })
+      );
+
+      renderPage();
+      expect(screen.getByTestId("search-results")).toHaveAttribute(
+        "aria-busy",
+        "true"
+      );
     });
   });
 });

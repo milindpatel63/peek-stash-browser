@@ -1,322 +1,222 @@
 /**
  * Hierarchy Utilities
  *
- * Functions for working with hierarchical entities (tags and studios).
- * Used to expand filter selections to include child entities when
- * "Include sub-tags" or "Include sub-studios" options are enabled.
+ * The expansion behind the hierarchical ref filters (tags and studios,
+ * item 34b): "Include sub-tags" and "Include sub-studios" add each chosen
+ * entity's descendants to the filter. Every ref keeps its instance through
+ * it: a ref with an instance expands within that instance's tree, a bare
+ * legacy id on every allowed instance, and each descendant carries the
+ * instance it was found on, since two Stash servers reuse small ids. The
+ * hierarchy is one slim load per request over the involved instances (id,
+ * instance and the parent list of every live row), expanded in memory.
  *
- * Depth parameter:
- *   0 or undefined: No hierarchy (exact match only)
- *   -1: All descendants (infinite depth)
- *   1, 2, 3...: Specific depth levels
+ * Depth: 0 none (the refs as they are), -1 every descendant, n that many
+ * levels. Direction "up" walks to the ancestors instead (parent tags, the
+ * parent studio, the collections containing a collection); collections
+ * ("group") follow GroupRelation between live collections only.
+ *
+ * A row's own parents and children are the builders' (TagQueryBuilder and
+ * StudioQueryBuilder, through `services/query/nestedRefs.ts`).
  */
+import prisma from "../prisma/singleton.js";
+import type { FilterRef } from "../types/parsedFilters.js";
+import { type EntityRef, entityKey } from "./entityRef.js";
+import { parseJsonArray } from "./sqlHelpers.js";
 
-import { stashEntityService } from "../services/StashEntityService.js";
+export type HierarchyKind = "tag" | "studio" | "group";
+
+/** "down" walks to the descendants, "up" to the ancestors */
+type Direction = "down" | "up";
 
 /**
- * Get all descendant tag IDs for a given tag ID
- *
- * @param tagId - The parent tag ID to start from
- * @param depth - How deep to traverse (-1 for infinite, 0 for none, N for N levels)
- * @returns Set of tag IDs including the original and all descendants up to depth
+ * The links of each entity, by its key, for the instances loaded: its
+ * children walking down, its parents walking up
  */
-export async function getDescendantTagIds(
-  tagId: string,
-  depth: number
-): Promise<Set<string>> {
-  const result = new Set<string>();
-  result.add(tagId);
+type Links = Map<string, EntityRef[]>;
 
-  // depth 0 or undefined means no hierarchy
-  if (depth === 0) {
-    return result;
-  }
-
-  const allTags = await stashEntityService.getAllTags();
-
-  // Build a map of tag ID to its children by inverting parent relationships
-  // Tags store parents, not children, so we invert to get children
-  const childrenMap = new Map<string, string[]>();
-  for (const tag of allTags) {
-    if (tag.parents && Array.isArray(tag.parents)) {
-      for (const parent of tag.parents) {
-        const parentId = String(parent.id);
-        if (!childrenMap.has(parentId)) {
-          childrenMap.set(parentId, []);
-        }
-        childrenMap.get(parentId)?.push(String(tag.id));
-      }
-    }
-  }
-  // BFS to collect descendants up to depth
-  const queue: { id: string; currentDepth: number }[] = [
-    { id: tagId, currentDepth: 0 },
-  ];
-
-  while (queue.length > 0) {
-    const item = queue.shift();
-    if (!item) continue;
-    const { id, currentDepth } = item;
-
-    // Check if we've reached the depth limit (depth -1 means infinite)
-    if (depth !== -1 && currentDepth >= depth) {
-      continue;
-    }
-
-    const children = childrenMap.get(id) || [];
-    for (const childId of children) {
-      if (!result.has(childId)) {
-        result.add(childId);
-        queue.push({ id: childId, currentDepth: currentDepth + 1 });
-      }
-    }
-  }
-
-  return result;
+function isBare(ref: FilterRef): boolean {
+  return ref.instanceId === undefined || ref.instanceId === "";
 }
 
 /**
- * Get all descendant studio IDs for a given studio ID
- *
- * @param studioId - The parent studio ID to start from
- * @param depth - How deep to traverse (-1 for infinite, 0 for none, N for N levels)
- * @returns Set of studio IDs including the original and all descendants up to depth
+ * The live rows' parent links of the instances: children by parent walking
+ * down, parents by child walking up. One statement, whatever the number of
+ * refs: three columns for tags and studios, the links between live
+ * collections (joined to both ends) for collections.
  */
-export async function getDescendantStudioIds(
-  studioId: string,
-  depth: number
-): Promise<Set<string>> {
-  const result = new Set<string>();
-  result.add(studioId);
-
-  // depth 0 or undefined means no hierarchy
-  if (depth === 0) {
-    return result;
-  }
-
-  const allStudios = await stashEntityService.getAllStudios();
-
-  // Build a map of studio ID to its children by inverting parent relationships
-  // Studios store parent_studio, not child_studios, so we invert to get children
-  const childrenMap = new Map<string, string[]>();
-  for (const studio of allStudios) {
-    if (studio.parent_studio?.id) {
-      const parentId = String(studio.parent_studio.id);
-      if (!childrenMap.has(parentId)) {
-        childrenMap.set(parentId, []);
-      }
-      childrenMap.get(parentId)?.push(String(studio.id));
-    }
-  }
-
-  // BFS to collect descendants up to depth
-  const queue: { id: string; currentDepth: number }[] = [
-    { id: studioId, currentDepth: 0 },
-  ];
-
-  while (queue.length > 0) {
-    const item = queue.shift();
-    if (!item) continue;
-    const { id, currentDepth } = item;
-
-    // Check if we've reached the depth limit (depth -1 means infinite)
-    if (depth !== -1 && currentDepth >= depth) {
-      continue;
-    }
-
-    const children = childrenMap.get(id) || [];
-    for (const childId of children) {
-      if (!result.has(childId)) {
-        result.add(childId);
-        queue.push({ id: childId, currentDepth: currentDepth + 1 });
-      }
-    }
-  }
-
-  return result;
-}
-
-/**
- * Expand tag IDs to include descendants based on depth
- *
- * @param tagIds - Array of tag IDs to expand
- * @param depth - How deep to traverse (-1 for infinite, 0 for none, N for N levels)
- * @returns Array of expanded tag IDs (original + descendants)
- */
-export async function expandTagIds(tagIds: string[], depth: number): Promise<string[]> {
-  if (depth === 0 || !tagIds || tagIds.length === 0) {
-    return tagIds;
-  }
-
-  const expandedSet = new Set<string>();
-  for (const tagId of tagIds) {
-    const descendants = await getDescendantTagIds(String(tagId), depth);
-    for (const id of descendants) {
-      expandedSet.add(id);
-    }
-  }
-
-  return Array.from(expandedSet);
-}
-
-/**
- * Expand studio IDs to include descendants based on depth
- *
- * @param studioIds - Array of studio IDs to expand
- * @param depth - How deep to traverse (-1 for infinite, 0 for none, N for N levels)
- * @returns Array of expanded studio IDs (original + descendants)
- */
-export async function expandStudioIds(studioIds: string[], depth: number): Promise<string[]> {
-  if (depth === 0 || !studioIds || studioIds.length === 0) {
-    return studioIds;
-  }
-
-  const expandedSet = new Set<string>();
-  for (const studioId of studioIds) {
-    const descendants = await getDescendantStudioIds(String(studioId), depth);
-    for (const id of descendants) {
-      expandedSet.add(id);
-    }
-  }
-
-  return Array.from(expandedSet);
-}
-
-/**
- * Hydrate tag parent/child relationships
- *
- * Tags only store parentIds. This function:
- * 1. Hydrates parents with full tag data (id + name)
- * 2. Computes children by inverting parent relationships
- *
- * @param tags - Tags to hydrate
- * @returns Tags with hydrated parents and computed children
- */
-export async function hydrateTagRelationships<T extends { id: string; name?: string; parents?: { id: string; name?: string }[] }>(
-  tags: T[]
-): Promise<(T & { children: { id: string; name: string }[] })[]> {
-  // Fetch ALL tags from cache to build complete name lookup
-  // This ensures we can resolve parent names even for single-item requests
-  const allTags = await stashEntityService.getAllTags();
-  const tagNameMap = new Map<string, string>();
-  for (const tag of allTags) {
-    tagNameMap.set(tag.id, tag.name || "Unknown");
-  }
-
-  // Build children map by inverting parent relationships from ALL tags
-  const childrenMap = new Map<string, { id: string; name: string }[]>();
-  for (const tag of allTags) {
-    if (tag.parents && Array.isArray(tag.parents)) {
-      for (const parent of tag.parents) {
-        if (!childrenMap.has(parent.id)) {
-          childrenMap.set(parent.id, []);
-        }
-        childrenMap.get(parent.id)?.push({
-          id: tag.id,
-          name: tag.name || "Unknown",
-        });
-      }
-    }
-  }
-
-  // Hydrate each tag in the input array
-  return tags.map((tag) => ({
-    ...tag,
-    // Hydrate parents with names
-    parents: (tag.parents || []).map((p) => ({
-      id: p.id,
-      name: tagNameMap.get(p.id) || "Unknown",
-    })),
-    // Add computed children
-    children: childrenMap.get(tag.id) || [],
-  }));
-}
-
-/**
- * Hydrate entity tags with full tag data (id, name, image_path)
- *
- * Entities store tagIds as JSON array of IDs. This function:
- * 1. Fetches all tags from cache
- * 2. Hydrates tag objects with names and image_path (preserving existing data)
- *
- * @param entities - Entities with tags array of {id} objects
- * @returns Entities with hydrated tags array of {id, name, image_path} objects
- */
-export async function hydrateEntityTags<T extends { tags?: { id: string; name?: string; image_path?: string | null }[] }>(
-  entities: T[]
-): Promise<T[]> {
-  // Get all tags to build lookup
-  const allTags = await stashEntityService.getAllTags();
-  const tagDataMap = new Map<string, { name: string; image_path: string | null }>();
-  for (const tag of allTags) {
-    tagDataMap.set(tag.id, {
-      name: tag.name || "Unknown",
-      image_path: tag.image_path || null,
+async function loadLinks(
+  kind: HierarchyKind,
+  instanceIds: readonly string[],
+  direction: Direction
+): Promise<Links> {
+  const links: Links = new Map();
+  const add = (parent: EntityRef, child: EntityRef) => {
+    const [from, to] = direction === "down" ? [parent, child] : [child, parent];
+    const key = entityKey(from.id, from.instanceId);
+    const list = links.get(key);
+    if (list === undefined) links.set(key, [to]);
+    else list.push(to);
+  };
+  const instances = [...instanceIds];
+  const where = { stashInstanceId: { in: instances }, deletedAt: null };
+  if (kind === "tag") {
+    const rows = await prisma.stashTag.findMany({
+      where,
+      select: { id: true, stashInstanceId: true, parentIds: true },
     });
+    for (const row of rows) {
+      // A parent list that is not JSON reads as no parents
+      for (const parentId of parseJsonArray<unknown>(row.parentIds)) {
+        add(
+          { id: String(parentId), instanceId: row.stashInstanceId },
+          { id: row.id, instanceId: row.stashInstanceId }
+        );
+      }
+    }
+  } else if (kind === "studio") {
+    const rows = await prisma.stashStudio.findMany({
+      where,
+      select: { id: true, stashInstanceId: true, parentId: true },
+    });
+    for (const row of rows) {
+      if (row.parentId !== null) {
+        add(
+          { id: row.parentId, instanceId: row.stashInstanceId },
+          { id: row.id, instanceId: row.stashInstanceId }
+        );
+      }
+    }
+  } else {
+    // A link to or from a deleted collection is not followed
+    const rows = await prisma.groupRelation.findMany({
+      where: {
+        containingInstanceId: { in: instances },
+        subInstanceId: { in: instances },
+        containing: { deletedAt: null },
+        sub: { deletedAt: null },
+      },
+      select: {
+        containingId: true,
+        containingInstanceId: true,
+        subId: true,
+        subInstanceId: true,
+      },
+    });
+    for (const row of rows) {
+      add(
+        { id: row.containingId, instanceId: row.containingInstanceId },
+        { id: row.subId, instanceId: row.subInstanceId }
+      );
+    }
   }
-
-  // Hydrate each entity's tags, preserving existing data
-  return entities.map((entity) => ({
-    ...entity,
-    tags: (entity.tags || []).map((t) => {
-      const tagData = tagDataMap.get(t.id);
-      return {
-        ...t,
-        id: t.id,
-        name: tagData?.name || t.name || "Unknown",
-        image_path: t.image_path ?? tagData?.image_path ?? null,
-      };
-    }),
-  }));
+  return links;
 }
 
 /**
- * Hydrate studio parent/child relationships
- *
- * Studios only store parentId. This function:
- * 1. Hydrates parent_studio with full studio data (id + name)
- * 2. Computes child_studios by inverting parent relationships
- *
- * @param studios - Studios to hydrate
- * @returns Studios with hydrated parent_studio and computed child_studios
+ * The root, then what it links to (its descendants, or its ancestors when
+ * the map is by child) to the depth, breadth first, each once
  */
-export async function hydrateStudioRelationships<T extends { id: string; name?: string; parent_studio?: { id: string; name?: string } | null }>(
-  studios: T[]
-): Promise<(T & { child_studios: { id: string; name: string }[] })[]> {
-  // Fetch ALL studios from cache to build complete name lookup
-  // This ensures we can resolve parent names even for single-item requests
-  const allStudios = await stashEntityService.getAllStudios();
-  const studioNameMap = new Map<string, string>();
-  for (const studio of allStudios) {
-    studioNameMap.set(studio.id, studio.name || "Unknown");
-  }
-
-  // Build children map by inverting parent relationships from ALL studios
-  const childrenMap = new Map<string, { id: string; name: string }[]>();
-  for (const studio of allStudios) {
-    if (studio.parent_studio?.id) {
-      const parentId = studio.parent_studio.id;
-      if (!childrenMap.has(parentId)) {
-        childrenMap.set(parentId, []);
+function withDescendants(
+  children: Links,
+  root: EntityRef,
+  depth: number
+): EntityRef[] {
+  const seen = new Set([entityKey(root.id, root.instanceId)]);
+  const result = [root];
+  let frontier = [root];
+  for (
+    let level = 0;
+    frontier.length > 0 && (depth === -1 || level < depth);
+    level++
+  ) {
+    const next: EntityRef[] = [];
+    for (const parent of frontier) {
+      for (const child of children.get(
+        entityKey(parent.id, parent.instanceId)
+      ) ?? []) {
+        const key = entityKey(child.id, child.instanceId);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        result.push(child);
+        next.push(child);
       }
-      childrenMap.get(parentId)?.push({
-        id: studio.id,
-        name: studio.name || "Unknown",
-      });
+    }
+    frontier = next;
+  }
+  return result;
+}
+
+/**
+ * One group per selected ref: the ref with its descendants (ancestors going
+ * "up") to the depth,
+ * for a filter that needs every selected entity ("has all of": any
+ * descendant of each). A ref with an instance expands within that
+ * instance's tree; a bare ref becomes one root per allowed instance, each
+ * with that instance's descendants. Only allowed instances are loaded, once
+ * for all the refs; a ref on another instance, and every ref at depth 0 or
+ * with no allowed instance, stays as it is in a group of its own.
+ */
+export async function expandRefsEach(
+  kind: HierarchyKind,
+  refs: readonly FilterRef[],
+  depth: number,
+  allowedInstanceIds: readonly string[],
+  direction: Direction = "down"
+): Promise<readonly (readonly FilterRef[])[]> {
+  if (depth === 0 || allowedInstanceIds.length === 0) {
+    return refs.map((ref) => [ref]);
+  }
+  const allowed = new Set(allowedInstanceIds);
+  const involved = new Set<string>();
+  for (const ref of refs) {
+    if (isBare(ref)) {
+      for (const instanceId of allowedInstanceIds) involved.add(instanceId);
+    } else if (ref.instanceId !== undefined && allowed.has(ref.instanceId)) {
+      involved.add(ref.instanceId);
     }
   }
+  const links =
+    involved.size === 0
+      ? new Map<string, EntityRef[]>()
+      : await loadLinks(kind, [...involved], direction);
+  return refs.map((ref): readonly FilterRef[] => {
+    const { id, instanceId } = ref;
+    if (isBare(ref)) {
+      return allowedInstanceIds.flatMap((instanceId) =>
+        withDescendants(links, { id, instanceId }, depth)
+      );
+    }
+    if (instanceId === undefined || !allowed.has(instanceId)) return [ref];
+    return withDescendants(links, { id, instanceId }, depth);
+  });
+}
 
-  // Hydrate each studio in the input array
-  return studios.map((studio) => ({
-    ...studio,
-    // Hydrate parent with name
-    parent_studio: studio.parent_studio?.id
-      ? {
-          id: studio.parent_studio.id,
-          name: studioNameMap.get(studio.parent_studio.id) || "Unknown",
-        }
-      : null,
-    // Add computed children
-    child_studios: childrenMap.get(studio.id) || [],
-  }));
+/**
+ * The refs with their descendants to the depth as one set, each once, in
+ * the refs' order (see expandRefsEach): the refs themselves at depth 0.
+ */
+export async function expandRefs(
+  kind: HierarchyKind,
+  refs: readonly FilterRef[],
+  depth: number,
+  allowedInstanceIds: readonly string[],
+  direction: Direction = "down"
+): Promise<readonly FilterRef[]> {
+  if (depth === 0) return refs;
+  const groups = await expandRefsEach(
+    kind,
+    refs,
+    depth,
+    allowedInstanceIds,
+    direction
+  );
+  const seen = new Set<string>();
+  const result: FilterRef[] = [];
+  for (const ref of groups.flat()) {
+    const key = entityKey(ref.id, ref.instanceId ?? "");
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(ref);
+  }
+  return result;
 }

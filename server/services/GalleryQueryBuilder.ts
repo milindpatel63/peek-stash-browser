@@ -1,803 +1,551 @@
 /**
- * GalleryQueryBuilder - SQL-native gallery querying
+ * GalleryQueryBuilder: the gallery list in SQL.
  *
- * Builds parameterized SQL queries for gallery filtering, sorting, and pagination.
- * Eliminates the need to load all galleries into memory.
+ * The gallery builder on the base (`query/EntityQueryBuilder.ts`): this file
+ * declares the gallery's spec (table, the rating and cover image joins,
+ * columns, the title tiebreak), its filter clauses from the parsed request,
+ * its sort map, its row transform and its relations, with each row's count
+ * of the scenes the viewer can see. The instance filter, the exclusion
+ * join, the `ids` filter, the random sort and the count are the base's.
  */
-import type { PeekGalleryFilter, NormalizedGallery, PerformerRef, TagRef, StudioRef } from "../types/index.js";
-import type { GalleryQueryRow } from "../types/internal/queryRows.js";
+import type { SortDirection } from "@peek/shared-types/filters/index.js";
 import prisma from "../prisma/singleton.js";
-import { logger } from "../utils/logger.js";
-import { expandStudioIds, expandTagIds } from "../utils/hierarchyUtils.js";
+import type {
+  NormalizedGallery,
+  PerformerRef,
+  StudioRef,
+  TagRef,
+} from "../types/index.js";
+import type {
+  GalleryQueryRow,
+  TooltipTotalRow,
+} from "../types/internal/queryRows.js";
+import type {
+  ParsedFilter,
+  RefCriterion,
+  RefFieldCriterion,
+} from "../types/parsedFilters.js";
+import { type EntityRef, entityKey, pairsJson } from "../utils/entityRef.js";
+import { toProxyUrl } from "../utils/proxyUrl.js";
+import {
+  type ColumnTarget,
+  type FilterClause,
+  type JunctionTarget,
+  type PerformerAgeSource,
+  type ViaSceneSpec,
+  buildDayFilter,
+  buildFavoriteFilter,
+  buildInstantFilter,
+  buildNumericFilter,
+  buildTextFilter,
+  exclusionJoin,
+  galleryNameSql,
+  noClause,
+  performerAgeExists,
+  performerCountClause,
+  performerCountSql,
+  performerTagsFieldClause,
+  refClause,
+  searchAll,
+  viaSceneClause,
+} from "../utils/sqlClauses.js";
+import {
+  emptyToNull,
+  parseJsonArray,
+  searchTerms,
+} from "../utils/sqlHelpers.js";
 import { getGalleryFallbackTitle } from "../utils/titleUtils.js";
-import { parseJsonArray } from "../utils/sqlHelpers.js";
-import { buildNumericFilter, buildDateFilter, buildTextFilter, buildFavoriteFilter, buildJunctionFilter, buildDirectFilter, parseCompositeFilterValues, type FilterClause } from "../utils/sqlFilterBuilders.js";
-import { coerceEntityRefs } from "@peek/shared-types/instanceAwareId.js";
+import {
+  EntityQueryBuilder,
+  type EntitySpec,
+  type FieldClauses,
+  type LeafContext,
+  type QueryContext,
+  type SortExpr,
+  exclusionViewer,
+  favoriteRefs,
+  hierarchicalRefClause,
+  refFieldClause,
+  refOptionsOf,
+  refPresence,
+} from "./query/EntityQueryBuilder.js";
+import { excludedCountsJoin, visibleCount } from "./query/excludedCounts.js";
+import {
+  PERFORMER_REF,
+  STUDIO_REF,
+  TAG_REF,
+  loadNestedRefs,
+  loadRefsByKey,
+} from "./query/nestedRefs.js";
 
-// Query builder options
-export interface GalleryQueryOptions {
-  userId: number;
-  filters?: PeekGalleryFilter;
-  applyExclusions?: boolean; // Default true - use pre-computed exclusions
-  sort: string;
-  sortDirection: "ASC" | "DESC";
-  page: number;
-  perPage: number;
-  searchQuery?: string;
-  allowedInstanceIds?: string[];
-  specificInstanceId?: string; // Single instance filter for disambiguation on detail pages
-  randomSeed?: number; // Seed for consistent random ordering
-}
-
-// Query result
-export interface GalleryQueryResult {
-  galleries: NormalizedGallery[];
-  total: number;
-}
-
-/**
- * Builds and executes SQL queries for gallery filtering
- */
-class GalleryQueryBuilder {
-  // Column list for SELECT - all StashGallery fields plus user data
-  private readonly SELECT_COLUMNS = `
+// Column list for SELECT - all StashGallery fields plus user data; the
+// image count as the viewer sees it (query/excludedCounts.ts)
+const selectColumns = (ctx: QueryContext) =>
+  `
     g.id, g.stashInstanceId, g.title, g.date, g.studioId, g.rating100 AS stashRating100,
-    g.imageCount, g.coverImageId,
-    g.details, g.url, g.code, g.photographer, g.urls,
+    ${visibleCount(ctx, "g.imageCount", "images")} AS imageCount, g.coverImageId,
+    g.details, g.url, g.code, g.photographer, g.urls, g.organized,
     g.folderPath, g.fileBasename, g.coverPath,
     g.stashCreatedAt, g.stashUpdatedAt,
     r.rating AS userRating, r.favorite AS userFavorite,
     ci.width AS coverWidth, ci.height AS coverHeight
   `.trim();
 
-  // Base FROM clause with user data JOINs
-  private buildFromClause(
-    userId: number,
-    applyExclusions: boolean = true
-  ): { sql: string; params: number[] } {
-    const baseJoins = `
-        FROM StashGallery g
-        LEFT JOIN GalleryRating r ON g.id = r.galleryId AND g.stashInstanceId = r.instanceId AND r.userId = ?
-        LEFT JOIN StashImage ci ON g.coverImageId = ci.id AND g.stashInstanceId = ci.stashInstanceId
-    `.trim();
+/** The folder's name from its path: '/images/My Gallery' -> 'My Gallery' */
+const FOLDER_NAME = `REPLACE(REPLACE(g.folderPath, RTRIM(g.folderPath, REPLACE(g.folderPath, '/', '')), ''), '/', '')`;
 
-    if (applyExclusions) {
-      return {
-        sql: `${baseJoins}
-        LEFT JOIN UserExcludedEntity e ON e.userId = ? AND e.entityType = 'gallery' AND e.entityId = g.id AND (e.instanceId = '' OR e.instanceId = g.stashInstanceId)`,
-        params: [userId, userId],
-      };
-    }
+/**
+ * The displayed title, case-insensitive: the title (NULLIF, since Stash
+ * leaves many empty), else the file, else the folder's name
+ */
+const TITLE = `COALESCE(NULLIF(g.title, ''), g.fileBasename, ${FOLDER_NAME}) COLLATE NOCASE`;
 
-    return {
-      sql: baseJoins,
-      params: [userId],
-    };
-  }
+const GALLERY_SPEC: EntitySpec = {
+  table: "StashGallery",
+  alias: "g",
+  entityType: "gallery",
+  userJoins: [{ table: "GalleryRating", alias: "r", entityIdCol: "galleryId" }],
+  // The cover's dimensions; the image's primary key, so at most one row
+  joins: [
+    "LEFT JOIN StashImage ci ON g.coverImageId = ci.id AND g.stashInstanceId = ci.stashInstanceId",
+  ],
+  // The viewer's excluded links per gallery, for the count
+  extraJoins: (ctx) => excludedCountsJoin(ctx, "gallery", "g"),
+  selectColumns: (ctx) => ({ sql: selectColumns(ctx), params: [] }),
+  defaultSort: "title",
+  // Equal values list by title, then by the base's key
+  tiebreak: (field) => (field === "title" ? undefined : `${TITLE} ASC`),
+};
 
-  // Base WHERE clause (always filter deleted, optionally filter excluded)
-  private buildBaseWhere(applyExclusions: boolean = true): FilterClause {
-    if (applyExclusions) {
-      return {
-        sql: "g.deletedAt IS NULL AND e.id IS NULL",
-        params: [],
-      };
-    }
-    return {
-      sql: "g.deletedAt IS NULL",
+/** A gallery's studio, on the gallery's own row */
+const GALLERY_STUDIO: ColumnTarget = {
+  kind: "column",
+  parentTable: "StashGallery",
+  parentAlias: "g",
+  idCol: "studioId",
+  instanceCol: "stashInstanceId",
+};
+
+/** A gallery's tags */
+const GALLERY_TAGS: JunctionTarget = {
+  kind: "junction",
+  table: "GalleryTag",
+  alias: "gt",
+  parentAlias: "g",
+  parentIdCol: "galleryId",
+  parentInstanceCol: "galleryInstanceId",
+  refIdCol: "tagId",
+  refInstanceCol: "tagInstanceId",
+};
+
+/** The gallery's tags: its `GalleryTag` rows on its own instance */
+const GALLERY_TAG_COUNT =
+  "(SELECT COUNT(*) FROM GalleryTag gt WHERE gt.galleryId = g.id AND gt.galleryInstanceId = g.stashInstanceId)";
+
+/** A gallery's performers */
+const GALLERY_PERFORMERS: JunctionTarget = {
+  kind: "junction",
+  table: "GalleryPerformer",
+  alias: "gp",
+  parentAlias: "g",
+  parentIdCol: "galleryId",
+  parentInstanceCol: "galleryInstanceId",
+  refIdCol: "performerId",
+  refInstanceCol: "performerInstanceId",
+};
+
+/** The junction Performer Age reads a gallery's performers from */
+const GALLERY_PERFORMER_AGE: PerformerAgeSource = {
+  junction: {
+    table: "GalleryPerformer",
+    itemId: "galleryId",
+    itemInstance: "galleryInstanceId",
+    performerId: "performerId",
+    performerInstance: "performerInstanceId",
+  },
+  item: { id: "g.id", instance: "g.stashInstanceId", date: "g.date" },
+};
+
+/** A gallery's scenes, for "has any" and "has none" */
+const GALLERY_SCENES: JunctionTarget = {
+  kind: "junction",
+  table: "SceneGallery",
+  alias: "gsc",
+  parentAlias: "g",
+  parentIdCol: "galleryId",
+  parentInstanceCol: "galleryInstanceId",
+  refIdCol: "sceneId",
+  refInstanceCol: "sceneInstanceId",
+};
+
+/** Galleries holding one of the scenes (a scene's Galleries tab) */
+const GALLERIES_BY_SCENE: ViaSceneSpec = {
+  alias: "g",
+  junction: { table: "SceneGallery", alias: "sg" },
+  entityIdCol: "galleryId",
+  entityInstanceCol: "galleryInstanceId",
+  sceneIdCol: "sceneId",
+  sceneInstanceCol: "sceneInstanceId",
+};
+
+/** A cover dimension of 0 is none */
+const zeroToNull = (value: number | null): number | null =>
+  value === 0 ? null : value;
+
+/**
+ * Builds and executes SQL queries for gallery filtering
+ */
+class GalleryQueryBuilder extends EntityQueryBuilder<
+  GalleryQueryRow,
+  NormalizedGallery,
+  "gallery"
+> {
+  protected readonly spec = GALLERY_SPEC;
+
+  protected sortMap(
+    dir: SortDirection,
+    _filter: ParsedFilter<"gallery">,
+    ctx: QueryContext
+  ): Record<string, SortExpr> {
+    const column = (sql: string): SortExpr => ({
+      sql: `${sql} ${dir}`,
       params: [],
-    };
-  }
-
-  /**
-   * Build instance filter clause for multi-instance support
-   */
-  private buildInstanceFilter(allowedInstanceIds: string[] | undefined): FilterClause {
-    if (!allowedInstanceIds || allowedInstanceIds.length === 0) {
-      return { sql: "", params: [] };
-    }
-    const placeholders = allowedInstanceIds.map(() => "?").join(", ");
+    });
     return {
-      sql: `(g.stashInstanceId IN (${placeholders}) OR g.stashInstanceId IS NULL)`,
-      params: allowedInstanceIds,
+      // Gallery metadata: the displayed title, the folder case-insensitive
+      title: column(TITLE),
+      date: column("g.date"),
+      created_at: column("g.stashCreatedAt"),
+      updated_at: column("g.stashUpdatedAt"),
+      path: column("g.folderPath COLLATE NOCASE"),
+
+      // The count, as the viewer sees it
+      image_count: column(visibleCount(ctx, "g.imageCount", "images")),
+
+      // The gallery's tag rows, and the performers the viewer can see: the
+      // values the filters of the same names read
+      tag_count: column(GALLERY_TAG_COUNT),
+      performer_count: this.countSort(
+        performerCountSql(
+          GALLERY_PERFORMERS,
+          ctx.applyExclusions ? ctx.userId : null
+        ),
+        dir
+      ),
+
+      // The viewer's rating (GalleryRating)
+      rating: column("COALESCE(r.rating, 0)"),
+      rating100: column("COALESCE(r.rating, 0)"),
     };
   }
 
   /**
-   * Build filter for a specific instance ID (for disambiguation on detail pages)
+   * The gallery filter's clauses, one per field, in the order the statement
+   * ANDs them. A ref field's CTEs are named from the leaf (`ctx.name`).
    */
-  private buildSpecificInstanceFilter(instanceId: string | undefined): FilterClause {
-    if (!instanceId) {
-      return { sql: "", params: [] };
+  protected override readonly fieldClauses: FieldClauses<"gallery"> = {
+    // The viewer's own data
+    favorite: (favorite) => buildFavoriteFilter(favorite),
+    hasFavoriteImage: (has, ctx) =>
+      has ? this.hasFavoriteImageClause(ctx) : noClause(),
+
+    // Related entities
+    studios: (c, ctx) => this.studioClause(c, ctx),
+    // "Has any" and "has none" count only related rows the viewer can see
+    scenes: (c, ctx) =>
+      c.modifier === "IS_NULL" || c.modifier === "NOT_NULL"
+        ? refPresence(GALLERY_SCENES, c.modifier, ctx, {
+            related: { table: "StashScene", entityType: "scene" },
+          })
+        : viaSceneClause(GALLERIES_BY_SCENE, c.refs, c.modifier, ctx),
+    performers: (c, ctx) =>
+      refFieldClause(GALLERY_PERFORMERS, c, ctx, {
+        table: "StashPerformer",
+        entityType: "performer",
+      }),
+    tags: (c, ctx) => this.tagClause(c, ctx),
+    // Through the tags of the gallery's performers. No gallery sort has an
+    // index to walk, so every statement reads the matches in no order.
+    performer_tags: (c, ctx) =>
+      performerTagsFieldClause(GALLERY_PERFORMERS, c, {
+        ...refOptionsOf(ctx),
+        viewerId: ctx.applyExclusions ? ctx.userId : null,
+      }),
+
+    // The gallery's performers the viewer can see: how many, and their age
+    // on the gallery's date
+    performer_count: async (c, ctx) =>
+      performerCountClause(
+        c,
+        GALLERY_PERFORMERS,
+        await exclusionViewer(ctx, "performer")
+      ),
+    performer_age: (c, ctx) =>
+      performerAgeExists(
+        c,
+        GALLERY_PERFORMER_AGE,
+        ctx.applyExclusions ? ctx.userId : null
+      ),
+
+    // The viewer's favorite entities; false is the negation of true
+    performer_favorite: (on, ctx) => this.favoriteClause("performer", on, ctx),
+    studio_favorite: (on, ctx) => this.favoriteClause("studio", on, ctx),
+    tag_favorite: (on, ctx) => this.favoriteClause("tag", on, ctx),
+
+    // The viewer's rating and the counts
+    rating100: (c) => buildNumericFilter(c, "r.rating"),
+    image_count: (c, ctx) =>
+      buildNumericFilter(c, visibleCount(ctx, "g.imageCount", "images")),
+    // The gallery's own tag rows; EQUALS 0 is the folder view's Untagged
+    tag_count: (c) => buildNumericFilter(c, GALLERY_TAG_COUNT),
+
+    // Text
+    title: (c) => buildTextFilter(c, galleryNameSql("g")),
+    details: (c) => buildTextFilter(c, "g.details"),
+    code: (c) => buildTextFilter(c, "g.code"),
+    photographer: (c) => buildTextFilter(c, "g.photographer"),
+    // A folder gallery's folder, a zip gallery's file
+    path: (c) =>
+      buildTextFilter(
+        c,
+        "COALESCE(NULLIF(g.folderPath, ''), NULLIF(g.filePath, ''))"
+      ),
+    url: (c) => buildTextFilter(c, null, { lists: ["g.urls"] }),
+
+    organized: (organized) => ({
+      sql: "g.organized = ?",
+      params: [organized ? 1 : 0],
+    }),
+    is_zip: (isZip) => ({
+      sql: isZip
+        ? "NULLIF(g.filePath, '') IS NOT NULL"
+        : "NULLIF(g.filePath, '') IS NULL",
+      params: [],
+    }),
+
+    // Dates
+    date: (c) => buildDayFilter(c, "g.date"),
+    created_at: (c, ctx) =>
+      buildInstantFilter(c, "g.stashCreatedAt", ctx.timeZone),
+    updated_at: (c, ctx) =>
+      buildInstantFilter(c, "g.stashUpdatedAt", ctx.timeZone),
+  };
+
+  /**
+   * The studio filter, with the studios' descendants to the depth. A
+   * gallery has one studio, so the parser never sends INCLUDES_ALL here.
+   */
+  private async studioClause(
+    criterion: RefFieldCriterion,
+    ctx: LeafContext
+  ): Promise<FilterClause> {
+    return hierarchicalRefClause("studio", GALLERY_STUDIO, criterion, ctx, {
+      name: ctx.name,
+    });
+  }
+
+  /** The tag filter, with the tags' descendants to the depth */
+  private async tagClause(
+    criterion: RefFieldCriterion,
+    ctx: LeafContext
+  ): Promise<FilterClause> {
+    return hierarchicalRefClause("tag", GALLERY_TAGS, criterion, ctx, {
+      name: ctx.name,
+      related: { table: "StashTag", entityType: "tag" },
+    });
+  }
+
+  /**
+   * `tag_favorite`, `studio_favorite` and `performer_favorite`: the gallery
+   * has (`true`) or lacks (`false`) one of the viewer's favourites, through
+   * the same shapes as the tag, studio and performer filters. Tags and
+   * studios count every descendant (depth -1, as the Tags and Studios
+   * filters take it). A favourite the viewer hid is dropped
+   * (`favoriteRefs`). With no favourites `true` matches nothing and `false`
+   * is no filter.
+   */
+  private async favoriteClause(
+    kind: "tag" | "studio" | "performer",
+    on: boolean,
+    ctx: LeafContext
+  ): Promise<FilterClause> {
+    const refs = await favoriteRefs(kind, ctx);
+    if (refs.length === 0) {
+      return on ? { sql: "1 = 0", params: [] } : noClause();
     }
-    return {
-      sql: `g.stashInstanceId = ?`,
-      params: [instanceId],
+    const criterion: RefCriterion = {
+      refs,
+      modifier: on ? "INCLUDES" : "EXCLUDES",
+      depth: -1,
     };
+    if (kind === "tag") return this.tagClause(criterion, ctx);
+    if (kind === "studio") return this.studioClause(criterion, ctx);
+    return refClause(
+      GALLERY_PERFORMERS,
+      refs,
+      criterion.modifier,
+      refOptionsOf(ctx)
+    );
   }
 
   /**
-   * Build ID filter clause
+   * Galleries holding at least one image the viewer favorited and can see:
+   * live and, with the viewer's exclusions applied, not excluded for them
    */
-  private buildIdFilter(
-    filter: { value?: string[] | null; modifier?: string | null } | string[] | undefined | null
-  ): FilterClause {
-    const ids = Array.isArray(filter) ? filter : filter?.value;
-    if (!ids || ids.length === 0) {
-      return { sql: "", params: [] };
-    }
-
-    const modifier = Array.isArray(filter) ? "INCLUDES" : filter?.modifier || "INCLUDES";
-    const placeholders = ids.map(() => "?").join(", ");
-
-    switch (modifier) {
-      case "INCLUDES":
-        return { sql: `g.id IN (${placeholders})`, params: ids };
-      case "EXCLUDES":
-        return { sql: `g.id NOT IN (${placeholders})`, params: ids };
-      default:
-        return { sql: `g.id IN (${placeholders})`, params: ids };
-    }
-  }
-
-  /**
-   * Build studio filter clause with hierarchy support
-   */
-  private async buildStudioFilterWithHierarchy(
-    filter: { value?: string[] | null; modifier?: string | null; depth?: number | null } | undefined | null
-  ): Promise<FilterClause> {
-    if (!filter || !filter.value || filter.value.length === 0) {
-      return { sql: "", params: [] };
-    }
-
-    // Parse composite keys ("5:instance-1" -> "5") since UI sends composite format
-    const { parsed } = parseCompositeFilterValues(filter.value);
-    let ids = parsed.map(p => p.id);
-    const modifier = filter.modifier ?? "INCLUDES";
-    const depth = filter.depth;
-
-    // Expand IDs if depth is specified and not 0
-    if (depth !== undefined && depth !== null && depth !== 0) {
-      ids = await expandStudioIds(ids, depth);
-    }
-
-    // INCLUDES_ALL is special for studios: a gallery can only have one studio
-    const entityRefs = coerceEntityRefs(ids);
-    if (modifier === "INCLUDES_ALL") {
-      if (ids.length === 1) {
-        return buildDirectFilter(entityRefs, "g.studioId", "g.stashInstanceId", "INCLUDES");
-      }
-      // Multiple studios in INCLUDES_ALL means no gallery can match (a gallery has at most one studio)
-      return { sql: "1 = 0", params: [] };
-    }
-
-    return buildDirectFilter(entityRefs, "g.studioId", "g.stashInstanceId", modifier);
-  }
-
-  /**
-   * Build scenes filter clause
-   * Filter galleries by scenes they contain
-   */
-  private buildScenesFilter(
-    filter: { value?: string[] | null; modifier?: string | null } | undefined | null
-  ): FilterClause {
-    if (!filter || !filter.value || filter.value.length === 0) {
-      return { sql: "", params: [] };
-    }
-
-    const { value: ids, modifier = "INCLUDES" } = filter;
-    const placeholders = ids.map(() => "?").join(", ");
-
-    // Galleries contain scenes via SceneGallery junction table
-    switch (modifier) {
-      case "INCLUDES":
-        return {
-          sql: `g.id IN (
-            SELECT sg.galleryId FROM SceneGallery sg
-            WHERE sg.sceneId IN (${placeholders}) AND sg.galleryInstanceId = g.stashInstanceId
-          )`,
-          params: ids,
-        };
-
-      case "INCLUDES_ALL":
-        return {
-          sql: `g.id IN (
-            SELECT sg.galleryId FROM SceneGallery sg
-            WHERE sg.sceneId IN (${placeholders}) AND sg.galleryInstanceId = g.stashInstanceId
-            GROUP BY sg.galleryId
-            HAVING COUNT(DISTINCT sg.sceneId) = ?
-          )`,
-          params: [...ids, ids.length],
-        };
-
-      case "EXCLUDES":
-        return {
-          sql: `g.id NOT IN (
-            SELECT sg.galleryId FROM SceneGallery sg
-            WHERE sg.sceneId IN (${placeholders}) AND sg.galleryInstanceId = g.stashInstanceId
-          )`,
-          params: ids,
-        };
-
-      default:
-        return { sql: "", params: [] };
-    }
-  }
-
-  /**
-   * Build performer filter clause
-   */
-  private buildPerformerFilter(
-    filter: { value?: string[] | null; modifier?: string | null } | undefined | null
-  ): FilterClause {
-    if (!filter || !filter.value || filter.value.length === 0) {
-      return { sql: "", params: [] };
-    }
-
-    const ids = coerceEntityRefs(filter.value);
-    const modifier = filter.modifier ?? "INCLUDES";
-
-    return buildJunctionFilter(ids, "GalleryPerformer", "galleryId", "galleryInstanceId", "performerId", "performerInstanceId", "g", modifier);
-  }
-
-  /**
-   * Build tag filter clause with hierarchy support
-   */
-  private async buildTagFilterWithHierarchy(
-    filter: { value?: string[] | null; modifier?: string | null; depth?: number | null } | undefined | null
-  ): Promise<FilterClause> {
-    if (!filter || !filter.value || filter.value.length === 0) {
-      return { sql: "", params: [] };
-    }
-
-    // Parse composite keys ("284:instance-1" -> "284") since UI sends composite format
-    const { parsed } = parseCompositeFilterValues(filter.value);
-    let ids = parsed.map(p => p.id);
-    const modifier = filter.modifier ?? "INCLUDES";
-    const depth = filter.depth;
-
-    // Expand IDs if depth is specified and not 0
-    if (depth !== undefined && depth !== null && depth !== 0) {
-      ids = await expandTagIds(ids, depth);
-    }
-
-    return buildJunctionFilter(coerceEntityRefs(ids), "GalleryTag", "galleryId", "galleryInstanceId", "tagId", "tagInstanceId", "g", modifier);
-  }
-
-  /**
-   * Build filter for galleries that have at least one favorited image
-   */
-  private buildHasFavoriteImageFilter(
-    hasFavoriteImage: boolean | undefined,
-    userId: number
-  ): FilterClause {
-    if (!hasFavoriteImage) {
-      return { sql: "", params: [] };
-    }
-
+  private hasFavoriteImageClause(ctx: QueryContext): FilterClause {
+    const exclusion = ctx.applyExclusions
+      ? exclusionJoin("ie", "image", "si.id", "si.stashInstanceId")
+      : "";
     return {
       sql: `EXISTS (
         SELECT 1 FROM ImageGallery ig
         JOIN StashImage si ON ig.imageId = si.id AND ig.imageInstanceId = si.stashInstanceId
         JOIN ImageRating ir ON ir.imageId = si.id AND ir.instanceId = si.stashInstanceId AND ir.userId = ?
+        ${exclusion}
         WHERE ig.galleryId = g.id AND ig.galleryInstanceId = g.stashInstanceId
-        AND ir.favorite = 1
+        AND ir.favorite = 1 AND si.deletedAt IS NULL${ctx.applyExclusions ? " AND ie.id IS NULL" : ""}
       )`,
-      params: [userId],
+      params: ctx.applyExclusions ? [ctx.userId, ctx.userId] : [ctx.userId],
     };
   }
 
   /**
-   * Build search query filter (searches title, details, photographer)
+   * The search across the name the card shows (the title, else the file's or
+   * the folder's name), details and photographer: every word must match
+   * (`searchAll`), each as `likeContains` with `ESCAPE '\'`; no `LOWER()`
    */
-  private buildSearchFilter(searchQuery: string | undefined): FilterClause {
-    if (!searchQuery || searchQuery.trim() === "") {
-      return { sql: "", params: [] };
-    }
-
-    const lowerQuery = `%${searchQuery.toLowerCase()}%`;
-    return {
-      sql: "(LOWER(g.title) LIKE ? OR LOWER(g.details) LIKE ? OR LOWER(g.photographer) LIKE ?)",
-      params: [lowerQuery, lowerQuery, lowerQuery],
-    };
+  protected override searchClause(q: string): FilterClause {
+    return searchAll(searchTerms(q), (pattern) => ({
+      sql: `(${galleryNameSql("g")} LIKE ? ESCAPE '\\' OR g.details LIKE ? ESCAPE '\\' OR g.photographer LIKE ? ESCAPE '\\')`,
+      params: [pattern, pattern, pattern],
+    }));
   }
-
-  /**
-   * Build ORDER BY clause
-   */
-  private buildSortClause(sort: string, direction: "ASC" | "DESC", randomSeed?: number): string {
-    const dir = direction === "ASC" ? "ASC" : "DESC";
-    const seed = randomSeed || 12345;
-
-    // Extract folder name from path: '/images/My Gallery' -> 'My Gallery'
-    const folderNameExpr = `REPLACE(REPLACE(g.folderPath, RTRIM(g.folderPath, REPLACE(g.folderPath, '/', '')), ''), '/', '')`;
-
-    const sortMap: Record<string, string> = {
-      // Gallery metadata - use COALESCE for fallback title, COLLATE NOCASE for case-insensitive sorting
-      // NULLIF handles empty string titles (762 galleries have '' instead of NULL)
-      title: `COALESCE(NULLIF(g.title, ''), g.fileBasename, ${folderNameExpr}) COLLATE NOCASE ${dir}`,
-      date: `g.date ${dir}`,
-      created_at: `g.stashCreatedAt ${dir}`,
-      updated_at: `g.stashUpdatedAt ${dir}`,
-      path: `g.folderPath COLLATE NOCASE ${dir}`,
-
-      // Counts
-      image_count: `g.imageCount ${dir}`,
-
-      // User ratings
-      rating: `COALESCE(r.rating, 0) ${dir}`,
-      rating100: `COALESCE(r.rating, 0) ${dir}`,
-
-      // Random - seeded formula matching Stash's algorithm, prevents SQLite integer overflow
-      random: `(((((g.id + ${seed}) % 2147483647) * ((g.id + ${seed}) % 2147483647) % 2147483647) * 52959209 % 2147483647 + ((g.id + ${seed}) * 1047483763 % 2147483647)) % 2147483647) ${dir}`,
-    };
-
-    const sortExpr = sortMap[sort] || sortMap["title"];
-
-    // Add secondary sort by title for stable ordering (use same fallback as primary title sort)
-    if (sort !== "title") {
-      return `${sortExpr}, COALESCE(NULLIF(g.title, ''), g.fileBasename, ${folderNameExpr}) COLLATE NOCASE ASC`;
-    }
-    return `${sortExpr}, g.id ${dir}`;
-  }
-
-  async execute(options: GalleryQueryOptions): Promise<GalleryQueryResult> {
-    const startTime = Date.now();
-    const { userId, page, perPage, applyExclusions = true, filters, searchQuery, allowedInstanceIds, specificInstanceId, randomSeed } = options;
-
-    // Build FROM clause with optional exclusion JOIN
-    const fromClause = this.buildFromClause(userId, applyExclusions);
-
-    // Build WHERE clauses
-    const whereClauses: FilterClause[] = [this.buildBaseWhere(applyExclusions)];
-
-    // Instance filter (multi-instance support)
-    const instanceFilter = this.buildInstanceFilter(allowedInstanceIds);
-    if (instanceFilter.sql) {
-      whereClauses.push(instanceFilter);
-    }
-
-    // Specific instance filter (for disambiguation on detail pages)
-    if (specificInstanceId) {
-      const specificFilter = this.buildSpecificInstanceFilter(specificInstanceId);
-      if (specificFilter.sql) {
-        whereClauses.push(specificFilter);
-      }
-    }
-
-    // Search query
-    const searchFilter = this.buildSearchFilter(searchQuery);
-    if (searchFilter.sql) {
-      whereClauses.push(searchFilter);
-    }
-
-    // ID filter
-    if (filters?.ids) {
-      const idFilter = this.buildIdFilter(filters.ids);
-      if (idFilter.sql) {
-        whereClauses.push(idFilter);
-      }
-    }
-
-    // User data filters
-    const favoriteFilter = buildFavoriteFilter(filters?.favorite);
-    if (favoriteFilter.sql) {
-      whereClauses.push(favoriteFilter);
-    }
-
-    // Has favorite image filter
-    if (filters?.hasFavoriteImage) {
-      const hasFavImageFilter = this.buildHasFavoriteImageFilter(filters.hasFavoriteImage, userId);
-      if (hasFavImageFilter.sql) {
-        whereClauses.push(hasFavImageFilter);
-      }
-    }
-
-    // Studio filter
-    if (filters?.studios) {
-      const studioFilter = await this.buildStudioFilterWithHierarchy(filters.studios);
-      if (studioFilter.sql) {
-        whereClauses.push(studioFilter);
-      }
-    }
-
-    // Scenes filter
-    if (filters?.scenes) {
-      const scenesFilter = this.buildScenesFilter(filters.scenes);
-      if (scenesFilter.sql) {
-        whereClauses.push(scenesFilter);
-      }
-    }
-
-    // Performer filter
-    if (filters?.performers) {
-      const performerFilter = this.buildPerformerFilter(filters.performers);
-      if (performerFilter.sql) {
-        whereClauses.push(performerFilter);
-      }
-    }
-
-    // Tag filter
-    if (filters?.tags) {
-      const tagFilter = await this.buildTagFilterWithHierarchy(filters.tags);
-      if (tagFilter.sql) {
-        whereClauses.push(tagFilter);
-      }
-    }
-
-    // Rating filter
-    if (filters?.rating100) {
-      const ratingFilter = buildNumericFilter(filters.rating100, "COALESCE(r.rating, 0)");
-      if (ratingFilter.sql) {
-        whereClauses.push(ratingFilter);
-      }
-    }
-
-    // Image count filter
-    if (filters?.image_count) {
-      const imageCountFilter = buildNumericFilter(filters.image_count, "COALESCE(g.imageCount, 0)");
-      if (imageCountFilter.sql) {
-        whereClauses.push(imageCountFilter);
-      }
-    }
-
-    // Title filter
-    if (filters?.title) {
-      const titleFilter = buildTextFilter(filters.title, "g.title");
-      if (titleFilter.sql) {
-        whereClauses.push(titleFilter);
-      }
-    }
-
-    // Date filters
-    if (filters?.date) {
-      const dateFilter = buildDateFilter(filters.date, "g.date");
-      if (dateFilter.sql) {
-        whereClauses.push(dateFilter);
-      }
-    }
-
-    if (filters?.created_at) {
-      const createdAtFilter = buildDateFilter(filters.created_at, "g.stashCreatedAt");
-      if (createdAtFilter.sql) {
-        whereClauses.push(createdAtFilter);
-      }
-    }
-
-    if (filters?.updated_at) {
-      const updatedAtFilter = buildDateFilter(filters.updated_at, "g.stashUpdatedAt");
-      if (updatedAtFilter.sql) {
-        whereClauses.push(updatedAtFilter);
-      }
-    }
-
-    // Combine WHERE clauses
-    const whereSQL = whereClauses.map((c) => c.sql).filter(Boolean).join(" AND ");
-    const whereParams = whereClauses.flatMap((c) => c.params);
-
-    // Build sort clause
-    const sortClause = this.buildSortClause(options.sort, options.sortDirection, randomSeed);
-
-    // Build full query
-    const offset = (page - 1) * perPage;
-    const sql = `
-      SELECT ${this.SELECT_COLUMNS}
-      ${fromClause.sql}
-      WHERE ${whereSQL}
-      ORDER BY ${sortClause}
-      LIMIT ? OFFSET ?
-    `;
-
-    const params = [...fromClause.params, ...whereParams, perPage, offset];
-
-    logger.info("GalleryQueryBuilder.execute", {
-      whereClauseCount: whereClauses.length,
-      applyExclusions,
-      sort: options.sort,
-      sortDirection: options.sortDirection,
-      paramCount: params.length,
-    });
-
-    // Execute query
-    const queryStart = Date.now();
-    const rows = await prisma.$queryRawUnsafe<GalleryQueryRow[]>(sql, ...params);
-    const queryMs = Date.now() - queryStart;
-
-    // Count query
-    const countStart = Date.now();
-    let total: number;
-
-    // Check if we have any user-data filters that require the JOINs
-    const hasUserDataFilters =
-      filters?.favorite !== undefined ||
-      filters?.rating100 !== undefined ||
-      filters?.hasFavoriteImage;
-
-    if (hasUserDataFilters || applyExclusions) {
-      const countSql = `
-        SELECT COUNT(DISTINCT g.id || ':' || g.stashInstanceId) as total
-        ${fromClause.sql}
-        WHERE ${whereSQL}
-      `;
-      const countParams = [...fromClause.params, ...whereParams];
-      const countResult = await prisma.$queryRawUnsafe<{ total: number }[]>(countSql, ...countParams);
-      total = Number(countResult[0]?.total || 0);
-    } else {
-      // Fast path: count without JOINs
-      const baseWhereClauses = whereClauses.filter(
-        (c) => !c.sql.includes("r.")
-      );
-      const baseWhereSQL = baseWhereClauses.map((c) => c.sql).filter(Boolean).join(" AND ");
-      const baseWhereParams = baseWhereClauses.flatMap((c) => c.params);
-
-      const countSql = `
-        SELECT COUNT(*) as total
-        FROM StashGallery g
-        WHERE ${baseWhereSQL || "1=1"}
-      `;
-      const countResult = await prisma.$queryRawUnsafe<{ total: number }[]>(countSql, ...baseWhereParams);
-      total = Number(countResult[0]?.total || 0);
-    }
-    const countMs = Date.now() - countStart;
-
-    const transformStart = Date.now();
-    const galleries = rows.map((row) => this.transformRow(row));
-    const transformMs = Date.now() - transformStart;
-
-    // Populate relations (performers, tags, studio)
-    const relationsStart = Date.now();
-    await this.populateRelations(galleries);
-    const relationsMs = Date.now() - relationsStart;
-
-    logger.info("GalleryQueryBuilder.execute complete", {
-      queryTimeMs: Date.now() - startTime,
-      breakdown: { queryMs, countMs, transformMs, relationsMs },
-      resultCount: galleries.length,
-      total,
-    });
-
-    return { galleries, total };
-  }
-
 
   /**
    * Transform a raw database row into a NormalizedGallery
    */
-  private transformRow(row: GalleryQueryRow): NormalizedGallery {
+  protected transformRow(row: GalleryQueryRow): NormalizedGallery {
     const gallery = {
       id: row.id,
       instanceId: row.stashInstanceId,
-      title: row.title || getGalleryFallbackTitle(row.folderPath, row.fileBasename),
-      date: row.date || null,
-      code: row.code || null,
-      details: row.details || null,
-      photographer: row.photographer || null,
-      url: row.url || null,
+      title:
+        emptyToNull(row.title) ??
+        getGalleryFallbackTitle(row.folderPath, row.fileBasename),
+      date: emptyToNull(row.date),
+      code: emptyToNull(row.code),
+      details: emptyToNull(row.details),
+      photographer: emptyToNull(row.photographer),
+      url: emptyToNull(row.url),
       urls: parseJsonArray(row.urls),
+      organized: row.organized,
 
       // Counts
-      image_count: row.imageCount || 0,
+      image_count: Number(row.imageCount ?? 0),
 
       // File paths
       folder: row.folderPath ? { path: row.folderPath } : null,
 
       // Cover path - transform to proxy URL with instanceId for multi-instance routing
-      cover: this.transformUrl(row.coverPath, row.stashInstanceId),
+      cover: toProxyUrl(row.coverPath, row.stashInstanceId),
 
       // Cover dimensions (from StashImage via coverImageId)
-      coverWidth: row.coverWidth || null,
-      coverHeight: row.coverHeight || null,
+      coverWidth: zeroToNull(row.coverWidth),
+      coverHeight: zeroToNull(row.coverHeight),
 
       // Timestamps
-      created_at: row.stashCreatedAt || null,
-      updated_at: row.stashUpdatedAt || null,
+      created_at: row.stashCreatedAt?.toISOString() ?? null,
+      updated_at: row.stashUpdatedAt?.toISOString() ?? null,
 
       // User data - Peek user data ONLY
-      rating: row.userRating ?? null,
-      rating100: row.userRating ?? null,
-      favorite: Boolean(row.userFavorite),
+      rating: row.userRating,
+      rating100: row.userRating,
+      favorite: row.userFavorite ?? false,
 
       // Files - empty, populated elsewhere if needed
       files: [] as Array<{ basename: string }>,
 
       // Relations - populated separately
-      studio: row.studioId ? { id: row.studioId, name: "" } as StudioRef : null,
+      studio: row.studioId
+        ? ({ id: row.studioId, name: "" } as StudioRef)
+        : null,
       performers: [] as PerformerRef[],
       tags: [] as TagRef[],
-      scenes: [] as Array<{ id: string; title: string | null; paths: { screenshot: string | null } }>,
+      // Filled by populateRelations
+      relation_totals: { scenes: 0 },
     };
 
     return gallery as NormalizedGallery;
   }
 
   /**
-   * Populate gallery relations (performers, tags, studio)
+   * Each gallery's performers, tags and studio, only those the viewer may
+   * see (`query/nestedRefs.ts`), and its count of the scenes the viewer can
+   * see: one statement per relation for the page. A gallery's studio is on
+   * the gallery's own instance.
    */
-  async populateRelations(galleries: NormalizedGallery[]): Promise<void> {
+  protected async populateRelations(
+    galleries: NormalizedGallery[],
+    ctx: QueryContext
+  ): Promise<void> {
     if (galleries.length === 0) return;
 
-    // Build gallery keys with instanceId for multi-instance support
-    const galleryIds = galleries.map((g) => g.id);
-    const galleryInstanceIds = [...new Set(galleries.map((g) => g.instanceId))];
-
-    // Collect unique (studioId, instanceId) pairs - each gallery's studio comes from its own instance
-    const studioKeys = [...new Map(
-      galleries
-        .filter((g) => g.studio?.id)
-        .map((g) => [`${g.studio?.id}:${g.instanceId}`, { id: g.studio?.id ?? "", instanceId: g.instanceId }])
-    ).values()];
-
-    // Batch load all relations in parallel
-    // Filter by both galleryId AND galleryInstanceId for multi-instance correctness
-    const [performerJunctions, tagJunctions] = await Promise.all([
-      prisma.galleryPerformer.findMany({
-        where: {
-          galleryId: { in: galleryIds },
-          galleryInstanceId: { in: galleryInstanceIds },
-        },
-      }),
-      prisma.galleryTag.findMany({
-        where: {
-          galleryId: { in: galleryIds },
-          galleryInstanceId: { in: galleryInstanceIds },
-        },
-      }),
-    ]);
-
-    // Collect unique entity keys (id:instanceId) from junction tables
-    const performerKeys = [...new Map(
-      performerJunctions.map((j) => [`${j.performerId}:${j.performerInstanceId}`, { id: j.performerId, instanceId: j.performerInstanceId }])
-    ).values()];
-    const tagKeys = [...new Map(
-      tagJunctions.map((j) => [`${j.tagId}:${j.tagInstanceId}`, { id: j.tagId, instanceId: j.tagInstanceId }])
-    ).values()];
-
-    // Build OR conditions for entity queries (need to match on composite keys)
-    const performerOrConditions = performerKeys.map((k) => ({
-      id: k.id,
-      stashInstanceId: k.instanceId,
-    }));
-    const tagOrConditions = tagKeys.map((k) => ({
-      id: k.id,
-      stashInstanceId: k.instanceId,
-    }));
-    const studioOrConditions = studioKeys.map((k) => ({
-      id: k.id,
-      stashInstanceId: k.instanceId,
-    }));
-
-    // Load actual entities (only those that exist) using composite key lookups
+    const studioRefs = galleries.flatMap((gallery): EntityRef[] =>
+      gallery.studio
+        ? [{ id: gallery.studio.id, instanceId: gallery.instanceId }]
+        : []
+    );
     const [performers, tags, studios] = await Promise.all([
-      performerOrConditions.length > 0
-        ? prisma.stashPerformer.findMany({
-            where: { OR: performerOrConditions },
-          })
-        : Promise.resolve([]),
-      tagOrConditions.length > 0
-        ? prisma.stashTag.findMany({
-            where: { OR: tagOrConditions },
-          })
-        : Promise.resolve([]),
-      studioOrConditions.length > 0
-        ? prisma.stashStudio.findMany({
-            where: { OR: studioOrConditions },
-          })
-        : Promise.resolve([]),
+      loadNestedRefs(PERFORMER_REF, GALLERY_PERFORMERS, galleries, ctx),
+      loadNestedRefs(TAG_REF, GALLERY_TAGS, galleries, ctx),
+      loadRefsByKey(STUDIO_REF, studioRefs, ctx),
     ]);
+    const sceneTotals = await this.loadSceneTotals(galleries, ctx);
 
-    // Build entity lookup maps by composite key (id:instanceId)
-    const performersByKey = new Map<string, PerformerRef>();
-    for (const performer of performers) {
-      const key = `${performer.id}:${performer.stashInstanceId}`;
-      performersByKey.set(key, {
-        id: performer.id,
-        instanceId: performer.stashInstanceId,
-        name: performer.name,
-        disambiguation: performer.disambiguation,
-        gender: performer.gender,
-        image_path: this.transformUrl(performer.imagePath, performer.stashInstanceId),
-        favorite: performer.favorite,
-        rating100: performer.rating100,
-      });
-    }
-
-    const tagsByKey = new Map<string, TagRef>();
-    for (const tag of tags) {
-      const key = `${tag.id}:${tag.stashInstanceId}`;
-      tagsByKey.set(key, {
-        id: tag.id,
-        instanceId: tag.stashInstanceId,
-        name: tag.name,
-        image_path: this.transformUrl(tag.imagePath, tag.stashInstanceId),
-        favorite: tag.favorite,
-      });
-    }
-
-    const studiosByKey = new Map<string, StudioRef>();
-    for (const studio of studios) {
-      const key = `${studio.id}:${studio.stashInstanceId}`;
-      studiosByKey.set(key, {
-        id: studio.id,
-        instanceId: studio.stashInstanceId,
-        name: studio.name,
-        image_path: this.transformUrl(studio.imagePath, studio.stashInstanceId),
-        favorite: studio.favorite,
-        parent_studio: studio.parentId ? { id: studio.parentId } : null,
-      });
-    }
-
-    // Build gallery-to-entities maps using junction tables with composite keys
-    // Key format: galleryId:galleryInstanceId -> entities[]
-    const performersByGallery = new Map<string, PerformerRef[]>();
-    for (const junction of performerJunctions) {
-      const performerKey = `${junction.performerId}:${junction.performerInstanceId}`;
-      const performer = performersByKey.get(performerKey);
-      if (!performer) continue; // Skip orphaned junction records
-      const galleryKey = `${junction.galleryId}:${junction.galleryInstanceId}`;
-      const list = performersByGallery.get(galleryKey) || [];
-      list.push(performer);
-      performersByGallery.set(galleryKey, list);
-    }
-
-    const tagsByGallery = new Map<string, TagRef[]>();
-    for (const junction of tagJunctions) {
-      const tagKey = `${junction.tagId}:${junction.tagInstanceId}`;
-      const tag = tagsByKey.get(tagKey);
-      if (!tag) continue; // Skip orphaned junction records
-      const galleryKey = `${junction.galleryId}:${junction.galleryInstanceId}`;
-      const list = tagsByGallery.get(galleryKey) || [];
-      list.push(tag);
-      tagsByGallery.set(galleryKey, list);
-    }
-
-    // Populate galleries using composite keys
     for (const gallery of galleries) {
-      const galleryKey = `${gallery.id}:${gallery.instanceId}`;
-      gallery.performers = performersByGallery.get(galleryKey) || [];
-      gallery.tags = tagsByGallery.get(galleryKey) || [];
-
-      // Hydrate studio with full data using composite key
-      if (gallery.studio?.id) {
-        const studioKey = `${gallery.studio.id}:${gallery.instanceId}`;
-        const fullStudio = studiosByKey.get(studioKey);
-        if (fullStudio) {
-          gallery.studio = fullStudio;
-        }
-      }
+      const key = entityKey(gallery.id, gallery.instanceId);
+      gallery.performers = performers.get(key) ?? [];
+      gallery.tags = tags.get(key) ?? [];
+      gallery.relation_totals = { scenes: sceneTotals.get(key) ?? 0 };
+      // The row's studio id until here; none when the viewer cannot see it
+      gallery.studio = gallery.studio
+        ? (studios.get(entityKey(gallery.studio.id, gallery.instanceId)) ??
+          null)
+        : null;
     }
   }
 
   /**
-   * Transform a Stash URL/path to a proxy URL
-   * @param urlOrPath - The URL or path to transform
-   * @param instanceId - Optional Stash instance ID for multi-instance routing
+   * How many scenes each gallery on the page holds that the viewer can see,
+   * by the gallery's entityKey (none: absent): live scenes, not excluded
+   * for the viewer (with the exclusions applied), on the gallery's own
+   * instance, which the list already holds to the allowed ones. One
+   * statement for the page, driven from its (id, instance) pairs into
+   * SceneGallery's (galleryId, galleryInstanceId) index.
    */
-  private transformUrl(urlOrPath: string | null, instanceId?: string | null): string | null {
-    if (!urlOrPath) return null;
-
-    if (urlOrPath.startsWith("/api/proxy/stash")) {
-      return urlOrPath;
-    }
-
-    let proxyPath: string;
-
-    if (urlOrPath.startsWith("http://") || urlOrPath.startsWith("https://")) {
-      try {
-        const url = new URL(urlOrPath);
-        const pathWithQuery = url.pathname + url.search;
-        proxyPath = `/api/proxy/stash?path=${encodeURIComponent(pathWithQuery)}`;
-      } catch {
-        proxyPath = `/api/proxy/stash?path=${encodeURIComponent(urlOrPath)}`;
-      }
-    } else {
-      proxyPath = `/api/proxy/stash?path=${encodeURIComponent(urlOrPath)}`;
-    }
-
-    if (instanceId) {
-      proxyPath += `&instanceId=${encodeURIComponent(instanceId)}`;
-    }
-
-    return proxyPath;
+  private async loadSceneTotals(
+    galleries: readonly NormalizedGallery[],
+    ctx: QueryContext
+  ): Promise<Map<string, number>> {
+    const exclusion = ctx.applyExclusions
+      ? `LEFT JOIN UserExcludedEntity e ON e.userId = ? AND e.entityType = 'scene' AND e.entityId = s.id AND (e.instanceId = '' OR e.instanceId = s.stashInstanceId)
+      WHERE e.id IS NULL`
+      : "";
+    const rows = await prisma.$queryRawUnsafe<TooltipTotalRow[]>(
+      `WITH page(pid, pinst) AS (
+        SELECT json_extract(value, '$[0]'), json_extract(value, '$[1]') FROM json_each(?)
+      )
+      SELECT pg.pid, pg.pinst, COUNT(*) AS total
+      FROM page pg
+      CROSS JOIN SceneGallery sg ON sg.galleryId = pg.pid AND sg.galleryInstanceId = pg.pinst AND sg.sceneInstanceId = pg.pinst
+      JOIN StashScene s ON s.id = sg.sceneId AND s.stashInstanceId = sg.sceneInstanceId AND s.deletedAt IS NULL
+      ${exclusion}
+      GROUP BY pg.pid, pg.pinst`,
+      pairsJson(galleries),
+      ...(ctx.applyExclusions ? [ctx.userId] : [])
+    );
+    return new Map(
+      rows.map((row) => [entityKey(row.pid, row.pinst), Number(row.total)])
+    );
   }
 }
 

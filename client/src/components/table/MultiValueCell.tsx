@@ -12,13 +12,20 @@ interface Props {
   items: MultiValueItem[] | null | undefined;
   maxVisible?: number;
   emptyText?: string;
+  /** How many there are, when `items` holds only some of them */
+  total?: number;
 }
 
 /**
  * Component for displaying multiple values in a table cell with truncation
  * Shows first N items comma-separated, with a "+X more" button that opens a popover
  */
-const MultiValueCell = ({ items, maxVisible = 2, emptyText = "-" }: Props) => {
+const MultiValueCell = ({
+  items,
+  maxVisible = 2,
+  emptyText = "-",
+  total,
+}: Props) => {
   const [isPopoverOpen, setIsPopoverOpen] = useState(false);
   const [popoverPosition, setPopoverPosition] = useState({ top: 0, left: 0 });
   const buttonRef = useRef<HTMLButtonElement>(null);
@@ -30,7 +37,10 @@ const MultiValueCell = ({ items, maxVisible = 2, emptyText = "-" }: Props) => {
   // Split items into visible and hidden (only if we have items)
   const visibleItems = hasItems ? items.slice(0, maxVisible) : [];
   const hiddenItems = hasItems ? items.slice(maxVisible) : [];
-  const hasMore = hiddenItems.length > 0;
+  // Those the total counts but the list leaves out
+  const unlisted = hasItems ? Math.max((total ?? 0) - items.length, 0) : 0;
+  const moreCount = hiddenItems.length + unlisted;
+  const hasMore = moreCount > 0;
 
   // Calculate popover position
   const calculatePosition = useCallback(() => {
@@ -40,7 +50,7 @@ const MultiValueCell = ({ items, maxVisible = 2, emptyText = "-" }: Props) => {
     const GAP = 4;
     const EDGE_PADDING = 16;
 
-    let top = buttonRect.bottom + GAP;
+    const top = buttonRect.bottom + GAP;
     let left = buttonRect.left;
 
     // Check if popover would go off the right edge
@@ -57,7 +67,8 @@ const MultiValueCell = ({ items, maxVisible = 2, emptyText = "-" }: Props) => {
     setPopoverPosition({ top, left });
   }, []);
 
-  // Handle click outside to close popover
+  // Handle click outside to close popover,
+  // in the capture phase: a Modal stops the press bubbling past its backdrop
   useEffect(() => {
     if (!isPopoverOpen) return;
 
@@ -72,12 +83,12 @@ const MultiValueCell = ({ items, maxVisible = 2, emptyText = "-" }: Props) => {
       }
     };
 
-    document.addEventListener("mousedown", handleClickOutside);
-    document.addEventListener("touchstart", handleClickOutside);
+    document.addEventListener("mousedown", handleClickOutside, true);
+    document.addEventListener("touchstart", handleClickOutside, true);
 
     return () => {
-      document.removeEventListener("mousedown", handleClickOutside);
-      document.removeEventListener("touchstart", handleClickOutside);
+      document.removeEventListener("mousedown", handleClickOutside, true);
+      document.removeEventListener("touchstart", handleClickOutside, true);
     };
   }, [isPopoverOpen]);
 
@@ -98,11 +109,7 @@ const MultiValueCell = ({ items, maxVisible = 2, emptyText = "-" }: Props) => {
 
   // Handle empty/null items
   if (!hasItems) {
-    return (
-      <span style={{ color: "var(--text-muted)" }}>
-        {emptyText}
-      </span>
-    );
+    return <span style={{ color: "var(--text-muted)" }}>{emptyText}</span>;
   }
 
   // Render a single item (as link or text)
@@ -121,7 +128,10 @@ const MultiValueCell = ({ items, maxVisible = 2, emptyText = "-" }: Props) => {
       );
     }
     return (
-      <span key={item.id} style={{ color: isInPopover ? "var(--text-primary)" : undefined }}>
+      <span
+        key={item.id}
+        style={{ color: isInPopover ? "var(--text-primary)" : undefined }}
+      >
         {item.name}
       </span>
     );
@@ -151,10 +161,18 @@ const MultiValueCell = ({ items, maxVisible = 2, emptyText = "-" }: Props) => {
     >
       <div className="p-2 flex flex-col gap-1">
         {items.map((item) => (
-          <div key={item.id} className="py-1 px-2 rounded hover:bg-[var(--bg-secondary)]">
+          <div
+            key={item.id}
+            className="py-1 px-2 rounded hover:bg-[var(--bg-secondary)]"
+          >
             {renderItem(item, true)}
           </div>
         ))}
+        {unlisted > 0 && (
+          <div className="py-1 px-2" style={{ color: "var(--text-muted)" }}>
+            and {unlisted} more
+          </div>
+        )}
       </div>
     </div>
   );
@@ -182,7 +200,7 @@ const MultiValueCell = ({ items, maxVisible = 2, emptyText = "-" }: Props) => {
               color: "var(--text-secondary)",
             }}
           >
-            +{hiddenItems.length} more
+            +{moreCount} more
           </button>
         </>
       )}

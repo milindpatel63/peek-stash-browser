@@ -1,5 +1,70 @@
 import prisma from "../prisma/singleton.js";
+import { dbWriteTransaction } from "../utils/dbWrite.js";
+import {
+  type EntityRef,
+  compositeKey,
+  distinctRefs,
+  entityKey,
+  pairsJson,
+} from "../utils/entityRef.js";
 import { logger } from "../utils/logger.js";
+
+/**
+ * Scenes per batch: one read of their sources, then one write unit (the
+ * JSON column and the SceneInheritedTag rows, one transaction).
+ */
+const BATCH_SIZE = 500;
+
+/** A scene as the batch reads it. */
+interface SceneRow {
+  id: string;
+  stashInstanceId: string;
+  studioId: string | null;
+}
+
+/** An entity whose tags its scenes inherit. */
+export type InheritanceSource = "performer" | "studio" | "group";
+
+/**
+ * The scenes of a batch of sources, one statement per source type, driving
+ * from the bound (id, instance) pairs: `CROSS JOIN` keeps `json_each` as the
+ * outer loop, so each pair searches the junction's reverse index (the
+ * studio's by `studioId`; the `+` keeps the planner off the instance index,
+ * which matches every scene of the instance).
+ */
+const SCENES_OF: Record<InheritanceSource, string> = {
+  performer: `SELECT DISTINCT sp.sceneId AS id, sp.sceneInstanceId AS instanceId
+FROM json_each(?) j
+CROSS JOIN ScenePerformer sp ON sp.performerId = json_extract(j.value, '$[0]') AND sp.performerInstanceId = json_extract(j.value, '$[1]')`,
+  studio: `SELECT s.id AS id, s.stashInstanceId AS instanceId
+FROM json_each(?) j
+CROSS JOIN StashScene s ON s.studioId = json_extract(j.value, '$[0]') AND +s.stashInstanceId = json_extract(j.value, '$[1]')
+WHERE s.deletedAt IS NULL`,
+  group: `SELECT DISTINCT sg.sceneId AS id, sg.sceneInstanceId AS instanceId
+FROM json_each(?) j
+CROSS JOIN SceneGroup sg ON sg.groupId = json_extract(j.value, '$[0]') AND sg.groupInstanceId = json_extract(j.value, '$[1]')`,
+};
+
+/** What a batch passes on: the sources, and the tags they carry. */
+const SOURCE_TABLES = {
+  performer: "StashPerformer",
+  studio: "StashStudio",
+  group: "StashGroup",
+  tag: "StashTag",
+} as const;
+
+type SourceType = keyof typeof SOURCE_TABLES;
+
+const SOURCE_TYPES: readonly SourceType[] = [
+  "performer",
+  "studio",
+  "group",
+  "tag",
+];
+
+/** In-memory key of one source of a type. */
+const sourceKey = (type: SourceType, id: string, instanceId: string) =>
+  compositeKey(type, id, instanceId);
 
 /**
  * SceneTagInheritanceService
@@ -15,34 +80,58 @@ import { logger } from "../utils/logger.js";
  * Rules:
  * - Direct scene tags are NOT included in inheritedTagIds (they're already in SceneTag)
  * - Tags are deduplicated across all sources
- * - Stored as JSON array for efficient querying
+ * - Stored twice, in one transaction per batch: the JSON array the API and
+ *   the cards read (`inheritedTagIds`), and one SceneInheritedTag row per
+ *   tag (on the scene's instance), which the tag filter, the tag counts and
+ *   the exclusion compute read by index
  * - Multi-instance aware: uses composite keys (id:instanceId) to prevent cross-instance contamination
+ * - A soft-deleted performer, studio, group or tag passes nothing on: Stash
+ *   deleted or merged it, and the scenes still linking to it are fetched
+ *   again by the sync that soft-deleted it
+ * - Scoped: a sync recomputes only the scenes its change set reaches (see
+ *   `scenesInheritingFrom`); a full sync, or a scope past the change set's
+ *   limit, recomputes every live scene
  */
 class SceneTagInheritanceService {
-  async computeInheritedTags(): Promise<void> {
+  /**
+   * Recompute `inheritedTagIds` and the SceneInheritedTag rows for `scope`:
+   * every live scene ("all", the default), or the live scenes among the
+   * given refs (soft-deleted and unknown refs are skipped), 500 at a time.
+   */
+  async computeInheritedTags(
+    scope: readonly EntityRef[] | "all" = "all"
+  ): Promise<void> {
     const startTime = Date.now();
 
     try {
-      const scenes = await prisma.stashScene.findMany({
-        where: { deletedAt: null },
-        select: { id: true, stashInstanceId: true, studioId: true },
-      });
+      let sceneCount = 0;
+      if (scope === "all") {
+        const scenes = await prisma.stashScene.findMany({
+          where: { deletedAt: null },
+          select: { id: true, stashInstanceId: true, studioId: true },
+        });
+        for (let i = 0; i < scenes.length; i += BATCH_SIZE) {
+          const batch = scenes.slice(i, i + BATCH_SIZE);
+          await this.processBatch(batch);
+          sceneCount += batch.length;
 
-      const BATCH_SIZE = 500;
-      let processedCount = 0;
-
-      for (let i = 0; i < scenes.length; i += BATCH_SIZE) {
-        const batch = scenes.slice(i, i + BATCH_SIZE);
-        await this.processBatch(batch);
-        processedCount += batch.length;
-
-        if (processedCount % 1000 === 0) {
-          logger.info(`Processed ${processedCount}/${scenes.length} scenes`);
+          if (sceneCount % 1000 === 0) {
+            logger.info(`Processed ${sceneCount}/${scenes.length} scenes`);
+          }
+        }
+      } else {
+        const refs = distinctRefs(scope);
+        for (let i = 0; i < refs.length; i += BATCH_SIZE) {
+          const batch = await this.liveScenes(refs.slice(i, i + BATCH_SIZE));
+          if (batch.length > 0) await this.processBatch(batch);
+          sceneCount += batch.length;
         }
       }
 
       const duration = Date.now() - startTime;
-      logger.info(`Scene tag inheritance computed in ${duration}ms for ${scenes.length} scenes`);
+      logger.info(
+        `Scene tag inheritance computed in ${duration}ms for ${sceneCount} scenes${scope === "all" ? "" : " (scoped)"}`
+      );
     } catch (error) {
       logger.error("Failed to compute scene tag inheritance", {
         error: error instanceof Error ? error.message : "Unknown error",
@@ -51,22 +140,73 @@ class SceneTagInheritanceService {
     }
   }
 
-  private async processBatch(scenes: { id: string; stashInstanceId: string; studioId: string | null }[]): Promise<void> {
+  /**
+   * The scenes that inherit from these performers, studios or groups. Some
+   * may be soft-deleted; `computeInheritedTags` skips those.
+   */
+  async scenesInheritingFrom(
+    source: InheritanceSource,
+    refs: readonly EntityRef[]
+  ): Promise<EntityRef[]> {
+    if (refs.length === 0) return [];
+    return prisma.$queryRawUnsafe<EntityRef[]>(
+      SCENES_OF[source],
+      pairsJson(refs)
+    );
+  }
+
+  /**
+   * The soft-deleted ones among a batch's sources, as `sourceKey`s: one
+   * statement, each type's (id, instance) pairs bound as one JSON list and
+   * looked up by primary key. Usually none.
+   */
+  private async softDeletedSources(
+    sources: Record<SourceType, readonly EntityRef[]>
+  ): Promise<Set<string>> {
+    const arms: string[] = [];
+    const params: string[] = [];
+    for (const type of SOURCE_TYPES) {
+      const refs = distinctRefs(sources[type]);
+      if (refs.length === 0) continue;
+      arms.push(`SELECT '${type}' AS type, x.id AS id, x.stashInstanceId AS instanceId
+FROM json_each(?) j
+CROSS JOIN ${SOURCE_TABLES[type]} x ON x.id = json_extract(j.value, '$[0]') AND x.stashInstanceId = json_extract(j.value, '$[1]')
+WHERE x.deletedAt IS NOT NULL`);
+      params.push(pairsJson(refs));
+    }
+    if (arms.length === 0) return new Set();
+    const rows = await prisma.$queryRawUnsafe<
+      Array<{ type: SourceType; id: string; instanceId: string }>
+    >(arms.join("\nUNION ALL\n"), ...params);
+    return new Set(rows.map((r) => sourceKey(r.type, r.id, r.instanceId)));
+  }
+
+  /** The live scenes among `refs`, each looked up by its primary key. */
+  private async liveScenes(refs: readonly EntityRef[]): Promise<SceneRow[]> {
+    return prisma.$queryRawUnsafe<SceneRow[]>(
+      `SELECT s.id AS id, s.stashInstanceId AS stashInstanceId, s.studioId AS studioId
+FROM json_each(?) j
+CROSS JOIN StashScene s ON s.id = json_extract(j.value, '$[0]') AND s.stashInstanceId = json_extract(j.value, '$[1]')
+WHERE s.deletedAt IS NULL`,
+      pairsJson(refs)
+    );
+  }
+
+  private async processBatch(scenes: SceneRow[]): Promise<void> {
     const sceneIds = scenes.map((s) => s.id);
     const sceneInstanceIds = [...new Set(scenes.map((s) => s.stashInstanceId))];
 
-    // Composite key helper
-    const KEY_SEP = "\0";
-    const compositeKey = (id: string, instanceId: string) => `${id}${KEY_SEP}${instanceId}`;
-
     // Get direct tags for all scenes in batch (scoped by instance)
     const directTags = await prisma.sceneTag.findMany({
-      where: { sceneId: { in: sceneIds }, sceneInstanceId: { in: sceneInstanceIds } },
+      where: {
+        sceneId: { in: sceneIds },
+        sceneInstanceId: { in: sceneInstanceIds },
+      },
       select: { sceneId: true, sceneInstanceId: true, tagId: true },
     });
     const directTagsByScene = new Map<string, Set<string>>();
     for (const dt of directTags) {
-      const key = compositeKey(dt.sceneId, dt.sceneInstanceId);
+      const key = entityKey(dt.sceneId, dt.sceneInstanceId);
       if (!directTagsByScene.has(key)) {
         directTagsByScene.set(key, new Set());
       }
@@ -75,75 +215,158 @@ class SceneTagInheritanceService {
 
     // Get performer tags for all scenes in batch (scoped by instance)
     const scenePerformers = await prisma.scenePerformer.findMany({
-      where: { sceneId: { in: sceneIds }, sceneInstanceId: { in: sceneInstanceIds } },
-      select: { sceneId: true, sceneInstanceId: true, performerId: true, performerInstanceId: true },
+      where: {
+        sceneId: { in: sceneIds },
+        sceneInstanceId: { in: sceneInstanceIds },
+      },
+      select: {
+        sceneId: true,
+        sceneInstanceId: true,
+        performerId: true,
+        performerInstanceId: true,
+      },
     });
-    const performerIds = [...new Set(scenePerformers.map((sp) => sp.performerId))];
-    const performerInstanceIds = [...new Set(scenePerformers.map((sp) => sp.performerInstanceId))];
+    const performerIds = [
+      ...new Set(scenePerformers.map((sp) => sp.performerId)),
+    ];
+    const performerInstanceIds = [
+      ...new Set(scenePerformers.map((sp) => sp.performerInstanceId)),
+    ];
     const performerTags = await prisma.performerTag.findMany({
-      where: { performerId: { in: performerIds }, performerInstanceId: { in: performerInstanceIds } },
-      select: { performerId: true, performerInstanceId: true, tagId: true },
+      where: {
+        performerId: { in: performerIds },
+        performerInstanceId: { in: performerInstanceIds },
+      },
+      select: {
+        performerId: true,
+        performerInstanceId: true,
+        tagId: true,
+        tagInstanceId: true,
+      },
     });
+
+    // Get studio tags (scoped by instance)
+    const studioIds = [
+      ...new Set(
+        scenes.filter((s) => s.studioId).map((s) => s.studioId as string)
+      ),
+    ];
+    const studioTags = await prisma.studioTag.findMany({
+      where: {
+        studioId: { in: studioIds },
+        studioInstanceId: { in: sceneInstanceIds },
+      },
+      select: {
+        studioId: true,
+        studioInstanceId: true,
+        tagId: true,
+        tagInstanceId: true,
+      },
+    });
+
+    // Get group tags for all scenes in batch (scoped by instance)
+    const sceneGroups = await prisma.sceneGroup.findMany({
+      where: {
+        sceneId: { in: sceneIds },
+        sceneInstanceId: { in: sceneInstanceIds },
+      },
+      select: {
+        sceneId: true,
+        sceneInstanceId: true,
+        groupId: true,
+        groupInstanceId: true,
+      },
+    });
+    const groupIds = [...new Set(sceneGroups.map((sg) => sg.groupId))];
+    const groupInstanceIds = [
+      ...new Set(sceneGroups.map((sg) => sg.groupInstanceId)),
+    ];
+    const groupTags = await prisma.groupTag.findMany({
+      where: {
+        groupId: { in: groupIds },
+        groupInstanceId: { in: groupInstanceIds },
+      },
+      select: {
+        groupId: true,
+        groupInstanceId: true,
+        tagId: true,
+        tagInstanceId: true,
+      },
+    });
+
+    // A soft-deleted performer, studio, group or tag (Stash deleted or
+    // merged it) passes nothing on, though the rows linking to it stay until
+    // the entities that link to it are fetched again
+    const deleted = await this.softDeletedSources({
+      performer: scenePerformers.map((sp) => ({
+        id: sp.performerId,
+        instanceId: sp.performerInstanceId,
+      })),
+      studio: scenes.flatMap((s) =>
+        s.studioId ? [{ id: s.studioId, instanceId: s.stashInstanceId }] : []
+      ),
+      group: sceneGroups.map((sg) => ({
+        id: sg.groupId,
+        instanceId: sg.groupInstanceId,
+      })),
+      tag: [...performerTags, ...studioTags, ...groupTags].map((t) => ({
+        id: t.tagId,
+        instanceId: t.tagInstanceId,
+      })),
+    });
+    const isLive = (type: SourceType, id: string, instanceId: string) =>
+      !deleted.has(sourceKey(type, id, instanceId));
+
     const tagsByPerformer = new Map<string, string[]>();
     for (const pt of performerTags) {
-      const key = compositeKey(pt.performerId, pt.performerInstanceId);
+      if (!isLive("tag", pt.tagId, pt.tagInstanceId)) continue;
+      const key = entityKey(pt.performerId, pt.performerInstanceId);
       if (!tagsByPerformer.has(key)) {
         tagsByPerformer.set(key, []);
       }
       tagsByPerformer.get(key)?.push(pt.tagId);
     }
 
-    // Get studio tags (scoped by instance)
-    const studioIds = [...new Set(scenes.filter((s) => s.studioId).map((s) => s.studioId as string))];
-    const studioTags = await prisma.studioTag.findMany({
-      where: { studioId: { in: studioIds }, studioInstanceId: { in: sceneInstanceIds } },
-      select: { studioId: true, studioInstanceId: true, tagId: true },
-    });
     const tagsByStudio = new Map<string, string[]>();
     for (const st of studioTags) {
-      const key = compositeKey(st.studioId, st.studioInstanceId);
+      if (!isLive("tag", st.tagId, st.tagInstanceId)) continue;
+      const key = entityKey(st.studioId, st.studioInstanceId);
       if (!tagsByStudio.has(key)) {
         tagsByStudio.set(key, []);
       }
       tagsByStudio.get(key)?.push(st.tagId);
     }
 
-    // Get group tags for all scenes in batch (scoped by instance)
-    const sceneGroups = await prisma.sceneGroup.findMany({
-      where: { sceneId: { in: sceneIds }, sceneInstanceId: { in: sceneInstanceIds } },
-      select: { sceneId: true, sceneInstanceId: true, groupId: true, groupInstanceId: true },
-    });
-    const groupIds = [...new Set(sceneGroups.map((sg) => sg.groupId))];
-    const groupInstanceIds = [...new Set(sceneGroups.map((sg) => sg.groupInstanceId))];
-    const groupTags = await prisma.groupTag.findMany({
-      where: { groupId: { in: groupIds }, groupInstanceId: { in: groupInstanceIds } },
-      select: { groupId: true, groupInstanceId: true, tagId: true },
-    });
     const tagsByGroup = new Map<string, string[]>();
     for (const gt of groupTags) {
-      const key = compositeKey(gt.groupId, gt.groupInstanceId);
+      if (!isLive("tag", gt.tagId, gt.tagInstanceId)) continue;
+      const key = entityKey(gt.groupId, gt.groupInstanceId);
       if (!tagsByGroup.has(key)) {
         tagsByGroup.set(key, []);
       }
       tagsByGroup.get(key)?.push(gt.tagId);
     }
 
-    // Build scene -> performer mapping (using composite keys)
+    // Build scene -> performer mapping (using composite keys), live ones
     const performersByScene = new Map<string, string[]>();
     for (const sp of scenePerformers) {
-      const sceneKey = compositeKey(sp.sceneId, sp.sceneInstanceId);
-      const perfKey = compositeKey(sp.performerId, sp.performerInstanceId);
+      if (!isLive("performer", sp.performerId, sp.performerInstanceId)) {
+        continue;
+      }
+      const sceneKey = entityKey(sp.sceneId, sp.sceneInstanceId);
+      const perfKey = entityKey(sp.performerId, sp.performerInstanceId);
       if (!performersByScene.has(sceneKey)) {
         performersByScene.set(sceneKey, []);
       }
       performersByScene.get(sceneKey)?.push(perfKey);
     }
 
-    // Build scene -> group mapping (using composite keys)
+    // Build scene -> group mapping (using composite keys), live ones
     const groupsByScene = new Map<string, string[]>();
     for (const sg of sceneGroups) {
-      const sceneKey = compositeKey(sg.sceneId, sg.sceneInstanceId);
-      const grpKey = compositeKey(sg.groupId, sg.groupInstanceId);
+      if (!isLive("group", sg.groupId, sg.groupInstanceId)) continue;
+      const sceneKey = entityKey(sg.sceneId, sg.sceneInstanceId);
+      const grpKey = entityKey(sg.groupId, sg.groupInstanceId);
       if (!groupsByScene.has(sceneKey)) {
         groupsByScene.set(sceneKey, []);
       }
@@ -151,17 +374,23 @@ class SceneTagInheritanceService {
     }
 
     // Compute inherited tags for each scene
-    const updates: { id: string; instanceId: string; inheritedTagIds: string }[] = [];
+    const updates: {
+      id: string;
+      instanceId: string;
+      inheritedTagIds: string;
+    }[] = [];
+    /** The junction rows: [sceneId, instanceId, tagId] */
+    const rows: [string, string, string][] = [];
 
     for (const scene of scenes) {
-      const sceneKey = compositeKey(scene.id, scene.stashInstanceId);
+      const sceneKey = entityKey(scene.id, scene.stashInstanceId);
       const inheritedTags = new Set<string>();
-      const directTagsForScene = directTagsByScene.get(sceneKey) || new Set();
+      const directTagsForScene = directTagsByScene.get(sceneKey) ?? new Set();
 
       // Collect performer tags (using composite performer keys)
-      const performers = performersByScene.get(sceneKey) || [];
+      const performers = performersByScene.get(sceneKey) ?? [];
       for (const performerKey of performers) {
-        const tags = tagsByPerformer.get(performerKey) || [];
+        const tags = tagsByPerformer.get(performerKey) ?? [];
         for (const tagId of tags) {
           if (!directTagsForScene.has(tagId)) {
             inheritedTags.add(tagId);
@@ -170,9 +399,12 @@ class SceneTagInheritanceService {
       }
 
       // Collect studio tags (studio is on the same instance as the scene)
-      if (scene.studioId) {
-        const studioKey = compositeKey(scene.studioId, scene.stashInstanceId);
-        const tags = tagsByStudio.get(studioKey) || [];
+      if (
+        scene.studioId &&
+        isLive("studio", scene.studioId, scene.stashInstanceId)
+      ) {
+        const studioKey = entityKey(scene.studioId, scene.stashInstanceId);
+        const tags = tagsByStudio.get(studioKey) ?? [];
         for (const tagId of tags) {
           if (!directTagsForScene.has(tagId)) {
             inheritedTags.add(tagId);
@@ -181,9 +413,9 @@ class SceneTagInheritanceService {
       }
 
       // Collect group tags (using composite group keys)
-      const groups = groupsByScene.get(sceneKey) || [];
+      const groups = groupsByScene.get(sceneKey) ?? [];
       for (const groupKey of groups) {
-        const tags = tagsByGroup.get(groupKey) || [];
+        const tags = tagsByGroup.get(groupKey) ?? [];
         for (const tagId of tags) {
           if (!directTagsForScene.has(tagId)) {
             inheritedTags.add(tagId);
@@ -196,25 +428,58 @@ class SceneTagInheritanceService {
         instanceId: scene.stashInstanceId,
         inheritedTagIds: JSON.stringify(Array.from(inheritedTags)),
       });
+      for (const tagId of inheritedTags) {
+        rows.push([scene.id, scene.stashInstanceId, tagId]);
+      }
     }
 
-    // Bulk update using raw SQL for performance
-    // SQLite doesn't support UPDATE FROM, so we use CASE expressions
-    // Use composite key (id, stashInstanceId) for multi-instance correctness
-    // Note: IDs come from our database (Stash UUIDs), not user input
+    // One unit per batch: the JSON column (a CASE UPDATE, since SQLite has
+    // no UPDATE FROM), then the batch's junction rows replaced. Each CASE
+    // arm and the WHERE match the (id, stashInstanceId) pair, so two
+    // instances sharing a scene id keep their own tags; the junction
+    // statements take the pairs and rows as one JSON parameter each. Every
+    // value is bound. Reads of either (LinkCountService.inheritedTagsOf,
+    // around this step) see both old or both new.
     if (updates.length > 0) {
       const cases = updates
-        .map((u) => `WHEN '${u.id}' THEN '${u.inheritedTagIds.replace(/'/g, "''")}'`)
+        .map(() => "WHEN id = ? AND stashInstanceId = ? THEN ?")
         .join(" ");
-      const idInstancePairs = updates
-        .map((u) => `('${u.id}', '${u.instanceId}')`)
-        .join(",");
-
-      await prisma.$executeRawUnsafe(`
-        UPDATE StashScene
-        SET inheritedTagIds = CASE id ${cases} END
-        WHERE (id, stashInstanceId) IN (${idInstancePairs})
-      `);
+      const pairs = updates.map(() => "(?, ?)").join(", ");
+      const updateParams = [
+        ...updates.flatMap((u) => [u.id, u.instanceId, u.inheritedTagIds]),
+        ...updates.flatMap((u) => [u.id, u.instanceId]),
+      ];
+      const scenesJson = pairsJson(
+        updates.map((u) => ({ id: u.id, instanceId: u.instanceId }))
+      );
+      const rowsJson = JSON.stringify(rows);
+      await dbWriteTransaction("inheritance.sceneTags", async (tx) => {
+        await tx.$executeRawUnsafe(
+          `UPDATE StashScene
+         SET inheritedTagIds = CASE ${cases} END
+         WHERE (id, stashInstanceId) IN (VALUES ${pairs})`,
+          ...updateParams
+        );
+        await tx.$executeRawUnsafe(
+          `DELETE FROM SceneInheritedTag
+           WHERE rowid IN (
+             SELECT sit.rowid FROM json_each(?) p
+             CROSS JOIN SceneInheritedTag sit
+               ON sit.sceneId = json_extract(p.value, '$[0]')
+              AND sit.sceneInstanceId = json_extract(p.value, '$[1]')
+           )`,
+          scenesJson
+        );
+        if (rows.length > 0) {
+          await tx.$executeRawUnsafe(
+            `INSERT INTO SceneInheritedTag (sceneId, sceneInstanceId, tagId, tagInstanceId)
+             SELECT json_extract(r.value, '$[0]'), json_extract(r.value, '$[1]'),
+                    json_extract(r.value, '$[2]'), json_extract(r.value, '$[1]')
+             FROM json_each(?) r`,
+            rowsJson
+          );
+        }
+      });
     }
   }
 }

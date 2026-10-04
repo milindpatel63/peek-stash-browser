@@ -47,50 +47,6 @@ declare module "video.js" {
 // ---------------------------------------------------------------------------
 // Packages that ship no types
 // ---------------------------------------------------------------------------
-declare module "crypto-js" {
-  const CryptoJS: {
-    SHA256(message: string): any;
-    enc: { Hex: any; [key: string]: any };
-    [key: string]: any;
-  };
-  export default CryptoJS;
-}
-
-declare module "videojs-vtt.js" {
-  export const WebVTT: {
-    Parser: new (window: Window, decoder: any) => {
-      oncue: ((cue: any) => void) | null;
-      parse(data: any): void;
-      flush(): void;
-    };
-    StringDecoder(): any;
-  };
-}
-
-declare module "@silvermine/videojs-airplay" {
-  const plugin: (videojs: any) => void;
-  export default plugin;
-}
-
-declare module "@silvermine/videojs-chromecast" {
-  const plugin: (videojs: any) => void;
-  export default plugin;
-}
-
-declare module "videojs-vr" {
-  // Side-effect import only — registers itself on the player prototype
-}
-
 declare module "videojs-seek-buttons" {
   // Side-effect import only
-}
-
-declare module "localforage" {
-  const localForage: {
-    getItem<T = any>(key: string): Promise<T | null>;
-    setItem<T = any>(key: string, value: T): Promise<T>;
-    removeItem(key: string): Promise<void>;
-    [key: string]: any;
-  };
-  export default localForage;
 }

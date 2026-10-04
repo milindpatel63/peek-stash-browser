@@ -5,8 +5,10 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Keyboard Navigation Focus Styles - TV-friendly indicators */
-.keyboard-focus {
+/* TV mode focus (html.tv-mode, set by TVModeProvider): the arrow keys move
+   DOM focus (TVNavigator), so the focused card or control carries a large,
+   TV-friendly indicator */
+html.tv-mode [data-tv-item]:focus-visible {
   outline: none !important;
   box-shadow:
     var(--focus-ring-shadow),
@@ -15,10 +17,9 @@
   z-index: 10 !important;
   transition: all 0.2s ease-in-out !important;
   border: 3px solid var(--focus-ring-color) !important;
-  border-opacity: 0.8;
 }
 
-.keyboard-focus::before {
+html.tv-mode [data-tv-item]:focus-visible::before {
   content: "";
   position: absolute;
   inset: -8px;
@@ -26,6 +27,21 @@
   background: linear-gradient(135deg, var(--selection-bg), var(--selection-bg));
   pointer-events: none;
   animation: pulse-glow 2s ease-in-out infinite;
+}
+
+/* A tag tree row spans the page: no zoom (it would overflow the page) and no
+   border (it would shift the row); the ring is an outline */
+html.tv-mode [role="treeitem"][data-tv-item]:focus-visible {
+  transform: none !important;
+  border: none !important;
+  outline: 3px solid var(--focus-ring-color) !important;
+  outline-offset: 2px;
+}
+
+html.tv-mode :focus-visible:not([data-tv-item]) {
+  outline: 3px solid var(--focus-ring-color) !important;
+  outline-offset: 2px;
+  box-shadow: var(--focus-ring-shadow);
 }
 
 @keyframes pulse-glow {
@@ -49,8 +65,7 @@ a:focus-visible,
   box-shadow: var(--focus-ring-shadow);
 }
 
-/* Skip navigation on mouse interaction */
-.keyboard-focus:hover {
+html.tv-mode [data-tv-item]:focus-visible:hover {
   box-shadow:
     var(--focus-ring-shadow),
     0 12px 32px rgba(0, 0, 0, 0.5) !important;
@@ -125,21 +140,6 @@ a:focus-visible,
     0 4px 12px rgba(0, 0, 0, 0.6);
 }
 
-/* Filter control highlight animation - used when clicking filter chips */
-@keyframes filter-highlight-pulse {
-  0% {
-    box-shadow: 0 0 0 3px var(--accent-primary);
-  }
-  100% {
-    box-shadow: none;
-  }
-}
-
-.filter-highlight {
-  animation: filter-highlight-pulse 1.5s ease-out;
-  border-radius: 0.375rem;
-}
-
 /* Marquee text scroll animation - for overflowing card titles */
 @keyframes marquee-scroll {
   /* Pause at start (0-15%) */
@@ -165,39 +165,39 @@ a:focus-visible,
 
 /* Default (medium density) - base sizes (close to original) */
 .card-grid-responsive {
-  --card-title-size: 0.9375rem;     /* 15px */
-  --card-subtitle-size: 0.8125rem;  /* 13px */
-  --card-description-size: 0.8125rem;/* 13px */
+  --card-title-size: 0.9375rem; /* 15px */
+  --card-subtitle-size: 0.8125rem; /* 13px */
+  --card-description-size: 0.8125rem; /* 13px */
   --card-indicator-size: 0.6875rem; /* 11px */
-  --card-padding: 0.5rem;           /* p-2 */
-  --card-image-margin: 0.75rem;     /* mb-3 */
-  --card-title-margin: 0.5rem;      /* mb-2 */
+  --card-padding: 0.5rem; /* p-2 */
+  --card-image-margin: 0.75rem; /* mb-3 */
+  --card-title-margin: 0.5rem; /* mb-2 */
   --card-rating-icon-size: 18px;
   --card-rating-gap: 0.5rem;
 }
 
 /* Small density - compact text for more cards */
 .density-small {
-  --card-title-size: 0.8125rem;     /* 13px */
-  --card-subtitle-size: 0.75rem;    /* 12px */
+  --card-title-size: 0.8125rem; /* 13px */
+  --card-subtitle-size: 0.75rem; /* 12px */
   --card-description-size: 0.75rem; /* 12px */
-  --card-indicator-size: 0.625rem;  /* 10px */
-  --card-padding: 0.375rem;         /* smaller padding */
-  --card-image-margin: 0.5rem;      /* mb-2 */
-  --card-title-margin: 0.375rem;    /* smaller margin */
+  --card-indicator-size: 0.625rem; /* 10px */
+  --card-padding: 0.375rem; /* smaller padding */
+  --card-image-margin: 0.5rem; /* mb-2 */
+  --card-title-margin: 0.375rem; /* smaller margin */
   --card-rating-icon-size: 14px;
   --card-rating-gap: 0.25rem;
 }
 
 /* Large density - more readable text for fewer cards */
 .density-large {
-  --card-title-size: 1rem;          /* 16px - text-base (original) */
-  --card-subtitle-size: 0.875rem;   /* 14px - text-sm (original) */
-  --card-description-size: 0.875rem;/* 14px - text-sm (original) */
-  --card-indicator-size: 0.75rem;   /* 12px - text-xs */
-  --card-padding: 0.625rem;         /* slightly more padding */
-  --card-image-margin: 0.875rem;    /* slightly more margin */
-  --card-title-margin: 0.625rem;    /* slightly more margin */
+  --card-title-size: 1rem; /* 16px - text-base (original) */
+  --card-subtitle-size: 0.875rem; /* 14px - text-sm (original) */
+  --card-description-size: 0.875rem; /* 14px - text-sm (original) */
+  --card-indicator-size: 0.75rem; /* 12px - text-xs */
+  --card-padding: 0.625rem; /* slightly more padding */
+  --card-image-margin: 0.875rem; /* slightly more margin */
+  --card-title-margin: 0.625rem; /* slightly more margin */
   --card-rating-icon-size: 20px;
   --card-rating-gap: 0.5rem;
 }
@@ -262,4 +262,3 @@ a:focus-visible,
   padding: 0.125rem 0.375rem;
   min-width: auto;
 }
-

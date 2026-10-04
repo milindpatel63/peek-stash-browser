@@ -1,31 +1,29 @@
-import { useQuery } from "@tanstack/react-query";
+import { keepPreviousData, skipToken, useQuery } from "@tanstack/react-query";
+import { fetchListPage, libraryListTotal } from "../../utils/listQuery";
+import { type LibrarySearchParams, libraryApi } from "../library";
 import { queryKeys } from "../queryKeys";
-import { libraryApi, type LibrarySearchParams } from "../library";
 
-export function useGalleryList(params: LibrarySearchParams | null, instanceId?: string) {
-  return useQuery({
-    queryKey: queryKeys.galleries.list(instanceId, (params ?? {}) as Record<string, unknown>),
-    queryFn: ({ signal }) => libraryApi.findGalleries(params!, signal),
-    enabled: params !== null,
-  });
-}
-
-export function useGalleryDetail(id: string | undefined, instanceId?: string) {
-  return useQuery({
-    queryKey: queryKeys.galleries.detail(instanceId, id!),
-    queryFn: () => libraryApi.findGalleryById(id!, instanceId ?? null),
-    enabled: !!id,
-  });
-}
-
-export function useGalleryImages(
-  galleryId: string | undefined,
-  options: { page?: number; per_page?: number; instanceId?: string } = {},
+export function useGalleryList(
+  params: LibrarySearchParams<"gallery"> | null,
+  instanceId?: string
 ) {
-  const { page = 1, per_page = 0, instanceId } = options;
   return useQuery({
-    queryKey: queryKeys.galleries.images(instanceId, galleryId!, { page, per_page } as Record<string, unknown>),
-    queryFn: () => libraryApi.getGalleryImages(galleryId!, { page, per_page, instanceId: instanceId ?? null }),
-    enabled: !!galleryId,
+    queryKey: queryKeys.galleries.list(
+      instanceId,
+      (params ?? {}) as Record<string, unknown>
+    ),
+    queryFn:
+      params === null
+        ? skipToken
+        : (context) =>
+            fetchListPage(
+              context,
+              params,
+              libraryListTotal("findGalleries"),
+              (request) => libraryApi.findGalleries(request, context.signal)
+            ),
+    // Keep the current results on screen while the next page loads; a page
+    // change reuses the list's count (`fetchListPage`)
+    placeholderData: keepPreviousData,
   });
 }

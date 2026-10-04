@@ -11,11 +11,22 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitReturns": true,
     "paths": {
       "@peek/shared-types": ["../shared/dist/index.d.ts"],
       "@peek/shared-types/*": ["../shared/dist/*"]
     }
   },
   "include": ["**/*.ts"],
-  "exclude": ["node_modules", "dist", "tests", "integration", "**/*.test.ts", "**/__tests__"]
+  "exclude": [
+    "node_modules",
+    "dist",
+    "tests",
+    "integration",
+    "**/*.test.ts",
+    "**/__tests__"
+  ]
 }

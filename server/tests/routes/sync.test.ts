@@ -1,0 +1,127 @@
+/**
+ * The sync routes after the plugin webhook's removal (item 22): no
+ * `POST /notify`, and `PUT /settings` passes the scheduler only the settings
+ * that still exist, and none for a request without a body.
+ */
+import type { NextFunction, Request, Response } from "express";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { stashSyncService } from "../../services/StashSyncService.js";
+import { syncScheduler } from "../../services/SyncScheduler.js";
+import {
+  findHandler,
+  malformed,
+  reqFor,
+  resFor,
+  testUser,
+} from "../helpers/controllerTestUtils.js";
+
+vi.mock("../../middleware/auth.js", () => ({
+  authenticate: vi.fn((_req: Request, _res: Response, next: NextFunction) =>
+    next()
+  ),
+  requireAdmin: vi.fn((_req: Request, _res: Response, next: NextFunction) =>
+    next()
+  ),
+}));
+
+vi.mock("../../services/StashSyncService.js", () => ({
+  stashSyncService: {
+    getSyncStatus: vi.fn(),
+  },
+}));
+
+vi.mock("../../services/SyncScheduler.js", () => ({
+  syncScheduler: {
+    updateSettings: vi.fn(),
+  },
+}));
+
+vi.mock("../../services/StashInstanceManager.js", () => ({
+  stashInstanceManager: {},
+}));
+
+vi.mock("../../utils/logger.js", () => ({
+  logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+}));
+
+const mockSyncService = vi.mocked(stashSyncService, true);
+const mockScheduler = vi.mocked(syncScheduler, true);
+
+async function syncRouter() {
+  const { default: router } = await import("../../routes/sync.js");
+  return router;
+}
+
+describe("sync routes", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockScheduler.updateSettings.mockResolvedValue(undefined);
+    mockSyncService.getSyncStatus.mockResolvedValue({
+      inProgress: false,
+      activeJob: null,
+      settings: { syncIntervalMinutes: 120, enableScanSubscription: true },
+      instances: [],
+    });
+  });
+
+  it("a failing status lookup reaches the error handler", async () => {
+    mockSyncService.getSyncStatus.mockRejectedValue(new Error("DB down"));
+    const handler = findHandler(await syncRouter(), "get", "/status");
+    const res = resFor(handler);
+
+    await expect(
+      handler(
+        reqFor(handler, { user: testUser({ role: "ADMIN" }) }),
+        res,
+        () => {}
+      )
+    ).rejects.toThrow("DB down");
+
+    expect(res.json).not.toHaveBeenCalled();
+  });
+
+  it("has no POST /notify route", async () => {
+    const router = await syncRouter();
+
+    expect(() => findHandler(router, "post", "/notify")).toThrow(
+      "No POST /notify route"
+    );
+  });
+
+  it("PUT /settings passes only the interval and scan flag to the scheduler", async () => {
+    const handler = findHandler(await syncRouter(), "put", "/settings");
+    const req = reqFor(handler, {
+      body: malformed({ syncIntervalMinutes: 120, enablePluginWebhook: true }),
+      user: testUser({ role: "ADMIN" }),
+    });
+    const res = resFor(handler);
+
+    await handler(req, res, () => {});
+
+    expect(mockScheduler.updateSettings.mock.calls).toStrictEqual([
+      [{ syncIntervalMinutes: 120 }],
+    ]);
+    expect(res.json).toHaveBeenCalledWith({
+      ok: true,
+      settings: { syncIntervalMinutes: 120, enableScanSubscription: true },
+    });
+  });
+
+  it("PUT /settings without a body changes nothing and answers 200", async () => {
+    const handler = findHandler(await syncRouter(), "put", "/settings");
+    const req = reqFor(handler, {
+      body: malformed(undefined),
+      user: testUser({ role: "ADMIN" }),
+    });
+    const res = resFor(handler);
+
+    await handler(req, res, () => {});
+
+    expect(mockScheduler.updateSettings.mock.calls).toStrictEqual([[{}]]);
+    expect(res.status).not.toHaveBeenCalled();
+    expect(res.json).toHaveBeenCalledWith({
+      ok: true,
+      settings: { syncIntervalMinutes: 120, enableScanSubscription: true },
+    });
+  });
+});

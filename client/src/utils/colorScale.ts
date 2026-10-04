@@ -15,9 +15,9 @@ function hexToHSL(hex: string): [number, number, number] {
   hex = hex.replace(/^#/, "");
 
   // Convert to RGB
-  const r = parseInt(hex.substr(0, 2), 16) / 255;
-  const g = parseInt(hex.substr(2, 2), 16) / 255;
-  const b = parseInt(hex.substr(4, 2), 16) / 255;
+  const r = parseInt(hex.slice(0, 2), 16) / 255;
+  const g = parseInt(hex.slice(2, 4), 16) / 255;
+  const b = parseInt(hex.slice(4, 6), 16) / 255;
 
   const max = Math.max(r, g, b);
   const min = Math.min(r, g, b);
@@ -25,7 +25,7 @@ function hexToHSL(hex: string): [number, number, number] {
 
   let h = 0;
   let s = 0;
-  let l = (max + min) / 2;
+  const l = (max + min) / 2;
 
   if (diff !== 0) {
     s = l > 0.5 ? diff / (2 - max - min) : diff / (max + min);
@@ -106,7 +106,10 @@ export function adjustLightness(hex: string, amount: number): string {
  * @param {'dark'|'light'} mode - Theme mode
  * @returns {Object} Text color scale
  */
-export function generateTextScale(baseColor: string, mode = "dark"): Record<string, string> {
+export function generateTextScale(
+  baseColor: string,
+  mode = "dark"
+): Record<string, string> {
   if (mode === "dark") {
     // Dark mode: start white, go darker
     return {
@@ -130,12 +133,15 @@ export function generateTextScale(baseColor: string, mode = "dark"): Record<stri
  * @param {'dark'|'light'} mode - Theme mode
  * @returns {Object} Shadow definitions
  */
-export function generateShadows(accentColor: string, mode = "dark"): Record<string, string> {
+export function generateShadows(
+  accentColor: string,
+  mode = "dark"
+): Record<string, string> {
   // Extract RGB from hex for rgba shadows
   const hex = accentColor.replace(/^#/, "");
-  const r = parseInt(hex.substr(0, 2), 16);
-  const g = parseInt(hex.substr(2, 2), 16);
-  const b = parseInt(hex.substr(4, 2), 16);
+  const r = parseInt(hex.slice(0, 2), 16);
+  const g = parseInt(hex.slice(2, 4), 16);
+  const b = parseInt(hex.slice(4, 6), 16);
 
   const opacity = mode === "dark" ? [0.05, 0.1, 0.15] : [0.1, 0.15, 0.2];
 
@@ -154,9 +160,9 @@ export function generateShadows(accentColor: string, mode = "dark"): Record<stri
 export function generateFocusRing(accentColor: string): Record<string, string> {
   // Extract RGB for rgba shadow
   const hex = accentColor.replace(/^#/, "");
-  const r = parseInt(hex.substr(0, 2), 16);
-  const g = parseInt(hex.substr(2, 2), 16);
-  const b = parseInt(hex.substr(4, 2), 16);
+  const r = parseInt(hex.slice(0, 2), 16);
+  const g = parseInt(hex.slice(2, 4), 16);
+  const b = parseInt(hex.slice(4, 6), 16);
 
   return {
     "--focus-ring-color": accentColor,
@@ -175,9 +181,9 @@ export function generateFocusRing(accentColor: string): Record<string, string> {
 function hexToRgb(hex: string): { r: number; g: number; b: number } {
   const h = hex.replace(/^#/, "");
   return {
-    r: parseInt(h.substr(0, 2), 16),
-    g: parseInt(h.substr(2, 2), 16),
-    b: parseInt(h.substr(4, 2), 16),
+    r: parseInt(h.slice(0, 2), 16),
+    g: parseInt(h.slice(2, 4), 16),
+    b: parseInt(h.slice(4, 6), 16),
   };
 }
 
@@ -187,7 +193,9 @@ function hexToRgb(hex: string): { r: number; g: number; b: number } {
  * @param {Object} status - Status colors { success, error, info, warning }
  * @returns {Object} Complete status color definitions
  */
-export function generateStatusColors(status: Record<string, string>): Record<string, string> {
+export function generateStatusColors(
+  status: Record<string, string>
+): Record<string, string> {
   const colors: Record<string, string> = {};
 
   // Generate for each status type
@@ -210,7 +218,10 @@ export function generateStatusColors(status: Record<string, string>): Record<str
  * @param {'dark'|'light'} mode - Theme mode
  * @returns {Object} Toast color definitions
  */
-export function generateToastColors(status: Record<string, string>, mode = "dark"): Record<string, string> {
+export function generateToastColors(
+  status: Record<string, string>,
+  mode = "dark"
+): Record<string, string> {
   const colors: Record<string, string> = {};
 
   // Generate for each status type

@@ -1,306 +1,205 @@
-import React, { useEffect, useState } from "react";
+import { useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
-import { ArrowLeft } from "lucide-react";
-import { useNavigationState } from "../../hooks/useNavigationState";
-import { usePageTitle } from "../../hooks/usePageTitle";
-import { useRatingHotkeys } from "../../hooks/useRatingHotkeys";
-import { useCardDisplaySettings } from "../../contexts/CardDisplaySettingsContext";
+import type { NormalizedGroup } from "@peek/shared-types";
+import { useRelationCounts } from "../../api/hooks";
+import { useEntityDetail } from "../../api/hooks/useEntityDetail";
 import { useConfig } from "../../contexts/ConfigContext";
-import { libraryApi } from "../../api";
-import { makeCompositeKey } from "../../utils/compositeKey";
-import { formatDuration } from "../../utils/format";
 import { getEntityPath } from "../../utils/entityLinks";
-import SceneSearch from "../scene-search/SceneSearch";
-import {
-  Button,
-  FavoriteButton,
-  LoadingSpinner,
-  PageHeader,
-  RatingSlider,
-  TabNavigation,
-  TagChips,
-} from "../ui/index";
+import { formatDuration } from "../../utils/format";
+import DetailCard from "../detail/DetailCard";
+import DetailStats from "../detail/DetailStats";
+import EntityChipList from "../detail/EntityChipList";
+import EntityDetailLayout from "../detail/EntityDetailLayout";
+import EntityDetailPage, {
+  type FoundEntityDetail,
+} from "../detail/EntityDetailPage";
+import type { DetailTabSpec } from "../detail/detailTabState";
 import { PerformerGrid } from "../grids/index";
-import ViewInStashButton from "../ui/ViewInStashButton";
-import type { TagRef } from "@peek/shared-types";
+import SceneSearch from "../scene-search/SceneSearch";
+import { TagChips } from "../ui/index";
 
-interface EntityRef {
-  id: string;
-  name?: string;
-  instanceId?: string;
-  image_path?: string;
-  [key: string]: unknown;
-}
+const GroupPage = ({ detail }: { detail: FoundEntityDetail<"group"> }) => {
+  const { entity: group, instanceId, ref } = detail;
+  const { hasMultipleInstances } = useConfig();
+  const name = group.name || `Collection ${group.id}`;
 
-interface GroupRelation {
-  group: EntityRef;
-  description?: string;
-}
+  // Each tab's count is the total of its list, as the viewer sees it
+  const counts = useRelationCounts("group", group.id, instanceId);
+  const totals = counts.data?.counts;
+
+  const tabs: DetailTabSpec[] = [
+    {
+      id: "scenes",
+      label: "Scenes",
+      count: totals?.scenes,
+      render: () => (
+        <SceneSearch
+          context="scene_group"
+          initialSort="scene_index"
+          permanentFilters={{ groups: { value: [ref], modifier: "INCLUDES" } }}
+          permanentFiltersMetadata={{
+            groups: [{ id: ref, name: group.name || "Unknown Collection" }],
+          }}
+          title={`Scenes in ${group.name || "this collection"}`}
+          fromPageTitle={name}
+        />
+      ),
+    },
+    {
+      id: "performers",
+      label: "Performers",
+      count: totals?.performers,
+      render: () => (
+        <PerformerGrid
+          lockedFilters={{
+            performer_filter: {
+              groups: { value: [ref], modifier: "INCLUDES" },
+            },
+          }}
+          hideLockedFilters
+          emptyMessage={`No performers found in "${group.name}"`}
+        />
+      ),
+    },
+  ];
+
+  const stats = [
+    { label: "Scenes:", value: totals?.scenes, tab: "scenes" },
+    { label: "Performers:", value: totals?.performers, tab: "performers" },
+    {
+      label: "Duration:",
+      value: group.duration ? formatDuration(group.duration) : null,
+    },
+    { label: "Date:", value: group.date },
+  ];
+
+  // Each link's group carries its own server, so a link keeps it
+  const partOf = (group.containing_groups ?? []).map((link) => ({
+    ...link.group,
+    description: link.description,
+  }));
+  const subCollections = (group.sub_groups ?? []).map((link) => ({
+    ...link.group,
+    description: link.description,
+  }));
+  const studio = group.studio;
+  const urls = group.urls;
+
+  return (
+    <EntityDetailLayout
+      type="group"
+      detail={detail}
+      title={name}
+      subtitle={group.aliases ? `Also known as: ${group.aliases}` : null}
+      hero={<GroupImageFlipper group={group} />}
+      description={group.synopsis}
+      sections={
+        <>
+          <DetailStats stats={stats} />
+          {studio && (
+            <DetailCard title="Studio">
+              <Link
+                to={getEntityPath("studio", studio, hasMultipleInstances)}
+                className="flex items-center gap-3 hover:opacity-80 transition-opacity"
+              >
+                {studio.image_path && (
+                  <img
+                    src={studio.image_path}
+                    alt={studio.name}
+                    className="w-12 h-12 object-cover rounded"
+                  />
+                )}
+                <span
+                  className="font-medium"
+                  style={{ color: "var(--accent-primary)" }}
+                >
+                  {studio.name}
+                </span>
+              </Link>
+            </DetailCard>
+          )}
+          {!!group.director && (
+            <DetailCard title="Director">
+              <p style={{ color: "var(--text-primary)" }}>{group.director}</p>
+            </DetailCard>
+          )}
+          {partOf.length > 0 && (
+            <DetailCard title="Part Of">
+              <EntityChipList type="group" refs={partOf} />
+            </DetailCard>
+          )}
+          {subCollections.length > 0 && (
+            <DetailCard title="Sub-Collections">
+              <EntityChipList type="group" refs={subCollections} />
+            </DetailCard>
+          )}
+          {group.tags.length > 0 && (
+            <DetailCard title="Tags">
+              <TagChips tags={group.tags} />
+            </DetailCard>
+          )}
+          {urls.length > 0 && (
+            <DetailCard title="Links">
+              <div className="space-y-2">
+                {urls.map((url) => (
+                  <a
+                    key={url}
+                    href={url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="block text-sm hover:opacity-80 transition-opacity"
+                    style={{ color: "var(--accent-primary)" }}
+                  >
+                    {url}
+                  </a>
+                ))}
+              </div>
+            </DetailCard>
+          )}
+        </>
+      }
+      tabs={tabs}
+      counts={counts}
+      fallbackTab="scenes"
+      emptyText="This collection has no content in Peek"
+    />
+  );
+};
 
 const GroupDetail = () => {
   const { groupId } = useParams<{ groupId: string }>();
   const [searchParams] = useSearchParams();
-  const [isLoading, setIsLoading] = useState(true);
-  const [group, setGroup] = useState<Record<string, unknown> | null>(null);
-  const [rating, setRating] = useState<number | null>(null);
-  const [isFavorite, setIsFavorite] = useState(false);
-
-  // Navigation state for back button
-  const { goBack, backButtonText } = useNavigationState();
-
-  // Card display settings
-  const { getSettings } = useCardDisplaySettings();
-  const settings = getSettings("group");
-
-  // Get multi-instance config
-  const { hasMultipleInstances } = useConfig();
-
-  // Get instance from URL query param for multi-stash support
-  const instanceId = searchParams.get("instance");
-
-  // Compute tabs with counts for smart default selection
-  const contentTabs = [
-    { id: 'scenes', label: 'Scenes', count: (group?.scene_count as number) || 0 },
-    { id: 'performers', label: 'Performers', count: (group?.performer_count as number) || 0 },
-  ];
-  const effectiveDefaultTab = contentTabs.find(t => t.count > 0)?.id || 'scenes';
-
-  // Get active tab from URL or default to first tab with content
-  const activeTab = searchParams.get('tab') || effectiveDefaultTab;
-
-  // Set page title to group name
-  usePageTitle((group?.name as string) || "Collection");
-
-  useEffect(() => {
-    const fetchGroup = async () => {
-      try {
-        setIsLoading(true);
-        const groupData = await libraryApi.findGroupById(groupId!, instanceId) as Record<string, unknown> | null;
-        setGroup(groupData);
-        setRating((groupData as Record<string, unknown> | null)?.rating as number | null);
-        setIsFavorite(((groupData as Record<string, unknown> | null)?.favorite as boolean) || false);
-      } catch {
-        // Error loading group - will show loading spinner
-      } finally {
-        setIsLoading(false);
-      }
-    };
-
-    fetchGroup();
-  }, [groupId, instanceId]);
-
-  const handleRatingChange = async (newRating: number | null) => {
-    setRating(newRating);
-    try {
-      await libraryApi.updateRating("group", groupId!, newRating, instanceId);
-    } catch (error) {
-      console.error("Failed to update rating:", error);
-      setRating((group as Record<string, unknown>)?.rating as number | null);
-    }
-  };
-
-  const handleFavoriteChange = async (newValue: boolean) => {
-    setIsFavorite(newValue);
-    try {
-      await libraryApi.updateFavorite("group", groupId!, newValue, instanceId);
-    } catch (error) {
-      console.error("Failed to update favorite:", error);
-      setIsFavorite((group?.favorite as boolean) || false);
-    }
-  };
-
-  const toggleFavorite = () => {
-    handleFavoriteChange(!isFavorite);
-  };
-
-  // Rating and favorite hotkeys (r + 1-5 for ratings, r + 0 to clear, r + f to toggle favorite)
-  useRatingHotkeys({
-    enabled: !isLoading && !!group,
-    setRating: handleRatingChange,
-    toggleFavorite });
-
-  if (isLoading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        <LoadingSpinner />
-      </div>
-    );
-  }
-
-  return (
-    <div className="min-h-screen px-4 lg:px-6 xl:px-8">
-      <div className="max-w-none">
-        {/* Back Button */}
-        <div className="mt-6 mb-6">
-          <Button
-            onClick={goBack}
-            variant="secondary"
-            icon={<ArrowLeft size={16} className="sm:w-4 sm:h-4" />}
-            title={backButtonText}
-          >
-            <span className="hidden sm:inline">{backButtonText}</span>
-          </Button>
-        </div>
-
-        {/* Group Header - Hero Treatment */}
-        <div className="mb-8">
-          <PageHeader
-            title={
-              (
-                <div className="flex gap-4 items-center">
-                  <span>{(group?.name as string) || `Collection ${groupId}`}</span>
-                  {!!settings.showFavorite && (
-                    <FavoriteButton
-                      isFavorite={isFavorite}
-                      onChange={handleFavoriteChange}
-                      size="large"
-                    />
-                  )}
-                  <ViewInStashButton stashUrl={group?.stashUrl as string} size={24} />
-                </div>
-              ) as unknown as string
-            }
-            subtitle={
-              (group?.aliases as string[] | undefined)?.length
-                ? `Also known as: ${(group!.aliases as string[]).join(", ")}`
-                : null
-            }
-          />
-
-          {/* Rating Slider */}
-          {!!settings.showRating && (
-            <div className="mt-4 max-w-md">
-              <RatingSlider
-                rating={rating}
-                onChange={handleRatingChange}
-                showClearButton={true}
-              />
-            </div>
-          )}
-        </div>
-
-        {/* Two Column Layout - Image on left, Details on right (lg+) */}
-        <div className="flex flex-col lg:flex-row gap-6 mb-8">
-          {/* Left Column: Group Image with Front/Back Flipper (2:3 DVD cover) */}
-          <div className="w-full lg:w-1/3 flex-shrink-0">
-            <GroupImageFlipper group={group} />
-          </div>
-
-          {/* Right Column: Details (scrollable, matches image height) */}
-          {!!settings.showDescriptionOnDetail && !!group?.synopsis && (
-            <div className="flex-1 lg:overflow-y-auto lg:max-h-[80vh]">
-              <Card title="Details">
-                <p
-                  className="text-sm whitespace-pre-wrap"
-                  style={{ color: "var(--text-primary)" }}
-                >
-                  {group.synopsis as React.ReactNode}
-                </p>
-              </Card>
-            </div>
-          )}
-        </div>
-
-        {/* Full Width Sections - Statistics, Studio, Tags, Parent/Sub Collections */}
-        <div className="space-y-6 mb-8">
-          <GroupStats group={group} />
-          <GroupDetails group={group} hasMultipleInstances={hasMultipleInstances} />
-        </div>
-
-        {/* Tabbed Content Section */}
-        <div className="mt-8">
-          {contentTabs.every(t => t.count === 0) ? (
-            <div className="py-16 text-center" style={{ color: 'var(--text-muted)' }}>
-              This collection has no content in Peek
-            </div>
-          ) : (
-            <>
-              <TabNavigation
-                tabs={contentTabs}
-                defaultTab={effectiveDefaultTab}
-              />
-
-              {/* Tab Content */}
-              {activeTab === 'scenes' && (
-                <SceneSearch
-                  context="scene_group"
-                  initialSort="scene_index"
-                  permanentFilters={{
-                    groups: { value: [makeCompositeKey(groupId!, instanceId)], modifier: "INCLUDES" } }}
-                  permanentFiltersMetadata={{
-                    groups: [
-                      { id: makeCompositeKey(groupId!, instanceId), name: (group?.name as string) || "Unknown Collection" },
-                    ] }}
-                  title={`Scenes in ${(group?.name as string) || "this collection"}`}
-                  fromPageTitle={(group?.name as string) || "Collection"}
-                />
-              )}
-
-              {activeTab === 'performers' && (
-                <PerformerGrid
-                  lockedFilters={{
-                    performer_filter: {
-                      groups: {
-                        value: [makeCompositeKey(groupId!, instanceId)],
-                        modifier: "INCLUDES" } } }}
-                  hideLockedFilters
-                  emptyMessage={`No performers found in "${group?.name}"`}
-                />
-              )}
-            </>
-          )}
-        </div>
-      </div>
-    </div>
+  const detail = useEntityDetail(
+    "group",
+    groupId,
+    searchParams.get("instance")
   );
-};
-
-// Reusable component for Card wrapper
-interface CardProps {
-  title?: string;
-  children: React.ReactNode;
-}
-
-const Card = ({ title, children }: CardProps) => {
   return (
-    <div
-      className="p-6 rounded-lg border"
-      style={{
-        backgroundColor: "var(--bg-card)",
-        borderColor: "var(--border-color)" }}
-    >
-      {title && (
-        <h3
-          className="text-lg font-semibold mb-4"
-          style={{ color: "var(--text-primary)" }}
-        >
-          {title}
-        </h3>
-      )}
-      {children}
-    </div>
+    <EntityDetailPage type="group" detail={detail}>
+      {(found) => <GroupPage detail={found} />}
+    </EntityDetailPage>
   );
 };
 
 // Group Image Flipper Component with Front/Back Toggle
 interface GroupImageFlipperProps {
-  group: Record<string, unknown> | null;
+  group: Pick<NormalizedGroup, "name" | "front_image_path" | "back_image_path">;
 }
 
 const GroupImageFlipper = ({ group }: GroupImageFlipperProps) => {
   const [showFront, setShowFront] = useState(true);
 
-  const hasFrontImage = group?.front_image_path;
-  const hasBackImage = group?.back_image_path;
-  const hasBothImages = hasFrontImage && hasBackImage;
+  const hasBothImages = !!group.front_image_path && !!group.back_image_path;
 
   const currentImage = showFront
-    ? group?.front_image_path
-    : group?.back_image_path;
-  const fallbackImage = !showFront
-    ? group?.front_image_path
-    : group?.back_image_path;
-  const displayImage = (currentImage || fallbackImage) as string | undefined;
+    ? group.front_image_path
+    : group.back_image_path;
+  const fallbackImage = showFront
+    ? group.back_image_path
+    : group.front_image_path;
+  const displayImage = currentImage || fallbackImage;
+
+  const groupName = group.name;
 
   return (
     <div className="relative w-full" style={{ maxHeight: "50vh" }}>
@@ -310,16 +209,18 @@ const GroupImageFlipper = ({ group }: GroupImageFlipperProps) => {
           backgroundColor: "var(--bg-card)",
           aspectRatio: "2/3",
           width: "100%",
-          maxHeight: "50vh" }}
+          maxHeight: "50vh",
+        }}
       >
         {displayImage ? (
           <img
             src={displayImage}
-            alt={`${group?.name} - ${showFront ? "Front" : "Back"} Cover`}
+            alt={`${groupName} - ${showFront ? "Front" : "Back"} Cover`}
             style={{
               width: "100%",
               height: "100%",
-              objectFit: "contain" }}
+              objectFit: "contain",
+            }}
           />
         ) : (
           <svg
@@ -342,7 +243,7 @@ const GroupImageFlipper = ({ group }: GroupImageFlipperProps) => {
       </div>
 
       {/* Front/Back Toggle Buttons */}
-      {!!hasBothImages && (
+      {hasBothImages && (
         <div className="absolute top-4 right-4 flex gap-2">
           <button
             onClick={() => setShowFront(true)}
@@ -356,7 +257,8 @@ const GroupImageFlipper = ({ group }: GroupImageFlipperProps) => {
               color: showFront ? "white" : "var(--text-primary)",
               border: `1px solid ${
                 showFront ? "var(--accent-primary)" : "var(--border-color)"
-              }` }}
+              }`,
+            }}
             title="Show front cover"
           >
             Front
@@ -373,7 +275,8 @@ const GroupImageFlipper = ({ group }: GroupImageFlipperProps) => {
               color: !showFront ? "white" : "var(--text-primary)",
               border: `1px solid ${
                 !showFront ? "var(--accent-primary)" : "var(--border-color)"
-              }` }}
+              }`,
+            }}
             title="Show back cover"
           >
             Back
@@ -381,221 +284,6 @@ const GroupImageFlipper = ({ group }: GroupImageFlipperProps) => {
         </div>
       )}
     </div>
-  );
-};
-
-// Group Stats Component
-interface GroupStatsProps {
-  group: Record<string, unknown> | null;
-}
-
-const GroupStats = ({ group }: GroupStatsProps) => {
-  const [searchParams, setSearchParams] = useSearchParams();
-  const activeTab = searchParams.get('tab') || 'scenes';
-
-  const handleTabSwitch = (tabId: string) => {
-    const newParams = new URLSearchParams(searchParams);
-    if (tabId === 'scenes') {
-      newParams.delete('tab');
-    } else {
-      newParams.set('tab', tabId);
-    }
-    setSearchParams(newParams);
-    window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
-  };
-
-  const StatField = ({ label, value, valueColor = "var(--text-primary)", onClick, isActive }: { label: string; value: string | number | null | undefined; valueColor?: string; onClick?: () => void; isActive?: boolean }) => {
-    if (!value && value !== 0) return null;
-
-    const clickable = onClick && Number(value) > 0;
-
-    return (
-      <div className="flex justify-between">
-        <span style={{ color: "var(--text-secondary)" }}>{label}</span>
-        {clickable ? (
-          <button
-            onClick={onClick}
-            disabled={isActive}
-            className="font-medium transition-opacity hover:opacity-70 disabled:cursor-default disabled:opacity-100"
-            style={{
-              color: valueColor,
-              cursor: isActive ? 'default' : 'pointer',
-              textDecoration: isActive ? 'underline' : 'none' }}
-          >
-            {value}
-          </button>
-        ) : (
-          <span className="font-medium" style={{ color: valueColor }}>
-            {value}
-          </span>
-        )}
-      </div>
-    );
-  };
-
-  return (
-    <Card title="Statistics">
-      <div className="grid grid-cols-2 gap-4">
-        <StatField
-          label="Scenes:"
-          value={group?.scene_count as number | undefined}
-          valueColor="var(--accent-primary)"
-          onClick={() => handleTabSwitch('scenes')}
-          isActive={activeTab === 'scenes'}
-        />
-        <StatField
-          label="Performers:"
-          value={group?.performer_count as number | undefined}
-          valueColor="var(--accent-primary)"
-          onClick={() => handleTabSwitch('performers')}
-          isActive={activeTab === 'performers'}
-        />
-        <StatField
-          label="Duration:"
-          value={group?.duration ? formatDuration(group.duration as number) : null}
-          valueColor="var(--accent-primary)"
-        />
-        <StatField
-          label="Date:"
-          value={group?.date as string | undefined}
-          valueColor="var(--accent-primary)"
-        />
-      </div>
-    </Card>
-  );
-};
-
-// Group Details Component (Studio, Tags, Parent/Sub Collections)
-interface GroupDetailsProps {
-  group: Record<string, unknown> | null;
-  hasMultipleInstances: boolean;
-}
-
-const GroupDetails = ({ group, hasMultipleInstances }: GroupDetailsProps) => {
-  const studio = group?.studio as EntityRef | undefined;
-  const containingGroups = group?.containing_groups as GroupRelation[] | undefined;
-  const subGroups = group?.sub_groups as GroupRelation[] | undefined;
-  const tags = group?.tags as TagRef[] | undefined;
-  const urls = group?.urls as string[] | undefined;
-
-  return (
-    <>
-      {studio && (
-        <Card title="Studio">
-          <Link
-            to={getEntityPath('studio', studio, hasMultipleInstances)}
-            className="flex items-center gap-3 hover:opacity-80 transition-opacity"
-          >
-            {studio.image_path && (
-              <img
-                src={studio.image_path}
-                alt={studio.name}
-                className="w-12 h-12 object-cover rounded"
-              />
-            )}
-            <span
-              className="font-medium"
-              style={{ color: "var(--accent-primary)" }}
-            >
-              {studio.name}
-            </span>
-          </Link>
-        </Card>
-      )}
-
-      {!!group?.director && (
-        <Card title="Director">
-          <p style={{ color: "var(--text-primary)" }}>{group.director as React.ReactNode}</p>
-        </Card>
-      )}
-
-      {containingGroups && containingGroups.length > 0 && (
-        <Card title="Part Of">
-          <div className="space-y-2">
-            {containingGroups.map((cg: GroupRelation) => (
-              <Link
-                key={cg.group.id}
-                to={getEntityPath('group', cg.group, hasMultipleInstances)}
-                className="block p-2 rounded hover:bg-white/5 transition-colors"
-              >
-                <div className="flex items-center justify-between">
-                  <span
-                    className="font-medium"
-                    style={{ color: "var(--accent-primary)" }}
-                  >
-                    {cg.group.name}
-                  </span>
-                </div>
-                {cg.description && (
-                  <p
-                    className="text-sm mt-1"
-                    style={{ color: "var(--text-secondary)" }}
-                  >
-                    {cg.description}
-                  </p>
-                )}
-              </Link>
-            ))}
-          </div>
-        </Card>
-      )}
-
-      {subGroups && subGroups.length > 0 && (
-        <Card title="Sub-Collections">
-          <div className="space-y-2">
-            {subGroups.map((sg: GroupRelation) => (
-              <Link
-                key={sg.group.id}
-                to={getEntityPath('group', sg.group, hasMultipleInstances)}
-                className="block p-2 rounded hover:bg-white/5 transition-colors"
-              >
-                <div className="flex items-center justify-between">
-                  <span
-                    className="font-medium"
-                    style={{ color: "var(--accent-primary)" }}
-                  >
-                    {sg.group.name}
-                  </span>
-                </div>
-                {sg.description && (
-                  <p
-                    className="text-sm mt-1"
-                    style={{ color: "var(--text-secondary)" }}
-                  >
-                    {sg.description}
-                  </p>
-                )}
-              </Link>
-            ))}
-          </div>
-        </Card>
-      )}
-
-      {tags && tags.length > 0 && (
-        <Card title="Tags">
-          <TagChips tags={tags} />
-        </Card>
-      )}
-
-      {urls && urls.length > 0 && (
-        <Card title="Links">
-          <div className="space-y-2">
-            {urls.map((url: string, index: number) => (
-              <a
-                key={index}
-                href={url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="block text-sm hover:opacity-80 transition-opacity"
-                style={{ color: "var(--accent-primary)" }}
-              >
-                {url}
-              </a>
-            ))}
-          </div>
-        </Card>
-      )}
-    </>
   );
 };
 

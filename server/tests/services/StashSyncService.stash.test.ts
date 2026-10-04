@@ -2,20 +2,28 @@
  * Integration Tests for StashSyncService
  *
  * These tests connect to a real Stash instance to verify the sync functionality.
- * Requires STASH_URL and STASH_API_KEY environment variables.
+ * They read (never write) the test Stash, STASH_TEST_URL and
+ * STASH_TEST_API_KEY from the root .env, and skip without it. They never use
+ * STASH_URL, the production Stash.
  *
  * Note: These tests are SKIPPED by default to prevent unintended database modifications.
  * Run with: npm test -- --run services/__tests__/StashSyncService.integration.test.ts
  */
-import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import dotenv from "dotenv";
 import path from "path";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+// Import after mocking
+import { StashClient } from "../../graphql/StashClient.js";
+import { CriterionModifier } from "../../graphql/types.js";
+import { must } from "../helpers/must.js";
 
 // Load environment variables from project root
 dotenv.config({ path: path.resolve(__dirname, "../../../.env") });
 
 // Check if we have the required environment variables
-const hasStashConfig = !!(process.env.STASH_URL && process.env.STASH_API_KEY);
+const hasStashConfig = !!(
+  process.env.STASH_TEST_URL && process.env.STASH_TEST_API_KEY
+);
 
 // Mock prisma to avoid database operations during tests
 vi.mock("../../prisma/singleton.js", () => ({
@@ -96,16 +104,16 @@ vi.mock("../../prisma/singleton.js", () => ({
       findFirst: vi.fn().mockResolvedValue({
         id: "test-instance",
         name: "Test",
-        url: process.env.STASH_URL,
-        apiKey: process.env.STASH_API_KEY,
+        url: process.env.STASH_TEST_URL,
+        apiKey: process.env.STASH_TEST_API_KEY,
         enabled: true,
       }),
       findMany: vi.fn().mockResolvedValue([
         {
           id: "test-instance",
           name: "Test",
-          url: process.env.STASH_URL,
-          apiKey: process.env.STASH_API_KEY,
+          url: process.env.STASH_TEST_URL,
+          apiKey: process.env.STASH_TEST_API_KEY,
           enabled: true,
         },
       ]),
@@ -114,17 +122,14 @@ vi.mock("../../prisma/singleton.js", () => ({
   },
 }));
 
-// Import after mocking
-import { StashClient } from "../../graphql/StashClient.js";
-
 describe.skipIf(!hasStashConfig)("StashSyncService Integration Tests", () => {
   let stash: StashClient;
 
   beforeAll(() => {
     // Initialize Stash client directly for testing
     stash = new StashClient({
-      url: process.env.STASH_URL!,
-      apiKey: process.env.STASH_API_KEY!,
+      url: must(process.env.STASH_TEST_URL, "STASH_TEST_URL"),
+      apiKey: must(process.env.STASH_TEST_API_KEY, "STASH_TEST_API_KEY"),
     });
   });
 
@@ -217,13 +222,12 @@ describe.skipIf(!hasStashConfig)("StashSyncService Integration Tests", () => {
         filter: { page: 1, per_page: 1 },
       });
 
-      if (result.findScenes.scenes.length > 0) {
-        const scene = result.findScenes.scenes[0];
-        expect(scene).toHaveProperty("id");
-        expect(scene).toHaveProperty("title");
-        expect(scene).toHaveProperty("created_at");
-        expect(scene).toHaveProperty("updated_at");
-      }
+      expect(result.findScenes.scenes).not.toHaveLength(0);
+      const scene = must(result.findScenes.scenes[0]);
+      expect(scene).toHaveProperty("id");
+      expect(scene).toHaveProperty("title");
+      expect(scene).toHaveProperty("created_at");
+      expect(scene).toHaveProperty("updated_at");
     });
 
     it("should return performer data with expected structure", async () => {
@@ -231,11 +235,10 @@ describe.skipIf(!hasStashConfig)("StashSyncService Integration Tests", () => {
         filter: { page: 1, per_page: 1 },
       });
 
-      if (result.findPerformers.performers.length > 0) {
-        const performer = result.findPerformers.performers[0];
-        expect(performer).toHaveProperty("id");
-        expect(performer).toHaveProperty("name");
-      }
+      expect(result.findPerformers.performers).not.toHaveLength(0);
+      const performer = must(result.findPerformers.performers[0]);
+      expect(performer).toHaveProperty("id");
+      expect(performer).toHaveProperty("name");
     });
 
     it("should return studio data with expected structure", async () => {
@@ -243,11 +246,10 @@ describe.skipIf(!hasStashConfig)("StashSyncService Integration Tests", () => {
         filter: { page: 1, per_page: 1 },
       });
 
-      if (result.findStudios.studios.length > 0) {
-        const studio = result.findStudios.studios[0];
-        expect(studio).toHaveProperty("id");
-        expect(studio).toHaveProperty("name");
-      }
+      expect(result.findStudios.studios).not.toHaveLength(0);
+      const studio = must(result.findStudios.studios[0]);
+      expect(studio).toHaveProperty("id");
+      expect(studio).toHaveProperty("name");
     });
 
     it("should return tag data with expected structure", async () => {
@@ -255,11 +257,10 @@ describe.skipIf(!hasStashConfig)("StashSyncService Integration Tests", () => {
         filter: { page: 1, per_page: 1 },
       });
 
-      if (result.findTags.tags.length > 0) {
-        const tag = result.findTags.tags[0];
-        expect(tag).toHaveProperty("id");
-        expect(tag).toHaveProperty("name");
-      }
+      expect(result.findTags.tags).not.toHaveLength(0);
+      const tag = must(result.findTags.tags[0]);
+      expect(tag).toHaveProperty("id");
+      expect(tag).toHaveProperty("name");
     });
   });
 
@@ -272,10 +273,10 @@ describe.skipIf(!hasStashConfig)("StashSyncService Integration Tests", () => {
         filter: { page: 1, per_page: 10 },
         scene_filter: {
           updated_at: {
-            modifier: "GREATER_THAN",
+            modifier: CriterionModifier.GreaterThan,
             value: oneYearAgo.toISOString(),
           },
-        } as any,
+        },
       });
 
       // The query should succeed - we just verify it doesn't throw
@@ -291,10 +292,10 @@ describe.skipIf(!hasStashConfig)("StashSyncService Integration Tests", () => {
         filter: { page: 1, per_page: 10 },
         performer_filter: {
           updated_at: {
-            modifier: "GREATER_THAN",
+            modifier: CriterionModifier.GreaterThan,
             value: oneYearAgo.toISOString(),
           },
-        } as any,
+        },
       });
 
       expect(result.findPerformers).toBeDefined();
@@ -309,16 +310,15 @@ describe.skipIf(!hasStashConfig)("StashSyncService Integration Tests", () => {
         filter: { page: 1, per_page: 1 },
       });
 
-      if (allScenes.findScenes.scenes.length > 0) {
-        const sceneId = allScenes.findScenes.scenes[0].id;
+      expect(allScenes.findScenes.scenes).not.toHaveLength(0);
+      const sceneId = must(allScenes.findScenes.scenes[0]).id;
 
-        const result = await stash.findScenes({
-          ids: [sceneId],
-        });
+      const result = await stash.findScenes({
+        ids: [sceneId],
+      });
 
-        expect(result.findScenes.scenes.length).toBe(1);
-        expect(result.findScenes.scenes[0].id).toBe(sceneId);
-      }
+      expect(result.findScenes.scenes.length).toBe(1);
+      expect(must(result.findScenes.scenes[0]).id).toBe(sceneId);
     });
 
     it("should be able to find a single performer by ID", async () => {
@@ -327,16 +327,15 @@ describe.skipIf(!hasStashConfig)("StashSyncService Integration Tests", () => {
         filter: { page: 1, per_page: 1 },
       });
 
-      if (allPerformers.findPerformers.performers.length > 0) {
-        const performerId = allPerformers.findPerformers.performers[0].id;
+      expect(allPerformers.findPerformers.performers).not.toHaveLength(0);
+      const performerId = must(allPerformers.findPerformers.performers[0]).id;
 
-        const result = await stash.findPerformers({
-          ids: [performerId],
-        });
+      const result = await stash.findPerformers({
+        ids: [performerId],
+      });
 
-        expect(result.findPerformers.performers.length).toBe(1);
-        expect(result.findPerformers.performers[0].id).toBe(performerId);
-      }
+      expect(result.findPerformers.performers.length).toBe(1);
+      expect(must(result.findPerformers.performers[0]).id).toBe(performerId);
     });
 
     it("should be able to find a single tag by ID", async () => {
@@ -345,16 +344,15 @@ describe.skipIf(!hasStashConfig)("StashSyncService Integration Tests", () => {
         filter: { page: 1, per_page: 1 },
       });
 
-      if (allTags.findTags.tags.length > 0) {
-        const tagId = allTags.findTags.tags[0].id;
+      expect(allTags.findTags.tags).not.toHaveLength(0);
+      const tagId = must(allTags.findTags.tags[0]).id;
 
-        const result = await stash.findTags({
-          ids: [tagId],
-        });
+      const result = await stash.findTags({
+        ids: [tagId],
+      });
 
-        expect(result.findTags.tags.length).toBe(1);
-        expect(result.findTags.tags[0].id).toBe(tagId);
-      }
+      expect(result.findTags.tags.length).toBe(1);
+      expect(must(result.findTags.tags[0]).id).toBe(tagId);
     });
   });
 
@@ -373,15 +371,15 @@ describe.skipIf(!hasStashConfig)("StashSyncService Integration Tests", () => {
       // Total count should be consistent
       expect(page1.findScenes.count).toBe(page2.findScenes.count);
 
-      // If there are enough scenes, pages should have different content
-      if (page1.findScenes.count > 5 && page2.findScenes.scenes.length > 0) {
-        const page1Ids = page1.findScenes.scenes.map((s) => s.id);
-        const page2Ids = page2.findScenes.scenes.map((s) => s.id);
+      // The library has more than one page of scenes, so page 2 has content
+      expect(page1.findScenes.count).toBeGreaterThan(5);
+      expect(page2.findScenes.scenes).not.toHaveLength(0);
+      const page1Ids = page1.findScenes.scenes.map((s) => s.id);
+      const page2Ids = page2.findScenes.scenes.map((s) => s.id);
 
-        // No overlap between pages
-        const overlap = page1Ids.filter((id) => page2Ids.includes(id));
-        expect(overlap.length).toBe(0);
-      }
+      // No overlap between pages
+      const overlap = page1Ids.filter((id) => page2Ids.includes(id));
+      expect(overlap.length).toBe(0);
     });
 
     it("should handle pagination past available data gracefully", async () => {
@@ -399,10 +397,16 @@ describe.skipIf(!hasStashConfig)("StashSyncService Integration Tests", () => {
 describe("StashSyncService Integration Tests - Configuration Check", () => {
   it("should report if Stash configuration is available", () => {
     if (!hasStashConfig) {
-      console.log("Stash integration tests SKIPPED - STASH_URL or STASH_API_KEY not configured");
-      console.log("To run integration tests, set STASH_URL and STASH_API_KEY in .env");
+      console.log(
+        "Stash integration tests SKIPPED - STASH_TEST_URL or STASH_TEST_API_KEY not configured"
+      );
+      console.log(
+        "To run integration tests, set STASH_TEST_URL and STASH_TEST_API_KEY in .env"
+      );
     } else {
-      console.log("Stash integration tests RUNNING with configured Stash instance");
+      console.log(
+        "Stash integration tests RUNNING with configured Stash instance"
+      );
     }
     expect(true).toBe(true);
   });

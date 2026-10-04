@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, expect, it } from "vitest";
 import { validatePassword } from "../../utils/passwordValidation.js";
 
 describe("validatePassword", () => {
@@ -39,7 +39,9 @@ describe("validatePassword", () => {
     it("should reject password without letters", () => {
       const result = validatePassword("12345678");
       expect(result.valid).toBe(false);
-      expect(result.errors).toContain("Password must contain at least one letter");
+      expect(result.errors).toContain(
+        "Password must contain at least one letter"
+      );
     });
 
     it("should accept uppercase-only letters", () => {
@@ -57,7 +59,9 @@ describe("validatePassword", () => {
     it("should reject password without numbers", () => {
       const result = validatePassword("Password");
       expect(result.valid).toBe(false);
-      expect(result.errors).toContain("Password must contain at least one number");
+      expect(result.errors).toContain(
+        "Password must contain at least one number"
+      );
     });
   });
 
@@ -66,13 +70,34 @@ describe("validatePassword", () => {
       const result = validatePassword("abc");
       expect(result.valid).toBe(false);
       expect(result.errors).toContain("Password must be at least 8 characters");
-      expect(result.errors).toContain("Password must contain at least one number");
+      expect(result.errors).toContain(
+        "Password must contain at least one number"
+      );
     });
 
     it("should return all three errors for empty-like password", () => {
       const result = validatePassword("!@#$");
       expect(result.valid).toBe(false);
       expect(result.errors).toHaveLength(3);
+    });
+  });
+
+  describe("length cap", () => {
+    it("should accept a password of exactly 72 bytes", () => {
+      expect(validatePassword("a1" + "x".repeat(70)).valid).toBe(true);
+    });
+
+    it("should reject a password over 72 bytes", () => {
+      const result = validatePassword("a1" + "x".repeat(71));
+      expect(result.valid).toBe(false);
+      expect(result.errors).toContain("Password must be at most 72 bytes");
+    });
+
+    it("should count bytes, not characters", () => {
+      // 40 two-byte characters plus a digit: 41 characters, 81 bytes
+      const result = validatePassword("é".repeat(40) + "1");
+      expect(result.valid).toBe(false);
+      expect(result.errors).toContain("Password must be at most 72 bytes");
     });
   });
 });

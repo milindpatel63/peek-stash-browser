@@ -4,20 +4,28 @@ import { useAuth } from "../../hooks/useAuth";
 import { usePageTitle } from "../../hooks/usePageTitle";
 import SectionSelector from "../settings/SectionSelector";
 import SettingsLayout from "../settings/SettingsLayout";
-import { PageHeader, PageLayout } from "../ui/index";
-import ThemeTab from "../settings/tabs/ThemeTab";
-import PlaybackTab from "../settings/tabs/PlaybackTab";
-import CustomizationTab from "../settings/tabs/CustomizationTab";
-import ContentTab from "../settings/tabs/ContentTab";
 import AccountTab from "../settings/tabs/AccountTab";
-import NavigationTab from "../settings/tabs/NavigationTab";
-import UserManagementTab from "../settings/tabs/UserManagementTab";
-import ServerConfigTab from "../settings/tabs/ServerConfigTab";
-import MergeRecoveryTab from "../settings/tabs/MergeRecoveryTab";
 import BackupTab from "../settings/tabs/BackupTab";
+import ContentTab from "../settings/tabs/ContentTab";
+import CustomizationTab from "../settings/tabs/CustomizationTab";
+import MergeRecoveryTab from "../settings/tabs/MergeRecoveryTab";
+import NavigationTab from "../settings/tabs/NavigationTab";
+import PlaybackTab from "../settings/tabs/PlaybackTab";
+import ServerConfigTab from "../settings/tabs/ServerConfigTab";
+import ThemeTab from "../settings/tabs/ThemeTab";
+import UserManagementTab from "../settings/tabs/UserManagementTab";
+import { PageHeader, PageLayout } from "../ui/index";
+
+interface SettingsTab {
+  id: string;
+  label: string;
+}
+
+/** Never empty: the first tab is the section's default */
+type SettingsTabList = [SettingsTab, ...SettingsTab[]];
 
 // Tab definitions
-const USER_TABS = [
+const USER_TABS: SettingsTabList = [
   { id: "theme", label: "Theme" },
   { id: "playback", label: "Playback" },
   { id: "customization", label: "Customization" },
@@ -26,7 +34,7 @@ const USER_TABS = [
   { id: "account", label: "Account" },
 ];
 
-const SERVER_TABS = [
+const SERVER_TABS: SettingsTabList = [
   { id: "server-config", label: "Server Configuration" },
   { id: "user-management", label: "User Management" },
   { id: "merge-recovery", label: "Merge Recovery" },
@@ -41,24 +49,30 @@ const SettingsPage = () => {
 
   // Parse URL parameters
   const sectionParam = searchParams.get("section") || "user";
-  const validSection = ["user", "server"].includes(sectionParam) ? sectionParam : "user";
+  const validSection = ["user", "server"].includes(sectionParam)
+    ? sectionParam
+    : "user";
   const tabParam = searchParams.get("tab");
 
   // Determine active section (redirect non-admins from server section)
   const isAdmin = user?.role === "ADMIN";
-  const activeSection: "user" | "server" = validSection === "server" && !isAdmin ? "user" : validSection as "user" | "server";
+  const activeSection: "user" | "server" =
+    validSection === "server" && !isAdmin
+      ? "user"
+      : (validSection as "user" | "server");
 
   // Redirect if non-admin tries to access server section
   useEffect(() => {
     if (sectionParam === "server" && !isAdmin) {
-      navigate("/settings?section=user&tab=theme", { replace: true });
+      void navigate("/settings?section=user&tab=theme", { replace: true });
     }
   }, [sectionParam, isAdmin, navigate]);
 
   // Determine active tab (default to first tab of section if invalid)
   const tabs = activeSection === "user" ? USER_TABS : SERVER_TABS;
   const defaultTab = tabs[0].id;
-  const activeTab = tabParam && tabs.some((t) => t.id === tabParam) ? tabParam : defaultTab;
+  const activeTab =
+    tabParam && tabs.some((t) => t.id === tabParam) ? tabParam : defaultTab;
 
   // Sync URL if tab param is missing or invalid
   useEffect(() => {
@@ -66,21 +80,24 @@ const SettingsPage = () => {
       const params = new URLSearchParams();
       params.set("section", activeSection);
       params.set("tab", defaultTab);
-      navigate(`/settings?${params.toString()}`, { replace: true });
+      void navigate(`/settings?${params.toString()}`, { replace: true });
     }
   }, [tabParam, activeSection, defaultTab, tabs, navigate]);
 
   // Handle section change
   const handleSectionChange = (newSection: string) => {
-    const newDefaultTab = newSection === "user" ? USER_TABS[0].id : SERVER_TABS[0].id;
-    navigate(`/settings?section=${newSection}&tab=${newDefaultTab}`, { replace: true });
+    const newDefaultTab =
+      newSection === "user" ? USER_TABS[0].id : SERVER_TABS[0].id;
+    void navigate(`/settings?section=${newSection}&tab=${newDefaultTab}`, {
+      replace: true,
+    });
   };
 
   // Handle tab change
   const handleTabChange = (newTab: string) => {
     const params = new URLSearchParams(searchParams);
     params.set("tab", newTab);
-    navigate(`/settings?${params.toString()}`, { replace: true });
+    void navigate(`/settings?${params.toString()}`, { replace: true });
   };
 
   return (

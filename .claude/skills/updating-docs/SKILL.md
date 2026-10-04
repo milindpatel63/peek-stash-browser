@@ -16,11 +16,12 @@ description: Use when creating or updating documentation in peek-stash-browser. 
 ```
 docs/
   index.md                      # Landing page
+  what-peek-is.md               # What Peek adds to Stash
   getting-started/              # Installation, config, troubleshooting (6 files)
-  user-guide/                   # Feature documentation (14 files)
+  user-guide/                   # Feature documentation (19 files)
   development/                  # Developer docs (4 files)
-  reference/                    # API reference, entity relationships, Docker basics
-  plans/                        # Design docs and implementation plans (~120 files)
+  reference/                    # API reference (generated), entity relationships, Docker basics
+  plans/                        # Local design docs and plans (gitignored)
   audits/                       # Documentation audits
   assets/                       # Images, logos
   stylesheets/                  # Custom CSS
@@ -75,78 +76,11 @@ More detail as needed.
 | How to use a feature | `user-guide/` |
 | How the code works | `development/` |
 | API endpoints, entity models | `reference/` |
-| Feature design before implementation | `plans/` |
+| Feature design before implementation | `plans/` (local only) |
 
 ## Plan Documents
 
-### Naming Convention
-
-```
-docs/plans/YYYY-MM-DD-feature-name-type.md
-```
-
-Types:
-- `-design.md` — Problem statement, proposed solution, architecture decisions
-- `-plan.md` — Task-by-task implementation steps
-- `-impl.md` or `-implementation.md` — Detailed implementation notes
-
-### Design Document Template
-
-```markdown
-# Feature Name
-
-## Objective
-Brief statement of what we're building and why.
-
-## Current State
-What exists today, what's missing or broken.
-
-## Solution
-
-### Approach
-High-level description of the solution.
-
-### Changes
-#### File: `path/to/file.ts`
-- Description of changes with code context
-
-## Files Affected
-- `path/to/file.ts` — description
-```
-
-### Implementation Plan Template
-
-```markdown
-# Feature Name — Implementation Plan
-
-## Goal
-One-line goal.
-
-## Architecture
-Brief architecture summary.
-
----
-
-### Task 1: Task Title
-
-**Files:**
-- Modify: `path/to/file.ts`
-- Create: `path/to/new-file.ts`
-
-**Steps:**
-1. Step description
-2. Step description
-
-**Verification:** `npm test` or manual check description.
-
----
-
-### Summary
-
-| Task | Description | Files |
-|------|-------------|-------|
-| 1 | Task title | file.ts |
-```
+`docs/plans/` is gitignored, so plans stay local. Write them with `/fluffer:plan-write`, which sets the format and naming. Never add a plan to the MkDocs nav.
 
 ## API Reference
 
@@ -158,7 +92,13 @@ The API reference at `docs/reference/api-reference.md` is **auto-generated**. Do
 cd server && npm run generate-api-docs
 ```
 
-This parses route files, controller implementations, and TypeScript type definitions to generate the reference. It runs automatically in CI when relevant source files change.
+`server/scripts/generate-api-docs.ts` writes one entry for every `router.<method>(...)` in `server/routes/` and every `app.<method>(...)` in `server/initializers/api.ts`, whatever the handler: a name, a name in `authenticated()` or `libraryHandler()`, or written inline. Each entry gives:
+
+- **Authentication**, from the middleware in front of the route (`router.use`, the mount in `api.ts`, the route's own): None, Session (`authenticate`), Admin (`requireAdmin`), Session or signed link (`authenticateStreamRequest`), or None until setup starts, then Admin (`requireAdminOnceSetupStarted`).
+- **Description**, from the JSDoc block above the route, `//` lines right above it, or a comment trailing it. `//` lines above a route that the next line continues with another route head a section and describe none of them.
+- **Types**, from the handler's `TypedRequest`/`TypedAuthRequest`/`TypedLibraryRequest` and `TypedResponse` parameters, resolved in `server/types/api/` and `shared/types/api/`.
+
+The generator fails and writes nothing when a route file holds a route call it cannot read (a new handler wrapper, a path that is not a string literal) or is not mounted in `api.ts`: teach `server/scripts/lib/routeParser.ts` the new shape. Its tests live in `server/tests/scripts/lib/`. The docs workflow regenerates the page before every deploy, so the published page follows the code even when the committed copy lags.
 
 ### Triggers for Auto-Rebuild
 
@@ -169,6 +109,9 @@ The docs GitHub Action rebuilds when these paths change:
 - `server/types/api/**`
 - `server/controllers/**`
 - `server/scripts/**`
+- `server/initializers/api.ts`
+- `shared/types/**`
+- `.github/workflows/docs.yml`
 
 ## Redirects
 
@@ -184,8 +127,7 @@ plugins:
 ## Local Preview
 
 ```bash
-pip install mkdocs-material mkdocs-minify-plugin mkdocs-redirects
-mkdocs serve
+npm run docs   # from the repo root; serves http://localhost:8001
 ```
 
-Site available at `http://localhost:8000`.
+It runs `.venv/bin/mkdocs`, so create that virtualenv once with `mkdocs-material`, `mkdocs-minify-plugin` and `mkdocs-redirects` installed. Port 8000 belongs to the Peek server.

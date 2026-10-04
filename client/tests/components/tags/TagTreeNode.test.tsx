@@ -8,13 +8,16 @@
  * - Keyboard navigation
  * - Indicator display (counts, rating, favorite)
  */
-import { describe, it, expect, vi } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
-import TagTreeNodeComponent from "../../../src/components/tags/TagTreeNode";
-
-// Cast to FC<any> since TagTreeNode is an untyped forwardRef
-const TagTreeNode = TagTreeNodeComponent as unknown as React.FC<any>;
+import { MemoryRouter, useLocation } from "react-router-dom";
+import { fireEvent, render, screen } from "@testing-library/react";
+import { must } from "@tests/testUtils";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import TagTreeNode from "../../../src/components/tags/TagTreeNode";
+import {
+  MOUSE_QUERIES,
+  TOUCH_QUERIES,
+  matchMediaQueries,
+} from "../../helpers/matchMedia";
 
 // Wrapper to provide router context
 const renderWithRouter = (ui: React.ReactElement) => {
@@ -56,16 +59,12 @@ const mockTagWithRating = {
 describe("TagTreeNode", () => {
   describe("rendering", () => {
     it("renders tag name", () => {
-      renderWithRouter(
-        <TagTreeNode tag={mockTagLeaf} onToggle={() => {}} />
-      );
+      renderWithRouter(<TagTreeNode tag={mockTagLeaf} onToggle={() => {}} />);
       expect(screen.getByText("Leaf Tag")).toBeInTheDocument();
     });
 
     it("renders scene count indicator when > 0", () => {
-      renderWithRouter(
-        <TagTreeNode tag={mockTagLeaf} onToggle={() => {}} />
-      );
+      renderWithRouter(<TagTreeNode tag={mockTagLeaf} onToggle={() => {}} />);
       expect(screen.getByText("5")).toBeInTheDocument();
       expect(screen.getByTitle("5 scenes")).toBeInTheDocument();
     });
@@ -124,9 +123,7 @@ describe("TagTreeNode", () => {
     });
 
     it("does not render expand chevron for leaf nodes", () => {
-      renderWithRouter(
-        <TagTreeNode tag={mockTagLeaf} onToggle={() => {}} />
-      );
+      renderWithRouter(<TagTreeNode tag={mockTagLeaf} onToggle={() => {}} />);
       const treeitem = screen.getByRole("treeitem");
       expect(treeitem).not.toHaveAttribute("aria-expanded");
     });
@@ -144,9 +141,7 @@ describe("TagTreeNode", () => {
 
     it("does not call onToggle when clicked on leaf node", () => {
       const onToggle = vi.fn();
-      renderWithRouter(
-        <TagTreeNode tag={mockTagLeaf} onToggle={onToggle} />
-      );
+      renderWithRouter(<TagTreeNode tag={mockTagLeaf} onToggle={onToggle} />);
       fireEvent.click(screen.getByRole("treeitem"));
       expect(onToggle).not.toHaveBeenCalled();
     });
@@ -186,24 +181,27 @@ describe("TagTreeNode", () => {
         />
       );
       // Only one treeitem when collapsed (children not rendered)
-      expect(screen.getByRole("treeitem")).toHaveAttribute("aria-expanded", "false");
+      expect(screen.getByRole("treeitem")).toHaveAttribute(
+        "aria-expanded",
+        "false"
+      );
 
       rerender(
         <MemoryRouter>
-          {(
+          {
             <TagTreeNode
               tag={mockTagWithChildren}
               isExpanded={true}
               expandedIds={new Set(["1"])}
               onToggle={() => {}}
             />
-          )}
+          }
         </MemoryRouter>
       );
       // When expanded, multiple treeitems exist - get the parent by its name
       const allTreeItems = screen.getAllByRole("treeitem");
-      const parentItem = allTreeItems.find(item =>
-        item.textContent!.includes("Parent Tag")
+      const parentItem = allTreeItems.find((item) =>
+        must(item.textContent).includes("Parent Tag")
       );
       expect(parentItem).toHaveAttribute("aria-expanded", "true");
     });
@@ -219,7 +217,10 @@ describe("TagTreeNode", () => {
           onFocus={() => {}}
         />
       );
-      expect(screen.getByRole("treeitem")).toHaveAttribute("aria-selected", "true");
+      expect(screen.getByRole("treeitem")).toHaveAttribute(
+        "aria-selected",
+        "true"
+      );
     });
 
     it("sets tabIndex 0 when focused, -1 otherwise", () => {
@@ -235,14 +236,14 @@ describe("TagTreeNode", () => {
 
       rerender(
         <MemoryRouter>
-          {(
+          {
             <TagTreeNode
               tag={mockTagLeaf}
               focusedId="other"
               onToggle={() => {}}
               onFocus={() => {}}
             />
-          )}
+          }
         </MemoryRouter>
       );
       expect(screen.getByRole("treeitem")).toHaveAttribute("tabIndex", "-1");
@@ -251,11 +252,7 @@ describe("TagTreeNode", () => {
     it("calls onFocus when clicked", () => {
       const onFocus = vi.fn();
       renderWithRouter(
-        <TagTreeNode
-          tag={mockTagLeaf}
-          onToggle={() => {}}
-          onFocus={onFocus}
-        />
+        <TagTreeNode tag={mockTagLeaf} onToggle={() => {}} onFocus={onFocus} />
       );
       fireEvent.click(screen.getByRole("treeitem"));
       expect(onFocus).toHaveBeenCalledWith("4");
@@ -291,14 +288,73 @@ describe("TagTreeNode", () => {
   describe("depth indentation", () => {
     it("applies margin based on depth", () => {
       renderWithRouter(
-        <TagTreeNode
-          tag={mockTagLeaf}
-          depth={2}
-          onToggle={() => {}}
-        />
+        <TagTreeNode tag={mockTagLeaf} depth={2} onToggle={() => {}} />
       );
       const treeitem = screen.getByRole("treeitem");
       expect(treeitem).toHaveStyle({ marginLeft: "48px" }); // 2 * 24px
     });
+  });
+});
+
+describe("TagTreeNode open button on touch", () => {
+  let restoreMedia: (() => void) | null = null;
+  afterEach(() => {
+    restoreMedia?.();
+    restoreMedia = null;
+  });
+
+  it("on a touch device the tag tree's open button is visible", () => {
+    restoreMedia = matchMediaQueries(TOUCH_QUERIES);
+    renderWithRouter(<TagTreeNode tag={mockTagLeaf} onToggle={() => {}} />);
+
+    const open = screen.getByLabelText("Go to Leaf Tag");
+
+    expect(open.className).not.toContain("opacity-0");
+  });
+
+  it("with a mouse the open button shows on hover only", () => {
+    restoreMedia = matchMediaQueries(MOUSE_QUERIES);
+    renderWithRouter(<TagTreeNode tag={mockTagLeaf} onToggle={() => {}} />);
+
+    const open = screen.getByLabelText("Go to Leaf Tag");
+
+    expect(open.className).toContain("opacity-0");
+    expect(open.className).toContain("group-hover:opacity-100");
+  });
+});
+
+describe("TagTreeNode keyboard order", () => {
+  const Where = () => <div data-testid="where">{useLocation().pathname}</div>;
+  const renderWithLocation = () =>
+    render(
+      <MemoryRouter initialEntries={["/tags"]}>
+        <TagTreeNode tag={mockTagLeaf} onToggle={() => {}} />
+        <Where />
+      </MemoryRouter>
+    );
+
+  it("the Go to button is not a Tab stop, so the row is the only one", () => {
+    renderWithLocation();
+
+    expect(screen.getByLabelText("Go to Leaf Tag")).toHaveAttribute(
+      "tabindex",
+      "-1"
+    );
+  });
+
+  it("Enter on the row navigates to the tag", () => {
+    renderWithLocation();
+
+    fireEvent.keyDown(screen.getByRole("treeitem"), { key: "Enter" });
+
+    expect(screen.getByTestId("where")).toHaveTextContent("/tag/4");
+  });
+
+  it("a click on Go to still navigates", () => {
+    renderWithLocation();
+
+    fireEvent.click(screen.getByLabelText("Go to Leaf Tag"));
+
+    expect(screen.getByTestId("where")).toHaveTextContent("/tag/4");
   });
 });

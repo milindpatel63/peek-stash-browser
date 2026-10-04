@@ -1,114 +1,173 @@
+import { ValidationError } from "../middleware/errorHandler.js";
 import { clipService } from "../services/ClipService.js";
-import { logger } from "../utils/logger.js";
-import type { TypedAuthRequest, TypedResponse } from "../types/api/express.js";
-import type { ApiErrorResponse } from "../types/api/common.js";
 import type {
-  GetClipsQuery,
-  GetClipsResponse,
+  FindClipsRequest,
+  FindClipsResponse,
   GetClipByIdParams,
   GetClipByIdResponse,
   GetClipsForSceneParams,
   GetClipsForSceneQuery,
   GetClipsForSceneResponse,
+  GetClipsQuery,
+  GetClipsResponse,
 } from "../types/api/clips.js";
-import { parseRandomSort } from "../utils/seededRandom.js";
+import type {
+  AmbiguousLookupResponse,
+  ApiErrorResponse,
+} from "../types/api/common.js";
+import type {
+  TypedLibraryRequest,
+  TypedResponse,
+} from "../types/api/express.js";
+import type { ListCount } from "../types/api/library.js";
+import type { ClipListRequest } from "../types/parsedFilters.js";
+import {
+  parseClipQuery,
+  parseFilterRef,
+  parseListRequest,
+  parseSceneClipsRequest,
+} from "../utils/listRequest.js";
+import { logger } from "../utils/logger.js";
+
+/** One page of clips for the request, as both clip routes answer it */
+async function clipPage(
+  req: {
+    user: { id: number };
+    allowedInstanceIds: readonly string[];
+    timeZone: string;
+  },
+  request: ClipListRequest
+): Promise<GetClipsResponse<ListCount>> {
+  const { page, perPage } = request;
+  const result = await clipService.getClips({
+    userId: req.user.id,
+    allowedInstanceIds: req.allowedInstanceIds,
+    timeZone: req.timeZone,
+    request,
+  });
+  return {
+    clips: result.clips,
+    total: result.total,
+    page,
+    perPage,
+    // count false: the page alone, the client keeps the total it holds
+    totalPages:
+      result.total === null ? null : Math.ceil(result.total / perPage),
+  };
+}
+
+/**
+ * POST /api/library/clips
+ * Browse clips with the clip filter body (`clip_filter`), on the user's
+ * instances (`clip_filter.instance_id` narrows them to one)
+ */
+export const findClips = async (
+  req: TypedLibraryRequest<FindClipsRequest>,
+  res: TypedResponse<FindClipsResponse<ListCount> | ApiErrorResponse>
+) => {
+  // A ValidationError (400) reaches the central error handler
+  const request = parseListRequest("clip", req.body, { userId: req.user.id });
+  res.json(await clipPage(req, request));
+};
 
 /**
  * GET /api/clips
- * Browse clips with filtering
+ * Browse clips with today's query parameters, kept for old links and
+ * callers: each is read onto its `clip_filter` field (`parseClipQuery`),
+ * on the user's instances (the `instanceId` parameter narrows them to one)
  */
-export const getClips = async (req: TypedAuthRequest<never, Record<string, string>, GetClipsQuery>, res: TypedResponse<GetClipsResponse | ApiErrorResponse>) => {
-  try {
-    const userId = req.user.id;
-    const {
-      page = "1",
-      perPage = "24",
-      sortBy: sortByRaw = "stashCreatedAt",
-      sortDir = "desc",
-      isGenerated = "true",
-      sceneId,
-      tagIds,
-      sceneTagIds,
-      performerIds,
-      studioId,
-      q,
-      instanceId,
-    } = req.query;
-
-    // Parse random sort to extract seed for consistent pagination
-    const { sortField: sortBy, randomSeed } = parseRandomSort(sortByRaw, userId);
-
-    const result = await clipService.getClips(userId, {
-      page: parseInt(page, 10),
-      perPage: parseInt(perPage, 10),
-      sortBy,
-      sortDir: sortDir as "asc" | "desc",
-      isGenerated: isGenerated === "true",
-      sceneId,
-      tagIds: tagIds ? tagIds.split(",") : undefined,
-      sceneTagIds: sceneTagIds ? sceneTagIds.split(",") : undefined,
-      performerIds: performerIds ? performerIds.split(",") : undefined,
-      studioId,
-      q,
-      randomSeed,
-      allowedInstanceIds: instanceId ? [instanceId] : undefined,
-    });
-
-    res.json({
-      clips: result.clips,
-      total: result.total,
-      page: parseInt(page, 10),
-      perPage: parseInt(perPage, 10),
-      totalPages: Math.ceil(result.total / parseInt(perPage, 10)),
-    });
-  } catch (error) {
-    logger.error("Failed to get clips", { error });
-    res.status(500).json({ error: "Failed to get clips" });
-  }
+export const getClips = async (
+  req: TypedLibraryRequest<never, Record<string, string>, GetClipsQuery>,
+  res: TypedResponse<GetClipsResponse<ListCount> | ApiErrorResponse>
+) => {
+  // A ValidationError (400) reaches the central error handler
+  const request = parseClipQuery(req.query, { userId: req.user.id });
+  res.json(await clipPage(req, request));
 };
 
 /**
  * GET /api/clips/:id
- * Get single clip
+ * Get single clip, on the user's instances, with their exclusions. `:id` is
+ * `id` or `id:instanceId`; a bare id held by several instances answers 400.
  */
-export const getClipById = async (req: TypedAuthRequest<never, GetClipByIdParams>, res: TypedResponse<GetClipByIdResponse | ApiErrorResponse>) => {
-  try {
-    const userId = req.user.id;
-    const { id } = req.params;
-
-    const clip = await clipService.getClipById(id, userId);
-
-    if (!clip) {
-      return res.status(404).json({ error: "Clip not found" });
-    }
-
-    res.json(clip);
-  } catch (error) {
-    logger.error("Failed to get clip", { error });
-    res.status(500).json({ error: "Failed to get clip" });
+export const getClipById = async (
+  req: TypedLibraryRequest<never, GetClipByIdParams>,
+  res: TypedResponse<
+    GetClipByIdResponse | ApiErrorResponse | AmbiguousLookupResponse
+  >
+) => {
+  const ref = parseFilterRef(req.params.id);
+  if (!ref) {
+    // A ValidationError (400) reaches the central error handler
+    throw new ValidationError("Invalid request", {
+      issues: [{ path: "id", message: "Expected an id or id:instanceId" }],
+    });
   }
+
+  const userId = req.user.id;
+  const { allowedInstanceIds } = req;
+
+  const clips = await clipService.getClipById({
+    userId,
+    allowedInstanceIds,
+    ref,
+  });
+
+  const [clip] = clips;
+  if (!clip) {
+    res.status(404).json({ error: "Clip not found" });
+    return;
+  }
+
+  if (clips.length > 1) {
+    logger.warn("Ambiguous clip lookup", {
+      id: ref.id,
+      matchCount: clips.length,
+      instances: clips.map((c) => c.instanceId),
+    });
+    res.status(400).json({
+      error: "Ambiguous lookup",
+      message: `Multiple clips found with ID ${ref.id}. Use id:instanceId.`,
+      matches: clips.map((c) => ({
+        id: c.id,
+        title: c.title,
+        instanceId: c.instanceId,
+      })),
+    });
+    return;
+  }
+
+  res.json(clip);
 };
 
 /**
  * GET /api/scenes/:id/clips
- * Get clips for a scene
+ * Get clips for a scene: the scene on the required `instanceId` parameter's
+ * instance
  */
-export const getClipsForScene = async (req: TypedAuthRequest<never, GetClipsForSceneParams, GetClipsForSceneQuery>, res: TypedResponse<GetClipsForSceneResponse | ApiErrorResponse>) => {
-  try {
-    const userId = req.user.id;
-    const { id } = req.params;
-    const { includeUngenerated = "false", instanceId } = req.query;
+export const getClipsForScene = async (
+  req: TypedLibraryRequest<
+    never,
+    GetClipsForSceneParams,
+    GetClipsForSceneQuery
+  >,
+  res: TypedResponse<GetClipsForSceneResponse | ApiErrorResponse>
+) => {
+  // A ValidationError (400) reaches the central error handler
+  const request = parseSceneClipsRequest(req.params.id, req.query, {
+    userId: req.user.id,
+  });
 
-    const clips = await clipService.getClipsForScene(
-      id,
-      userId,
-      includeUngenerated === "true",
-      instanceId ? [instanceId] : undefined
-    );
+  const userId = req.user.id;
+  const { sceneId, includeUngenerated, instanceId } = request;
+  const { allowedInstanceIds } = req;
 
-    res.json({ clips });
-  } catch (error) {
-    logger.error("Failed to get clips for scene", { error });
-    res.status(500).json({ error: "Failed to get clips" });
-  }
+  const clips = await clipService.getClipsForScene({
+    userId,
+    allowedInstanceIds,
+    scene: { id: sceneId, instanceId },
+    includeUngenerated,
+  });
+
+  res.json({ clips });
 };

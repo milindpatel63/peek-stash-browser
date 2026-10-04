@@ -1,4 +1,5 @@
-import { useState, type ReactNode } from "react";
+import { type ReactNode, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import {
   ChevronDown,
   ChevronUp,
@@ -10,8 +11,12 @@ import {
   Shuffle,
 } from "lucide-react";
 import { useScenePlayer } from "../../contexts/ScenePlayerContext";
+import { useQueueNavigation } from "../../hooks/useQueueNavigation";
 import { useScrollToCurrentItem } from "../../hooks/useScrollToCurrentItem";
-import { Button, useLazyLoad } from "../ui/index";
+import { makeCompositeKey } from "../../utils/compositeKey";
+import { formatDuration } from "../../utils/format";
+import Button from "../ui/Button";
+import { useLazyLoad } from "../ui/CardComponents";
 
 interface PlaylistScene {
   sceneId: string;
@@ -28,9 +33,6 @@ interface Playlist {
   id?: string;
   name?: string;
   scenes?: PlaylistScene[];
-  autoplayNext?: boolean;
-  shuffle?: boolean;
-  repeat?: string;
 }
 
 interface Props {
@@ -45,11 +47,16 @@ const PlaylistSidebar = ({ maxHeight }: Props) => {
   const {
     playlist: rawPlaylist,
     currentIndex,
-    gotoSceneIndex,
+    autoplayNext,
+    shuffle,
+    repeat,
     toggleAutoplayNext,
     toggleShuffle,
     toggleRepeat,
+    unavailable,
   } = useScenePlayer();
+  const { goTo, upNextIndex } = useQueueNavigation();
+  const navigate = useNavigate();
   const playlist = rawPlaylist as Playlist | null;
   const [isExpanded, setIsExpanded] = useState(true);
 
@@ -66,61 +73,13 @@ const PlaylistSidebar = ({ maxHeight }: Props) => {
   const isVirtualPlaylist = playlist.id?.startsWith?.("virtual-");
   const _currentScene = playlist.scenes[currentIndex];
 
-  // Find next scene for "Up Next" preview
-  const nextSceneIndex = currentIndex + 1;
+  // "Up Next" is where Next goes: none in shuffle, the first on repeat all
+  const nextSceneIndex = upNextIndex;
   const nextScene =
-    nextSceneIndex < totalScenes ? playlist.scenes[nextSceneIndex] : null;
-
-  const formatDuration = (seconds: number | undefined) => {
-    if (!seconds) return "?:??";
-    const hours = Math.floor(seconds / 3600);
-    const minutes = Math.floor((seconds % 3600) / 60);
-    const secs = Math.floor(seconds % 60);
-
-    if (hours > 0) {
-      return `${hours}:${minutes.toString().padStart(2, "0")}:${secs
-        .toString()
-        .padStart(2, "0")}`;
-    }
-    return `${minutes}:${secs.toString().padStart(2, "0")}`;
-  };
-
-  const navigateToScene = (index: number) => {
-    if (index < 0 || index >= totalScenes) return;
-
-    // Check if video is currently playing
-    const videoElements = document.querySelectorAll("video");
-    let isPlaying = false;
-
-    videoElements.forEach((video) => {
-      if (!video.paused && !video.ended && video.readyState > 2) {
-        isPlaying = true;
-      }
-    });
-
-    // Preserve fullscreen state
-    if (isPlaying) {
-      const doc = document as Document & {
-        webkitFullscreenElement?: Element;
-        mozFullScreenElement?: Element;
-        msFullscreenElement?: Element;
-      };
-      const isFullscreen =
-        doc.fullscreenElement ||
-        doc.webkitFullscreenElement ||
-        doc.mozFullScreenElement ||
-        doc.msFullscreenElement;
-      if (isFullscreen) {
-        sessionStorage.setItem("videoPlayerFullscreen", "true");
-      }
-    }
-
-    // Navigate with autoplay flag
-    gotoSceneIndex(index, isPlaying);
-  };
+    nextSceneIndex === null ? null : (playlist.scenes[nextSceneIndex] ?? null);
 
   const goToPlaylist = () => {
-    window.location.href = `/playlist/${playlist.id}`;
+    void navigate(`/playlist/${playlist.id}`);
   };
 
   return (
@@ -189,17 +148,13 @@ const PlaylistSidebar = ({ maxHeight }: Props) => {
               onClick={toggleAutoplayNext}
               className="p-1.5 rounded transition-colors focus:outline-none"
               style={{
-                backgroundColor: playlist.autoplayNext
+                backgroundColor: autoplayNext
                   ? "var(--accent-primary)"
                   : "transparent",
-                color: playlist.autoplayNext
-                  ? "white"
-                  : "var(--text-secondary)",
+                color: autoplayNext ? "white" : "var(--text-secondary)",
                 border: "1px solid var(--border-color)",
               }}
-              title={
-                playlist.autoplayNext ? "Autoplay: On" : "Autoplay: Off"
-              }
+              title={autoplayNext ? "Autoplay: On" : "Autoplay: Off"}
             >
               <PlayCircle size={14} />
             </button>
@@ -209,13 +164,13 @@ const PlaylistSidebar = ({ maxHeight }: Props) => {
               onClick={toggleShuffle}
               className="p-1.5 rounded transition-colors focus:outline-none"
               style={{
-                backgroundColor: playlist.shuffle
+                backgroundColor: shuffle
                   ? "var(--accent-primary)"
                   : "transparent",
-                color: playlist.shuffle ? "white" : "var(--text-secondary)",
+                color: shuffle ? "white" : "var(--text-secondary)",
                 border: "1px solid var(--border-color)",
               }}
-              title={playlist.shuffle ? "Shuffle: On" : "Shuffle: Off"}
+              title={shuffle ? "Shuffle: On" : "Shuffle: Off"}
             >
               <Shuffle size={14} />
             </button>
@@ -226,26 +181,19 @@ const PlaylistSidebar = ({ maxHeight }: Props) => {
               className="p-1.5 rounded transition-colors focus:outline-none"
               style={{
                 backgroundColor:
-                  playlist.repeat !== "none"
-                    ? "var(--accent-primary)"
-                    : "transparent",
-                color:
-                  playlist.repeat !== "none" ? "white" : "var(--text-secondary)",
+                  repeat !== "none" ? "var(--accent-primary)" : "transparent",
+                color: repeat !== "none" ? "white" : "var(--text-secondary)",
                 border: "1px solid var(--border-color)",
               }}
               title={
-                playlist.repeat === "one"
+                repeat === "one"
                   ? "Repeat: One"
-                  : playlist.repeat === "all"
+                  : repeat === "all"
                     ? "Repeat: All"
                     : "Repeat: Off"
               }
             >
-              {playlist.repeat === "one" ? (
-                <Repeat1 size={14} />
-              ) : (
-                <Repeat size={14} />
-              )}
+              {repeat === "one" ? <Repeat1 size={14} /> : <Repeat size={14} />}
             </button>
           </div>
 
@@ -262,7 +210,7 @@ const PlaylistSidebar = ({ maxHeight }: Props) => {
       {isExpanded && (
         <>
           {/* Up Next Preview (if not last scene) */}
-          {nextScene && (
+          {nextScene && nextSceneIndex !== null && (
             <div
               className="p-3 border-b flex-shrink-0"
               style={{
@@ -277,7 +225,7 @@ const PlaylistSidebar = ({ maxHeight }: Props) => {
                 Up Next
               </p>
               <div
-                onClick={() => navigateToScene(nextSceneIndex)}
+                onClick={() => goTo(nextSceneIndex)}
                 className="group cursor-pointer rounded overflow-hidden transition-all hover:scale-[1.02]"
                 style={{
                   backgroundColor: "var(--bg-card)",
@@ -289,7 +237,6 @@ const PlaylistSidebar = ({ maxHeight }: Props) => {
                     src={nextScene.scene?.paths?.screenshot}
                     alt={nextScene.scene?.title || "Next scene"}
                     duration={nextScene.scene?.files?.[0]?.duration}
-                    formatDuration={formatDuration}
                     fallbackText={nextSceneIndex + 1}
                     width="120px"
                     height="68px"
@@ -325,13 +272,20 @@ const PlaylistSidebar = ({ maxHeight }: Props) => {
             {playlist.scenes.map((item, index) => {
               const scene = item.scene;
               const isCurrent = index === currentIndex;
+              // No longer visible to the user: dimmed and not clickable
+              const isUnavailable = unavailable.includes(index);
 
               return (
                 <div
-                  key={item.sceneId}
+                  key={makeCompositeKey(item.sceneId, item.instanceId)}
                   ref={isCurrent ? setCurrentItemRef : null}
-                  onClick={() => navigateToScene(index)}
-                  className="group cursor-pointer p-3 border-b transition-colors hover:bg-opacity-80"
+                  onClick={isUnavailable ? undefined : () => goTo(index)}
+                  aria-disabled={isUnavailable || undefined}
+                  className={`group p-3 border-b transition-colors ${
+                    isUnavailable
+                      ? "cursor-default opacity-50"
+                      : "cursor-pointer hover:bg-opacity-80"
+                  }`}
                   style={{
                     backgroundColor: isCurrent
                       ? "var(--bg-secondary)"
@@ -366,7 +320,6 @@ const PlaylistSidebar = ({ maxHeight }: Props) => {
                       src={scene?.paths?.screenshot}
                       alt={scene?.title || `Scene ${index + 1}`}
                       duration={scene?.files?.[0]?.duration}
-                      formatDuration={formatDuration}
                       fallbackText={index + 1}
                       width="80px"
                       height="45px"
@@ -377,7 +330,9 @@ const PlaylistSidebar = ({ maxHeight }: Props) => {
                     <div className="flex-1 min-w-0">
                       <h4
                         className={`text-sm font-medium line-clamp-2 ${
-                          !isCurrent && "group-hover:underline"
+                          !isCurrent &&
+                          !isUnavailable &&
+                          "group-hover:underline"
                         }`}
                         style={{
                           color: isCurrent
@@ -389,6 +344,14 @@ const PlaylistSidebar = ({ maxHeight }: Props) => {
                           scene?.files?.[0]?.basename ||
                           "Untitled"}
                       </h4>
+                      {isUnavailable && (
+                        <p
+                          className="text-xs mt-0.5"
+                          style={{ color: "var(--text-muted)" }}
+                        >
+                          Unavailable
+                        </p>
+                      )}
                       {scene?.studio && (
                         <p
                           className="text-xs mt-0.5 line-clamp-1"
@@ -413,7 +376,6 @@ interface PlaylistThumbnailProps {
   src: string | null | undefined;
   alt: string;
   duration?: number;
-  formatDuration: (seconds: number | undefined) => string;
   fallbackText: ReactNode;
   width: string;
   height: string;
@@ -428,7 +390,6 @@ const PlaylistThumbnail = ({
   src,
   alt,
   duration,
-  formatDuration,
   fallbackText,
   width,
   height,
@@ -479,7 +440,7 @@ const PlaylistThumbnail = ({
             ...(small && { fontSize: "10px" }),
           }}
         >
-          {formatDuration(duration)}
+          {duration ? formatDuration(duration) : "?:??"}
         </div>
       )}
     </div>

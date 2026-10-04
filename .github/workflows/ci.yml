@@ -7,10 +7,29 @@ on:
     branches: [main]
 
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # A new push to a pull request cancels its superseded run. Pushes to main get
+  # a group per commit, so none is cancelled or dropped from the queue.
+  group: ${{ github.event_name == 'pull_request' && format('ci-{0}', github.ref) || format('ci-{0}', github.sha) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  format:
+    name: Format
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - run: npm ci
+
+      - name: Prettier
+        run: npm run format:check
+
   client:
     name: Client Checks
     runs-on: ubuntu-latest
@@ -19,13 +38,15 @@ jobs:
         working-directory: client
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: "22"
+          node-version-file: .nvmrc
           cache: npm
-          cache-dependency-path: client/package-lock.json
+          cache-dependency-path: |
+            client/package-lock.json
+            shared/package-lock.json
 
       - run: npm ci
 
@@ -33,11 +54,22 @@ jobs:
         working-directory: shared
         run: npm ci && npm run build
 
+      - name: Lint shared
+        working-directory: shared
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
       - name: Lint
         run: npm run lint
 
       - name: Build
-        run: npm run build
+        # The log feeds the budget check, which fails on a circular chunk warning
+        run: set -o pipefail; npm run build 2>&1 | tee build.log
+
+      - name: Bundle size budgets
+        run: npm run check:bundle -- --log build.log
 
       - name: Test with coverage
         run: npm run test:coverage
@@ -50,11 +82,11 @@ jobs:
         working-directory: server
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: "22"
+          node-version-file: .nvmrc
           cache: npm
           cache-dependency-path: server/package-lock.json
 
@@ -68,6 +100,11 @@ jobs:
         env:
           DATABASE_URL: file:./test.db
 
+      # Replays every migration into a shadow database and diffs it against
+      # schema.prisma: a migration that leaves the two apart fails here
+      - name: Schema matches the migrations
+        run: npm run db:drift
+
       - name: Build shared types
         working-directory: shared
         run: npm ci && npm run build
@@ -78,11 +115,44 @@ jobs:
       - name: TypeScript Compile
         run: npx tsc --noEmit
 
+      - name: Type-check tests
+        run: npm run typecheck:tests
+
       - name: Test with coverage
         run: npm run test:coverage
         env:
           DATABASE_URL: file:./test.db
           JWT_SECRET: ci-test-secret
+
+  audit:
+    name: Dependency Audit
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+
+      # Runtime dependencies only: dev tooling does not ship in the image.
+      - name: Audit server
+        working-directory: server
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Audit client
+        if: ${{ !cancelled() }}
+        working-directory: client
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Audit shared
+        if: ${{ !cancelled() }}
+        working-directory: shared
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Audit root
+        if: ${{ !cancelled() }}
+        run: npm audit --omit=dev --audit-level=high
 
   e2e:
     name: E2E Tests
@@ -90,11 +160,17 @@ jobs:
     needs: [client, server]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: "22"
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            client/package-lock.json
+            server/package-lock.json
+            shared/package-lock.json
 
       - name: Install root dependencies
         run: npm ci
@@ -113,7 +189,7 @@ jobs:
 
       - name: Cache Playwright browsers
         id: playwright-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
@@ -126,51 +202,106 @@ jobs:
         if: steps.playwright-cache.outputs.cache-hit == 'true'
         run: npx playwright install-deps chromium
 
+      # Hermetic: Playwright starts its own server and client on a throwaway
+      # database, and global setup creates the run admin (e2e/support/env.ts)
       - name: Run E2E tests
         run: npx playwright test
         env:
           CI: true
-          E2E_USERNAME: admin
-          E2E_PASSWORD: admin123
 
       - name: Upload Playwright report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: ${{ !cancelled() }}
         with:
           name: playwright-report
           path: playwright-report/
           retention-days: 14
 
-  # Integration tests require access to a Stash test instance on the local network.
-  # This job only runs on self-hosted runners with network access to the test server.
-  # To enable: add a self-hosted runner on the same network as the Stash test instance,
-  # configure STASH_TEST_URL and STASH_TEST_API_KEY as repository secrets,
-  # and change 'if: false' to 'if: true' (or use a different condition).
+  # The image smoke test's upgrade check boots the latest release first and
+  # adds about 2 minutes, so it runs only when a change can affect upgrading:
+  # the schema and migrations, the startup code that applies them, the image,
+  # and the workflows that run the check
+  changes:
+    name: Changed Paths
+    runs-on: ubuntu-latest
+    outputs:
+      upgrade-check: ${{ steps.paths.outputs.upgrade-check }}
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # A pull request's checkout is its merge commit, whose first parent is
+      # the base it merges into; a push compares with the commit it replaced.
+      # When the base is unknown (a new branch), the check runs.
+      - name: Does the change touch the upgrade path?
+        id: paths
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && 'HEAD^1' || github.event.before }}
+        run: |
+          pattern='^(server/prisma/|server/initializers/|docker/|\.github/workflows/(image-smoke|docker-build)\.yml$)'
+          if changed=$(git diff --name-only "$BASE" HEAD 2>/dev/null); then
+            if grep -qE "$pattern" <<< "$changed"; then
+              result=true
+            else
+              result=false
+            fi
+          else
+            result=true
+          fi
+          echo "upgrade-check=$result" >> "$GITHUB_OUTPUT"
+          echo "Upgrade check: $result"
+
+  image:
+    name: Image Smoke Test
+    needs: changes
+    uses: ./.github/workflows/image-smoke.yml
+    with:
+      browser-checks: true
+      upgrade-check: ${{ needs.changes.outputs.upgrade-check == 'true' }}
+
+  # Integration tests run against a synthetic replay of the test Stash
+  # (server/integration/stash-replay), served on localhost: no secrets and no
+  # network, so pull requests from forks run them too.
   integration:
     name: Integration Tests
     runs-on: ubuntu-latest
-    if: false # Disabled until self-hosted runner or VPN is configured
-    needs: [server]
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: server
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: "22"
+          node-version-file: .nvmrc
           cache: npm
-          cache-dependency-path: server/package-lock.json
+          cache-dependency-path: |
+            server/package-lock.json
+            shared/package-lock.json
 
       - run: npm ci
+
+      - name: Build shared types
+        working-directory: shared
+        run: npm ci && npm run build
 
       - name: Generate Prisma Client
         run: npx prisma generate
 
-      - name: Run Integration Tests
-        run: npm run test:integration
-        env:
-          STASH_TEST_URL: ${{ secrets.STASH_TEST_URL }}
-          STASH_TEST_API_KEY: ${{ secrets.STASH_TEST_API_KEY }}
+      - name: Integration tests (replayed Stash)
+        run: npm run test:integration:replay
+
+      - name: No skipped or failed tests
+        run: node -e "const s=require('./integration/results/summary.json'); console.log(s); if (s.failed !== 0 || s.skipped !== 0) process.exit(1)"
+
+      - name: Upload integration results
+        uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() }}
+        with:
+          name: integration-results
+          path: server/integration/results/
+          retention-days: 14

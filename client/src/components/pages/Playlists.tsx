@@ -1,35 +1,38 @@
-import React, { useEffect, useState } from "react";
+import React, { useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
+import type { PlaylistPreviewItem, PlaylistSummary } from "@peek/shared-types";
+import {
+  useCreatePlaylist,
+  useDeletePlaylist,
+  usePlaylists,
+  useSharedPlaylists,
+} from "../../api/hooks";
 import { usePageTitle } from "../../hooks/usePageTitle";
+import { makeCompositeKey } from "../../utils/compositeKey";
 import { showError, showSuccess } from "../../utils/toast";
-import { apiGet, apiPost, apiDelete, getSharedPlaylists } from "../../api";
 import {
   Button,
   ConfirmDialog,
+  Modal,
   PageLayout,
   Paper,
-  TabNavigation,
+  StatusMessage,
   TAB_COUNT_LOADING,
+  TabNavigation,
 } from "../ui/index";
 
-interface PlaylistItem {
-  scene?: {
-    id: string;
-    paths?: {
-      screenshot?: string;
-    };
-  };
-}
-
 interface PlaylistThumbnailGridProps {
-  items: PlaylistItem[];
+  items: PlaylistPreviewItem[];
   totalCount: number;
 }
 
 /**
  * Reusable 2x2 thumbnail grid for playlist preview
  */
-const PlaylistThumbnailGrid = ({ items, totalCount }: PlaylistThumbnailGridProps) => {
+const PlaylistThumbnailGrid = ({
+  items,
+  totalCount,
+}: PlaylistThumbnailGridProps) => {
   if (!items || items.length === 0) return null;
 
   return (
@@ -37,11 +40,11 @@ const PlaylistThumbnailGrid = ({ items, totalCount }: PlaylistThumbnailGridProps
       <div className="grid grid-cols-2 gap-1 w-full h-full rounded-lg overflow-hidden">
         {items.slice(0, 4).map((item, idx) => (
           <div
-            key={item.scene?.id || idx}
+            key={makeCompositeKey(item.sceneId, item.instanceId)}
             className="aspect-square overflow-hidden"
             style={{ backgroundColor: "var(--bg-tertiary)" }}
           >
-            {item.scene?.paths?.screenshot ? (
+            {item.scene.paths.screenshot ? (
               <img
                 src={item.scene.paths.screenshot}
                 alt=""
@@ -74,60 +77,36 @@ const PlaylistThumbnailGrid = ({ items, totalCount }: PlaylistThumbnailGridProps
 const Playlists = () => {
   usePageTitle("Playlists");
   const [searchParams] = useSearchParams();
-  const [playlists, setPlaylists] = useState<Record<string, unknown>[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const ownQuery = usePlaylists();
+  const sharedQuery = useSharedPlaylists();
+  const createPlaylistMutation = useCreatePlaylist();
+  const deletePlaylistMutation = useDeletePlaylist();
   const [showCreateModal, setShowCreateModal] = useState(false);
+  const nameInputRef = useRef<HTMLInputElement>(null);
   const [newPlaylistName, setNewPlaylistName] = useState("");
   const [newPlaylistDescription, setNewPlaylistDescription] = useState("");
-  const [creating, setCreating] = useState(false);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
-  const [playlistToDelete, setPlaylistToDelete] = useState<Record<string, unknown> | null>(null);
-  const [sharedPlaylists, setSharedPlaylists] = useState<Record<string, unknown>[]>([]);
-  const [loadingShared, setLoadingShared] = useState(false);
-  const [sharedLoaded, setSharedLoaded] = useState(false);
+  const [playlistToDelete, setPlaylistToDelete] =
+    useState<PlaylistSummary | null>(null);
+
+  const playlists = ownQuery.data?.playlists ?? [];
+  // Shared playlists are not critical: a failed read shows none
+  const sharedPlaylists = sharedQuery.data?.playlists ?? [];
+  const loading = ownQuery.isPending;
+  const loadingShared = sharedQuery.isPending;
+  const sharedLoaded = sharedQuery.isSuccess;
+  const error = ownQuery.isError ? "Failed to load playlists" : null;
+  const creating = createPlaylistMutation.isPending;
 
   // Get active tab from URL or default to "mine"
   const activeTab = searchParams.get("tab") || "mine";
 
-  useEffect(() => {
-    // Load both playlist types on mount
-    loadPlaylists();
-    loadSharedPlaylists();
-  }, []);
-
-  const loadPlaylists = async () => {
-    try {
-      setLoading(true);
-      const data = await apiGet<{ playlists: Record<string, unknown>[] }>("/playlists");
-      setPlaylists(data.playlists);
-    } catch {
-      setError("Failed to load playlists");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const loadSharedPlaylists = async () => {
-    try {
-      setLoadingShared(true);
-      const response = await getSharedPlaylists();
-      setSharedPlaylists(response.playlists as Record<string, unknown>[]);
-      setSharedLoaded(true);
-    } catch {
-      // Silently fail for shared - not critical
-    } finally {
-      setLoadingShared(false);
-    }
-  };
-
-  const createPlaylist = async (e: React.FormEvent<HTMLFormElement>) => {
+  const createPlaylist = async (e: React.SubmitEvent<HTMLFormElement>) => {
     e.preventDefault();
     if (!newPlaylistName.trim()) return;
 
     try {
-      setCreating(true);
-      await apiPost("/playlists", {
+      await createPlaylistMutation.mutateAsync({
         name: newPlaylistName.trim(),
         description: newPlaylistDescription.trim() || undefined,
       });
@@ -136,15 +115,12 @@ const Playlists = () => {
       setNewPlaylistName("");
       setNewPlaylistDescription("");
       setShowCreateModal(false);
-      loadPlaylists();
     } catch {
       showError("Failed to create playlist");
-    } finally {
-      setCreating(false);
     }
   };
 
-  const handleDeleteClick = (playlist: Record<string, unknown>) => {
+  const handleDeleteClick = (playlist: PlaylistSummary) => {
     setPlaylistToDelete(playlist);
     setDeleteConfirmOpen(true);
   };
@@ -153,9 +129,10 @@ const Playlists = () => {
     if (!playlistToDelete) return;
 
     try {
-      await apiDelete(`/playlists/${playlistToDelete.id}`);
+      await deletePlaylistMutation.mutateAsync({
+        playlistId: playlistToDelete.id,
+      });
       showSuccess("Playlist deleted");
-      loadPlaylists();
     } catch {
       showError("Failed to delete playlist");
     } finally {
@@ -177,14 +154,21 @@ const Playlists = () => {
   // Build tab configuration with actual counts
   const tabs = [
     { id: "mine", label: "My Playlists", count: playlists.length },
-    { id: "shared", label: "Shared with Me", count: sharedLoaded ? sharedPlaylists.length : TAB_COUNT_LOADING },
+    {
+      id: "shared",
+      label: "Shared with Me",
+      count: sharedLoaded ? sharedPlaylists.length : TAB_COUNT_LOADING,
+    },
   ];
 
   return (
     <PageLayout>
       {/* Header with New Playlist button */}
       <div className="flex flex-col md:flex-row md:justify-between md:items-center gap-4 mb-4">
-        <h1 className="text-2xl font-bold" style={{ color: "var(--text-primary)" }}>
+        <h1
+          className="text-2xl font-bold"
+          style={{ color: "var(--text-primary)" }}
+        >
           Playlists
         </h1>
         {activeTab === "mine" && (
@@ -204,22 +188,21 @@ const Playlists = () => {
       {activeTab === "mine" ? (
         <>
           {error && (
-            <div
-              className="mb-6 p-4 rounded-lg"
-              style={{
-                backgroundColor: "rgba(239, 68, 68, 0.1)",
-                border: "1px solid rgba(239, 68, 68, 0.3)",
-                color: "rgb(239, 68, 68)",
-              }}
-            >
-              {error}
-            </div>
+            <StatusMessage
+              variant="error"
+              title={null}
+              className="mb-6"
+              message={error}
+            />
           )}
 
           {/* My Playlists Grid */}
           {playlists.length === 0 ? (
             <div className="text-center py-16">
-              <div className="text-6xl mb-4" style={{ color: "var(--text-muted)" }}>
+              <div
+                className="text-6xl mb-4"
+                style={{ color: "var(--text-muted)" }}
+              >
                 📝
               </div>
               <h3
@@ -235,107 +218,109 @@ const Playlists = () => {
           ) : (
             <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-2 2xl:grid-cols-3 gap-6">
               {playlists.map((playlist) => {
-                const _count = playlist._count as Record<string, number> | undefined;
+                const count = playlist._count.items;
                 return (
-                <Paper key={playlist.id as string}>
-                  <Paper.Body>
-                    <div className="flex gap-4">
-                      <PlaylistThumbnailGrid
-                        items={playlist.items as PlaylistItem[]}
-                        totalCount={_count?.items || 0}
-                      />
-                      <div className="flex-1 min-w-0">
-                        <Link to={`/playlist/${playlist.id as string}`}>
-                          <h3
-                            className="text-lg font-semibold mb-2 hover:underline"
-                            style={{ color: "var(--text-primary)" }}
+                  <Paper key={playlist.id}>
+                    <Paper.Body>
+                      <div className="flex gap-4">
+                        <PlaylistThumbnailGrid
+                          items={playlist.items}
+                          totalCount={count}
+                        />
+                        <div className="flex-1 min-w-0">
+                          <Link to={`/playlist/${playlist.id}`}>
+                            <h3
+                              className="text-lg font-semibold mb-2 hover:underline"
+                              style={{ color: "var(--text-primary)" }}
+                            >
+                              {playlist.name}
+                            </h3>
+                          </Link>
+                          {playlist.description ? (
+                            <p
+                              className="text-sm mb-4 line-clamp-2"
+                              style={{ color: "var(--text-secondary)" }}
+                            >
+                              {playlist.description}
+                            </p>
+                          ) : null}
+                          <div
+                            className="flex items-center justify-between text-sm"
+                            style={{ color: "var(--text-muted)" }}
                           >
-                            {playlist.name as string}
-                          </h3>
-                        </Link>
-                        {playlist.description ? (
-                          <p
-                            className="text-sm mb-4 line-clamp-2"
-                            style={{ color: "var(--text-secondary)" }}
-                          >
-                            {playlist.description as string}
-                          </p>
-                        ) : null}
-                        <div
-                          className="flex items-center justify-between text-sm"
-                          style={{ color: "var(--text-muted)" }}
-                        >
-                          <span>
-                            {_count?.items || 0}{" "}
-                            {(_count?.items || 0) === 1 ? "video" : "videos"}
-                          </span>
-                          <Button
-                            onClick={() => handleDeleteClick(playlist)}
-                            variant="destructive"
-                            size="sm"
-                            className="px-3 py-1"
-                          >
-                            Delete
-                          </Button>
+                            <span>
+                              {count} {count === 1 ? "video" : "videos"}
+                            </span>
+                            <Button
+                              onClick={() => handleDeleteClick(playlist)}
+                              variant="destructive"
+                              size="sm"
+                              className="px-3 py-1"
+                            >
+                              Delete
+                            </Button>
+                          </div>
                         </div>
                       </div>
-                    </div>
-                  </Paper.Body>
-                </Paper>
+                    </Paper.Body>
+                  </Paper>
                 );
               })}
             </div>
           )}
         </>
+      ) : // Shared playlists view
+      loadingShared ? (
+        <div className="flex items-center justify-center py-16">
+          <div className="animate-spin w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full"></div>
+        </div>
+      ) : sharedPlaylists.length === 0 ? (
+        <div className="text-center py-16">
+          <div className="text-6xl mb-4" style={{ color: "var(--text-muted)" }}>
+            📤
+          </div>
+          <h3
+            className="text-xl font-medium mb-2"
+            style={{ color: "var(--text-primary)" }}
+          >
+            No shared playlists
+          </h3>
+          <p style={{ color: "var(--text-secondary)" }}>
+            Playlists shared with your groups will appear here
+          </p>
+        </div>
       ) : (
-        // Shared playlists view
-        loadingShared ? (
-          <div className="flex items-center justify-center py-16">
-            <div className="animate-spin w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full"></div>
-          </div>
-        ) : sharedPlaylists.length === 0 ? (
-          <div className="text-center py-16">
-            <div className="text-6xl mb-4" style={{ color: "var(--text-muted)" }}>
-              📤
-            </div>
-            <h3 className="text-xl font-medium mb-2" style={{ color: "var(--text-primary)" }}>
-              No shared playlists
-            </h3>
-            <p style={{ color: "var(--text-secondary)" }}>
-              Playlists shared with your groups will appear here
-            </p>
-          </div>
-        ) : (
-          <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-2 2xl:grid-cols-3 gap-6">
-            {sharedPlaylists.map((playlist) => {
-              const owner = playlist.owner as { username: string } | undefined;
-              const sharedViaGroups = playlist.sharedViaGroups as string[] | undefined;
-              return (
-              <Paper key={playlist.id as string}>
+        <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-2 2xl:grid-cols-3 gap-6">
+          {sharedPlaylists.map((playlist) => {
+            return (
+              <Paper key={playlist.id}>
                 <Paper.Body>
                   <div className="flex gap-4">
                     <PlaylistThumbnailGrid
-                      items={playlist.items as PlaylistItem[]}
-                      totalCount={(playlist.sceneCount as number) || 0}
+                      items={playlist.items}
+                      totalCount={playlist.sceneCount}
                     />
                     <div className="flex-1 min-w-0">
-                      <Link to={`/playlist/${playlist.id as string}`}>
+                      <Link to={`/playlist/${playlist.id}`}>
                         <h3
                           className="text-lg font-semibold mb-1 hover:underline"
                           style={{ color: "var(--text-primary)" }}
                         >
-                          {playlist.name as string}
+                          {playlist.name}
                         </h3>
                       </Link>
-                      <p className="text-sm mb-2" style={{ color: "var(--text-muted)" }}>
-                        by {owner?.username}
+                      <p
+                        className="text-sm mb-2"
+                        style={{ color: "var(--text-muted)" }}
+                      >
+                        by {playlist.owner.username}
                       </p>
                       {playlist.description ? (
                         <p
                           className="text-sm mb-4 line-clamp-2"
                           style={{ color: "var(--text-secondary)" }}
                         >
-                          {playlist.description as string}
+                          {playlist.description}
                         </p>
                       ) : null}
                       <div
@@ -343,107 +328,101 @@ const Playlists = () => {
                         style={{ color: "var(--text-muted)" }}
                       >
                         <span>
-                          {playlist.sceneCount as number} {(playlist.sceneCount as number) === 1 ? "video" : "videos"}
+                          {playlist.sceneCount}{" "}
+                          {playlist.sceneCount === 1 ? "video" : "videos"}
                         </span>
-                        <span className="text-xs px-2 py-1 rounded" style={{ backgroundColor: "var(--bg-tertiary)" }}>
-                          via {sharedViaGroups?.join(", ")}
+                        <span
+                          className="text-xs px-2 py-1 rounded"
+                          style={{ backgroundColor: "var(--bg-tertiary)" }}
+                        >
+                          via {playlist.sharedViaGroups.join(", ")}
                         </span>
                       </div>
                     </div>
                   </div>
                 </Paper.Body>
               </Paper>
-              );
-            })}
-          </div>
-        )
+            );
+          })}
+        </div>
       )}
 
       {/* Create Playlist Modal */}
-      {showCreateModal && (
-        <div
-          className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50"
-          onClick={() => setShowCreateModal(false)}
-        >
-          <Paper
-            className="max-w-md w-full m-4"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <Paper.Header title="Create New Playlist" />
-            <form onSubmit={createPlaylist}>
-              <Paper.Body>
-                <div className="space-y-4">
-                  <div>
-                    <label
-                      htmlFor="playlistName"
-                      className="block text-sm font-medium mb-2"
-                      style={{ color: "var(--text-secondary)" }}
-                    >
-                      Playlist Name *
-                    </label>
-                    <input
-                      type="text"
-                      id="playlistName"
-                      value={newPlaylistName}
-                      onChange={(e) => setNewPlaylistName(e.target.value)}
-                      className="w-full px-4 py-2 rounded-lg"
-                      style={{
-                        backgroundColor: "var(--bg-secondary)",
-                        border: "1px solid var(--border-color)",
-                        color: "var(--text-primary)",
-                      }}
-                      placeholder="Enter playlist name"
-                      required
-                      autoFocus
-                    />
-                  </div>
-                  <div>
-                    <label
-                      htmlFor="playlistDescription"
-                      className="block text-sm font-medium mb-2"
-                      style={{ color: "var(--text-secondary)" }}
-                    >
-                      Description (Optional)
-                    </label>
-                    <textarea
-                      id="playlistDescription"
-                      value={newPlaylistDescription}
-                      onChange={(e) =>
-                        setNewPlaylistDescription(e.target.value)
-                      }
-                      className="w-full px-4 py-2 rounded-lg"
-                      style={{
-                        backgroundColor: "var(--bg-secondary)",
-                        border: "1px solid var(--border-color)",
-                        color: "var(--text-primary)",
-                      }}
-                      placeholder="Enter description (optional)"
-                      rows={3}
-                    />
-                  </div>
-                  <div className="flex gap-3 justify-end">
-                    <Button
-                      type="button"
-                      onClick={() => setShowCreateModal(false)}
-                      variant="secondary"
-                    >
-                      Cancel
-                    </Button>
-                    <Button
-                      type="submit"
-                      disabled={creating || !newPlaylistName.trim()}
-                      variant="primary"
-                      loading={creating}
-                    >
-                      Create
-                    </Button>
-                  </div>
-                </div>
-              </Paper.Body>
-            </form>
-          </Paper>
-        </div>
-      )}
+      <Modal
+        isOpen={showCreateModal}
+        onClose={() => setShowCreateModal(false)}
+        size="sm"
+        title="Create New Playlist"
+        initialFocusRef={nameInputRef}
+      >
+        <form onSubmit={(e) => void createPlaylist(e)}>
+          <div className="space-y-4">
+            <div>
+              <label
+                htmlFor="playlistName"
+                className="block text-sm font-medium mb-2"
+                style={{ color: "var(--text-secondary)" }}
+              >
+                Playlist Name *
+              </label>
+              <input
+                ref={nameInputRef}
+                type="text"
+                id="playlistName"
+                value={newPlaylistName}
+                onChange={(e) => setNewPlaylistName(e.target.value)}
+                className="w-full px-4 py-2 rounded-lg"
+                style={{
+                  backgroundColor: "var(--bg-secondary)",
+                  border: "1px solid var(--border-color)",
+                  color: "var(--text-primary)",
+                }}
+                placeholder="Enter playlist name"
+                required
+              />
+            </div>
+            <div>
+              <label
+                htmlFor="playlistDescription"
+                className="block text-sm font-medium mb-2"
+                style={{ color: "var(--text-secondary)" }}
+              >
+                Description (Optional)
+              </label>
+              <textarea
+                id="playlistDescription"
+                value={newPlaylistDescription}
+                onChange={(e) => setNewPlaylistDescription(e.target.value)}
+                className="w-full px-4 py-2 rounded-lg"
+                style={{
+                  backgroundColor: "var(--bg-secondary)",
+                  border: "1px solid var(--border-color)",
+                  color: "var(--text-primary)",
+                }}
+                placeholder="Enter description (optional)"
+                rows={3}
+              />
+            </div>
+            <div className="flex gap-3 justify-end">
+              <Button
+                type="button"
+                onClick={() => setShowCreateModal(false)}
+                variant="secondary"
+              >
+                Cancel
+              </Button>
+              <Button
+                type="submit"
+                disabled={creating || !newPlaylistName.trim()}
+                variant="primary"
+                loading={creating}
+              >
+                Create
+              </Button>
+            </div>
+          </div>
+        </form>
+      </Modal>
 
       {/* Delete Confirmation Dialog */}
       <ConfirmDialog
@@ -452,9 +431,9 @@ const Playlists = () => {
           setDeleteConfirmOpen(false);
           setPlaylistToDelete(null);
         }}
-        onConfirm={confirmDelete}
+        onConfirm={() => void confirmDelete()}
         title="Delete Playlist"
-        message={`Are you sure you want to delete "${playlistToDelete?.name}"? This action cannot be undone.`}
+        message={`Are you sure you want to delete "${playlistToDelete?.name ?? ""}"? This action cannot be undone.`}
         confirmText="Delete"
         cancelText="Cancel"
         confirmStyle="danger"

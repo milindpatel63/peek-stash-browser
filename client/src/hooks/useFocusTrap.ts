@@ -1,16 +1,30 @@
-import React, { useEffect, useRef } from "react";
+import type React from "react";
+import { useEffect, useRef } from "react";
+import { mayTakeFocus } from "../utils/pageFocus";
+import { useShortcutScope } from "./useShortcutScope";
 
 /**
- * Custom hook for trapping focus within a container (modal, dropdown, etc.)
- * Prevents Tab navigation from escaping the container
+ * Traps focus within a container (a modal dialog): Tab cannot leave it, and
+ * the dialog is a modal `overlay` scope on the shortcut stack, so while it is
+ * open no page, player or global shortcut runs and Escape calls `onEscape`.
  *
  * @param {boolean} enabled Whether focus trap is enabled
  * @param {Function} onEscape Optional callback when Escape is pressed
  * @returns {Object} Ref to attach to container element
  */
-export const useFocusTrap = (enabled = true, onEscape: (() => void) | null = null) => {
+export const useFocusTrap = (
+  enabled = true,
+  onEscape: (() => void) | null = null
+) => {
   const containerRef = useRef<HTMLElement | null>(null);
   const previousActiveElement = useRef<HTMLElement | null>(null);
+
+  useShortcutScope({
+    layer: "overlay",
+    enabled,
+    root: () => containerRef.current,
+    ...(onEscape ? { keys: { esc: () => onEscape() } } : {}),
+  });
 
   useEffect(() => {
     if (!enabled || !containerRef.current) return;
@@ -18,7 +32,8 @@ export const useFocusTrap = (enabled = true, onEscape: (() => void) | null = nul
     const container = containerRef.current;
 
     // Store the previously focused element
-    previousActiveElement.current = document.activeElement as HTMLElement | null;
+    previousActiveElement.current =
+      document.activeElement as HTMLElement | null;
 
     // Get all focusable elements within the container
     const getFocusableElements = () => {
@@ -31,32 +46,21 @@ export const useFocusTrap = (enabled = true, onEscape: (() => void) | null = nul
         '[tabindex]:not([tabindex="-1"])',
       ].join(", ");
 
-      return Array.from(container.querySelectorAll(focusableSelectors)) as HTMLElement[];
+      return Array.from(
+        container.querySelectorAll<HTMLElement>(focusableSelectors)
+      );
     };
 
     // Focus the first focusable element
     const focusableElements = getFocusableElements();
-    if (focusableElements.length > 0) {
-      focusableElements[0].focus();
-    }
+    focusableElements[0]?.focus();
 
     const handleKeyDown = (e: KeyboardEvent) => {
       const focusableElements = getFocusableElements();
 
-      if (focusableElements.length === 0) return;
-
       const firstElement = focusableElements[0];
       const lastElement = focusableElements[focusableElements.length - 1];
-
-      // Handle Escape key
-      if (e.key === "Escape") {
-        if (onEscape) {
-          e.preventDefault();
-          e.stopPropagation();
-          onEscape();
-        }
-        return;
-      }
+      if (!firstElement || !lastElement) return;
 
       // Handle Tab key
       if (e.key === "Tab") {
@@ -89,14 +93,15 @@ export const useFocusTrap = (enabled = true, onEscape: (() => void) | null = nul
         previousActiveElement.current.focus();
       }
     };
-  }, [enabled, onEscape]);
+  }, [enabled]);
 
   return containerRef;
 };
 
 /**
  * Hook for managing initial focus on page load
- * Focuses the first meaningful interactive element
+ * Focuses the first meaningful interactive element, unless the user has
+ * moved focus to another element since the load began (see `mayTakeFocus`)
  *
  * @param {Object} containerRef Ref to the container element
  * @param {string} selector Optional CSS selector for the element to focus
@@ -107,7 +112,15 @@ export const useInitialFocus = (
   selector: string | null = null,
   enabled = true
 ) => {
+  // What had focus when the load began: on mount, and each time `enabled`
+  // goes false (the Scene page's next scene starts loading). Undefined until
+  // the first run.
+  const focusAtStartRef = useRef<Element | null | undefined>(undefined);
+
   useEffect(() => {
+    if (!enabled || focusAtStartRef.current === undefined) {
+      focusAtStartRef.current = document.activeElement;
+    }
     if (!enabled || !containerRef?.current) return;
 
     const container = containerRef.current;
@@ -131,7 +144,11 @@ export const useInitialFocus = (
         elementToFocus = container.querySelector(focusableSelectors);
       }
 
-      if (elementToFocus && (elementToFocus as HTMLElement).focus) {
+      if (
+        elementToFocus &&
+        (elementToFocus as HTMLElement).focus &&
+        mayTakeFocus(elementToFocus, focusAtStartRef.current ?? null)
+      ) {
         (elementToFocus as HTMLElement).focus();
       }
     }, 100);

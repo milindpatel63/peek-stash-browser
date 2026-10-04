@@ -2,44 +2,40 @@ import express from "express";
 import {
   findGalleries,
   findGalleriesMinimal,
-  findGalleryById,
-  getGalleryImages,
+  getGalleryCounts,
 } from "../../controllers/library/galleries.js";
-import { authenticate, requireCacheReady } from "../../middleware/auth.js";
-import { authenticated } from "../../utils/routeHelpers.js";
+import {
+  authenticate,
+  requireCacheReady,
+  requirePickerReady,
+} from "../../middleware/auth.js";
+import { libraryHandler } from "../../utils/routeHelpers.js";
 
 const router = express.Router();
 
 // All rating routes require authentication
 router.use(authenticate);
 
-// Update ratings and favorites
+// Gallery list: filter, sort and page
 router.post(
   "/galleries",
   authenticate,
   requireCacheReady,
-  authenticated(findGalleries)
+  libraryHandler(findGalleries)
 );
 
 router.post(
   "/galleries/minimal",
   authenticate,
-  requireCacheReady,
-  authenticated(findGalleriesMinimal)
+  requirePickerReady,
+  libraryHandler(findGalleriesMinimal)
 );
 
+// The detail page's tab counts, as the viewer sees them
 router.get(
-  "/galleries/:id",
-  authenticate,
+  "/galleries/:id/counts",
   requireCacheReady,
-  authenticated(findGalleryById)
-);
-
-router.get(
-  "/galleries/:galleryId/images",
-  authenticate,
-  requireCacheReady,
-  authenticated(getGalleryImages)
+  libraryHandler(getGalleryCounts)
 );
 
 export default router;

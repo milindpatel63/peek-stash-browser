@@ -1,4 +1,10 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { Readable } from "stream";
+import { pipeline } from "stream/promises";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { logger } from "../../utils/logger.js";
+import { pipeResponseToClient } from "../../utils/streamProxy.js";
+import { resFor } from "../helpers/controllerTestUtils.js";
+import { partialRow } from "../helpers/prismaMock.js";
 
 vi.mock("../../utils/logger.js", () => ({
   logger: { debug: vi.fn(), error: vi.fn() },
@@ -12,27 +18,18 @@ vi.mock("stream", () => ({
   Readable: { fromWeb: vi.fn() },
 }));
 
-import { pipeResponseToClient } from "../../utils/streamProxy.js";
-import { logger } from "../../utils/logger.js";
-import { pipeline } from "stream/promises";
-import { Readable } from "stream";
-
 function makeFetchResponse(opts: {
   headers?: Record<string, string>;
-  body?: unknown;
+  body?: ReadableStream | null;
 }): globalThis.Response {
-  const headersMap = new Map(Object.entries(opts.headers ?? {}));
-  return {
-    headers: { get: (name: string) => headersMap.get(name) ?? null },
-    body: opts.body ?? null,
-  } as unknown as globalThis.Response;
+  return new Response(
+    opts.body ?? null,
+    opts.headers ? { headers: opts.headers } : {}
+  );
 }
 
 function makeExpressResponse() {
-  return {
-    setHeader: vi.fn(),
-    end: vi.fn(),
-  } as unknown as import("express").Response;
+  return resFor(pipeResponseToClient);
 }
 
 describe("pipeResponseToClient", () => {
@@ -83,9 +80,9 @@ describe("pipeResponseToClient", () => {
   });
 
   it("converts web stream to node stream and pipes via pipeline", async () => {
-    const fakeBody = { locked: false };
+    const fakeBody = new ReadableStream();
     const fakeNodeStream = { pipe: vi.fn() };
-    vi.mocked(Readable.fromWeb).mockReturnValue(fakeNodeStream as never);
+    vi.mocked(Readable.fromWeb).mockReturnValue(partialRow(fakeNodeStream));
     vi.mocked(pipeline).mockResolvedValue(undefined);
 
     const fetchRes = makeFetchResponse({ body: fakeBody });
@@ -98,8 +95,8 @@ describe("pipeResponseToClient", () => {
   });
 
   it("silently swallows AbortError (logs debug, not error)", async () => {
-    const fakeBody = { locked: false };
-    vi.mocked(Readable.fromWeb).mockReturnValue({} as never);
+    const fakeBody = new ReadableStream();
+    vi.mocked(Readable.fromWeb).mockReturnValue(partialRow({}));
 
     const abortError = new Error("The operation was aborted");
     abortError.name = "AbortError";
@@ -111,16 +108,18 @@ describe("pipeResponseToClient", () => {
     await pipeResponseToClient(fetchRes, res, "[PROXY]");
 
     expect(logger.debug).toHaveBeenCalledWith(
-      "[PROXY] Client disconnected (stream closed early)",
+      "[PROXY] Client disconnected (stream closed early)"
     );
     expect(logger.error).not.toHaveBeenCalled();
   });
 
   it("silently swallows ERR_STREAM_PREMATURE_CLOSE", async () => {
-    const fakeBody = { locked: false };
-    vi.mocked(Readable.fromWeb).mockReturnValue({} as never);
+    const fakeBody = new ReadableStream();
+    vi.mocked(Readable.fromWeb).mockReturnValue(partialRow({}));
 
-    const prematureCloseError = new Error("Premature close") as NodeJS.ErrnoException;
+    const prematureCloseError = new Error(
+      "Premature close"
+    ) as NodeJS.ErrnoException;
     prematureCloseError.code = "ERR_STREAM_PREMATURE_CLOSE";
     vi.mocked(pipeline).mockRejectedValue(prematureCloseError);
 
@@ -130,14 +129,14 @@ describe("pipeResponseToClient", () => {
     await pipeResponseToClient(fetchRes, res, "[STREAM]");
 
     expect(logger.debug).toHaveBeenCalledWith(
-      "[STREAM] Client disconnected (stream closed early)",
+      "[STREAM] Client disconnected (stream closed early)"
     );
     expect(logger.error).not.toHaveBeenCalled();
   });
 
   it("logs error for unexpected pipeline errors", async () => {
-    const fakeBody = { locked: false };
-    vi.mocked(Readable.fromWeb).mockReturnValue({} as never);
+    const fakeBody = new ReadableStream();
+    vi.mocked(Readable.fromWeb).mockReturnValue(partialRow({}));
 
     const unexpectedError = new Error("ECONNRESET");
     vi.mocked(pipeline).mockRejectedValue(unexpectedError);

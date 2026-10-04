@@ -1,17 +1,17 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from "react";
-import { apiGet } from "../../api";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  startOfYear,
-  endOfYear,
-  startOfMonth,
-  endOfMonth,
-  startOfWeek,
-  endOfWeek,
-  startOfDay,
   endOfDay,
+  endOfMonth,
+  endOfWeek,
+  endOfYear,
   format,
   parse,
+  startOfDay,
+  startOfMonth,
+  startOfWeek,
+  startOfYear,
 } from "date-fns";
+import { apiPost } from "../../api";
 
 interface DistributionItem {
   period: string;
@@ -25,20 +25,16 @@ interface DateRange {
   label: string;
 }
 
-interface TimelineFilters {
-  performerId?: string;
-  tagId?: string;
-  studioId?: string;
-  groupId?: string;
-}
-
 interface DistributionResponse {
   distribution: DistributionItem[];
 }
 
 const ZOOM_LEVELS = ["years", "months", "weeks", "days"];
 
-export function parsePeriodToDateRange(period: string, zoomLevel: string): DateRange | null {
+export function parsePeriodToDateRange(
+  period: string,
+  zoomLevel: string
+): DateRange | null {
   if (!period) return null;
 
   try {
@@ -91,74 +87,129 @@ export function parsePeriodToDateRange(period: string, zoomLevel: string): DateR
   }
 }
 
+/** The zoom level a period's form names: "2024" years, "2024-W12" weeks, ... */
+export function zoomLevelOfPeriod(period: string | null | undefined): string {
+  if (!period) return "months";
+  if (period.includes("-W")) return "weeks";
+  if (/^\d{4}$/.test(period)) return "years";
+  if (/^\d{4}-\d{2}-\d{2}$/.test(period)) return "days";
+  return "months";
+}
+
+/** A period's first and last day, at the zoom its form names; null when it names none */
+export function periodDateRange(
+  period: string | null | undefined
+): { start: string; end: string } | null {
+  if (!period) return null;
+  const range = parsePeriodToDateRange(period, zoomLevelOfPeriod(period));
+  return range ? { start: range.start, end: range.end } : null;
+}
+
 interface UseTimelineStateOptions {
   entityType: string;
   autoSelectRecent?: boolean;
   initialPeriod?: string | null;
-  filters?: TimelineFilters | null;
+  /**
+   * The list's own request (its search and `<entity>_filter`, no page, sort
+   * or period): the bars count what the list shows. `null` is a list with no
+   * request yet (its presets load): nothing is asked for until it has one.
+   */
+  request?: Record<string, unknown> | null;
+  /**
+   * The selected period, held by the owner (the list's URL): the selection
+   * is this period, and a choice, a deselection, a zoom change and the
+   * auto-selected latest period are reported through `onPeriodChange`.
+   * Undefined leaves the selection to the hook.
+   */
+  period?: string | null;
+  onPeriodChange?: (period: string | null) => void;
 }
 
-export function useTimelineState({ entityType, autoSelectRecent = false, initialPeriod = null, filters = null }: UseTimelineStateOptions) {
-  // Determine initial zoom level from initialPeriod format if provided
-  const getInitialZoomLevel = () => {
-    if (!initialPeriod) return "months";
-    if (initialPeriod.includes("-W")) return "weeks";
-    if (initialPeriod.match(/^\d{4}$/)) return "years";
-    if (initialPeriod.match(/^\d{4}-\d{2}-\d{2}$/)) return "days";
-    if (initialPeriod.match(/^\d{4}-\d{2}$/)) return "months";
-    return "months";
-  };
+export function useTimelineState({
+  entityType,
+  autoSelectRecent = false,
+  initialPeriod = null,
+  request,
+  period,
+  onPeriodChange,
+}: UseTimelineStateOptions) {
+  const controlled = period !== undefined;
+  // A controlled period that names no date is no selection
+  const controlledRange = useMemo(
+    () =>
+      period ? parsePeriodToDateRange(period, zoomLevelOfPeriod(period)) : null,
+    [period]
+  );
+  const firstPeriod = controlled ? controlledRange?.period : initialPeriod;
 
-  const [zoomLevel, setZoomLevelState] = useState(getInitialZoomLevel);
-  const [selectedPeriod, setSelectedPeriod] = useState(() => {
+  const [zoomState, setZoomLevelState] = useState(() =>
+    zoomLevelOfPeriod(firstPeriod)
+  );
+  const [ownSelection, setSelectedPeriod] = useState(() =>
     // Parse initial period from URL if provided
-    if (initialPeriod) {
-      const zoom = getInitialZoomLevel();
-      return parsePeriodToDateRange(initialPeriod, zoom);
+    !controlled && initialPeriod
+      ? parsePeriodToDateRange(initialPeriod, zoomLevelOfPeriod(initialPeriod))
+      : null
+  );
+  // A controlled period shows at its own zoom; without one, the chosen zoom
+  const zoomLevel = controlledRange
+    ? zoomLevelOfPeriod(controlledRange.period)
+    : zoomState;
+  const selectedPeriod = controlled ? controlledRange : ownSelection;
+
+  // The owner's period moved (Back, a link): its zoom is the chosen one now
+  useEffect(() => {
+    if (controlledRange) {
+      setZoomLevelState(zoomLevelOfPeriod(controlledRange.period));
     }
-    return null;
-  });
+  }, [controlledRange]);
+
+  const onPeriodChangeRef = useRef(onPeriodChange);
+  onPeriodChangeRef.current = onPeriodChange;
   const [distribution, setDistribution] = useState<DistributionItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // Memoize filter key to prevent unnecessary refetches
-  const filterKey = useMemo(() => {
-    if (!filters) return null;
-    return JSON.stringify(filters);
-  }, [filters]);
+  // The request by value, so a request rebuilt equal does not refetch
+  const requestKey = JSON.stringify(request ?? null);
+  const requestRef = useRef(request);
+  requestRef.current = request;
 
   // Track whether we've done the initial load (for autoSelectRecent)
-  const hasInitiallyLoaded = useRef(!!initialPeriod); // Skip auto-select if we have initialPeriod
+  const hasInitiallyLoaded = useRef(!!firstPeriod); // Skip auto-select if we have a period
 
   // Clear selection when zoom level changes
-  const setZoomLevel = useCallback((newLevel: string) => {
-    setZoomLevelState((prevLevel) => {
-      if (prevLevel !== newLevel) {
-        setSelectedPeriod(null);
+  const setZoomLevel = useCallback(
+    (newLevel: string) => {
+      if (controlled) {
+        if (newLevel === zoomLevel) return;
+        setZoomLevelState(newLevel);
+        onPeriodChangeRef.current?.(null);
+        return;
       }
-      return newLevel;
-    });
-  }, []);
+      setZoomLevelState((prevLevel) => {
+        if (prevLevel !== newLevel) {
+          setSelectedPeriod(null);
+        }
+        return newLevel;
+      });
+    },
+    [controlled, zoomLevel]
+  );
 
-  // Fetch distribution when entityType or zoomLevel changes
+  // Fetch distribution when entityType, zoomLevel or the list's request changes
   useEffect(() => {
     let cancelled = false;
+    const listRequest = requestRef.current;
 
     async function fetchDistribution() {
       setIsLoading(true);
       setError(null);
 
       try {
-        // Build query params
-        const params = new URLSearchParams({ granularity: zoomLevel });
-        if (filters?.performerId) params.set("performerId", filters.performerId);
-        if (filters?.tagId) params.set("tagId", filters.tagId);
-        if (filters?.studioId) params.set("studioId", filters.studioId);
-        if (filters?.groupId) params.set("groupId", filters.groupId);
-
-        const response = await apiGet<DistributionResponse>(
-          `/timeline/${entityType}/distribution?${params.toString()}`
+        const response = await apiPost<DistributionResponse>(
+          `/timeline/${entityType}/distribution`,
+          { ...listRequest, granularity: zoomLevel }
         );
 
         if (!cancelled) {
@@ -170,15 +221,24 @@ export function useTimelineState({ entityType, autoSelectRecent = false, initial
             !hasInitiallyLoaded.current &&
             response.distribution?.length > 0
           ) {
-            const mostRecent = response.distribution[response.distribution.length - 1];
-            setSelectedPeriod(parsePeriodToDateRange(mostRecent.period, zoomLevel));
+            const mostRecent =
+              response.distribution[response.distribution.length - 1];
+            if (mostRecent && controlled) {
+              onPeriodChangeRef.current?.(mostRecent.period);
+            } else if (mostRecent) {
+              setSelectedPeriod(
+                parsePeriodToDateRange(mostRecent.period, zoomLevel)
+              );
+            }
           }
 
           hasInitiallyLoaded.current = true;
         }
       } catch (err) {
         if (!cancelled) {
-          setError(err instanceof Error ? err.message : "Failed to fetch distribution");
+          setError(
+            err instanceof Error ? err.message : "Failed to fetch distribution"
+          );
           setDistribution([]);
         }
       } finally {
@@ -188,26 +248,39 @@ export function useTimelineState({ entityType, autoSelectRecent = false, initial
       }
     }
 
-    fetchDistribution();
+    // A list with no request yet asks for nothing
+    if (listRequest === null) {
+      setIsLoading(true);
+    } else {
+      void fetchDistribution();
+    }
 
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- filterKey = JSON.stringify(filters) captures all filter property changes
-  }, [entityType, zoomLevel, autoSelectRecent, filterKey]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- requestKey = JSON.stringify(request) captures every change of the request (read through requestRef)
+  }, [entityType, zoomLevel, autoSelectRecent, requestKey]);
 
   const selectPeriod = useCallback(
-    (period: string) => {
+    (next: string) => {
+      if (controlled) {
+        // Choosing the selected period again deselects it
+        onPeriodChangeRef.current?.(
+          controlledRange?.period === next ? null : next
+        );
+        return;
+      }
       setSelectedPeriod((prev) =>
-        prev?.period === period ? null : parsePeriodToDateRange(period, zoomLevel)
+        prev?.period === next ? null : parsePeriodToDateRange(next, zoomLevel)
       );
     },
-    [zoomLevel]
+    [controlled, controlledRange, zoomLevel]
   );
 
   const clearSelection = useCallback(() => {
-    setSelectedPeriod(null);
-  }, []);
+    if (controlled) onPeriodChangeRef.current?.(null);
+    else setSelectedPeriod(null);
+  }, [controlled]);
 
   // Calculate max count for bar height scaling
   const maxCount = useMemo(() => {

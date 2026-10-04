@@ -1,8 +1,12 @@
 import { useEffect, useState } from "react";
-import { ChevronRight, Server } from "lucide-react";
 import { Link } from "react-router-dom";
-import { useHiddenEntities } from "../../../hooks/useHiddenEntities";
+import { useQueryClient } from "@tanstack/react-query";
+import { ChevronRight, Server } from "lucide-react";
 import { apiGet, apiPut } from "../../../api";
+import { getErrorMessage } from "../../../api/client";
+import { invalidateInstanceQueries } from "../../../api/hooks/useLibraryReady";
+import { useHiddenEntities } from "../../../hooks/useHiddenEntities";
+import { showError } from "../../../utils/toast";
 
 interface StashInstance {
   id: string;
@@ -11,7 +15,9 @@ interface StashInstance {
 }
 
 const ContentTab = () => {
-  const { hideConfirmationDisabled, updateHideConfirmation } = useHiddenEntities();
+  const { hideConfirmationDisabled, updateHideConfirmation } =
+    useHiddenEntities();
+  const queryClient = useQueryClient();
 
   const [instances, setInstances] = useState<StashInstance[]>([]);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
@@ -21,15 +27,19 @@ const ContentTab = () => {
   useEffect(() => {
     const fetchInstances = async () => {
       try {
-        const data = await apiGet<{ selectedInstanceIds: string[]; availableInstances: StashInstance[] }>("/user/stash-instances");
+        const data = await apiGet<{
+          selectedInstanceIds: string[];
+          availableInstances: StashInstance[];
+        }>("/user/stash-instances");
         const { selectedInstanceIds, availableInstances } = data;
 
         setInstances(availableInstances || []);
         // If user has no explicit selections (empty array), default to all instances checked
         // This matches the backend behavior where empty = "show all enabled instances"
-        const effectiveSelection = selectedInstanceIds?.length > 0
-          ? selectedInstanceIds
-          : (availableInstances || []).map((i: StashInstance) => i.id);
+        const effectiveSelection =
+          selectedInstanceIds?.length > 0
+            ? selectedInstanceIds
+            : (availableInstances || []).map((i: StashInstance) => i.id);
         setSelectedIds(effectiveSelection);
         setShowInstanceSection((availableInstances?.length || 0) >= 2);
       } catch (err) {
@@ -37,7 +47,7 @@ const ContentTab = () => {
       }
     };
 
-    fetchInstances();
+    void fetchInstances();
   }, []);
 
   const handleInstanceToggle = async (instanceId: string) => {
@@ -53,10 +63,12 @@ const ContentTab = () => {
 
     try {
       await apiPut("/user/stash-instances", { instanceIds: newSelectedIds });
+      // The library now reads other instances
+      void invalidateInstanceQueries(queryClient);
     } catch (err) {
-      console.error("Failed to update instances:", err);
       // Revert on error
       setSelectedIds(selectedIds);
+      showError(getErrorMessage(err, "Failed to update Content Sources"));
     } finally {
       setSaving(false);
     }
@@ -99,7 +111,7 @@ const ContentTab = () => {
                 <input
                   type="checkbox"
                   checked={selectedIds.includes(instance.id)}
-                  onChange={() => handleInstanceToggle(instance.id)}
+                  onChange={() => void handleInstanceToggle(instance.id)}
                   disabled={saving}
                   className="mt-1 w-4 h-4"
                   style={{ accentColor: "var(--accent-primary)" }}
@@ -154,10 +166,16 @@ const ContentTab = () => {
             }}
           >
             <div>
-              <div className="font-medium" style={{ color: "var(--text-primary)" }}>
+              <div
+                className="font-medium"
+                style={{ color: "var(--text-primary)" }}
+              >
                 Hidden Items
               </div>
-              <div className="text-sm mt-1" style={{ color: "var(--text-secondary)" }}>
+              <div
+                className="text-sm mt-1"
+                style={{ color: "var(--text-secondary)" }}
+              >
                 Manage items you've hidden from your library
               </div>
             </div>
@@ -172,12 +190,15 @@ const ContentTab = () => {
               <input
                 type="checkbox"
                 checked={hideConfirmationDisabled}
-                onChange={(e) => updateHideConfirmation(e.target.checked)}
+                onChange={(e) => void updateHideConfirmation(e.target.checked)}
                 className="w-5 h-5 cursor-pointer"
                 style={{ accentColor: "var(--accent-primary)" }}
               />
               <div>
-                <div className="font-medium" style={{ color: "var(--text-primary)" }}>
+                <div
+                  className="font-medium"
+                  style={{ color: "var(--text-primary)" }}
+                >
                   Don't ask for confirmation when hiding items
                 </div>
                 <div

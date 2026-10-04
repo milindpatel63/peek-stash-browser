@@ -4,6 +4,7 @@
  *
  * Request and response types for /api/watch-history/* endpoints.
  */
+import type { NormalizedScene } from "../entities.js";
 
 // =============================================================================
 // COMMON TYPES
@@ -19,45 +20,6 @@ export interface WatchHistoryData {
   lastPlayedAt: Date | null;
 }
 
-/**
- * Full watch history record (includes oCount and history arrays)
- */
-export interface FullWatchHistoryRecord {
-  id: number;
-  userId: number;
-  instanceId: string | null;
-  sceneId: string;
-  playCount: number;
-  playDuration: number;
-  resumeTime: number | null;
-  lastPlayedAt: Date | null;
-  oCount: number;
-  oHistory: string[];
-  playHistory: string[];
-}
-
-// =============================================================================
-// PING WATCH HISTORY
-// =============================================================================
-
-/**
- * POST /api/watch-history/ping
- * Periodic ping from video player to track playback progress
- */
-export interface PingWatchHistoryRequest {
-  instanceId?: string;
-  sceneId: string;
-  currentTime: number;
-  quality?: string;
-  sessionStart?: string;
-  seekEvents?: Array<{ from: number; to: number }>;
-}
-
-export interface PingWatchHistoryResponse {
-  success: true;
-  watchHistory: WatchHistoryData;
-}
-
 // =============================================================================
 // SAVE ACTIVITY
 // =============================================================================
@@ -67,7 +29,8 @@ export interface PingWatchHistoryResponse {
  * Save resume time and play duration delta (called by track-activity plugin)
  */
 export interface SaveActivityRequest {
-  instanceId?: string;
+  /** The scene's instance: required, the server never guesses one */
+  instanceId: string;
   sceneId: string;
   resumeTime?: number;
   playDuration?: number;
@@ -87,8 +50,15 @@ export interface SaveActivityResponse {
  * Increment play count when minimum play percentage is reached
  */
 export interface IncrementPlayCountRequest {
-  instanceId?: string;
+  /** The scene's instance: required, the server never guesses one */
+  instanceId: string;
   sceneId: string;
+  /**
+   * One viewing's token (1 to 64 characters), the same on every retry of its
+   * request: the server counts a token once for 10 minutes. A request
+   * without one always counts.
+   */
+  playToken?: string;
 }
 
 export interface IncrementPlayCountResponse {
@@ -105,7 +75,7 @@ export interface IncrementPlayCountResponse {
  * Increment O counter for a scene
  */
 export interface IncrementOCounterRequest {
-  instanceId?: string;
+  instanceId: string;
   sceneId: string;
 }
 
@@ -116,21 +86,83 @@ export interface IncrementOCounterResponse {
 }
 
 // =============================================================================
-// GET ALL WATCH HISTORY
+// DECREMENT O COUNTER
 // =============================================================================
 
 /**
- * GET /api/watch-history
- * Get all watch history for current user (Continue Watching carousel)
+ * POST /api/watch-history/decrement-o
+ * Remove the user's newest O on a scene ("Remove last O"). At 0 Os it
+ * changes nothing and answers oCount 0.
  */
-export interface GetAllWatchHistoryQuery
-  extends Record<string, string | undefined> {
-  limit?: string;
-  inProgress?: string;
+export interface DecrementOCounterRequest {
+  instanceId: string;
+  sceneId: string;
 }
 
-export interface GetAllWatchHistoryResponse {
-  watchHistory: FullWatchHistoryRecord[];
+export interface DecrementOCounterResponse {
+  success: true;
+  oCount: number;
+}
+
+// =============================================================================
+// GET WATCHED SCENES
+// =============================================================================
+
+/**
+ * The views of `GET /api/watch-history/scenes`:
+ * - `all`: played, watched for any time, or left with a resume point (a
+ *   scene with only an O is not watched)
+ * - `in_progress`: a resume point before the final 10% of the scene, however
+ *   little was watched (any resume point when the length is unknown); the
+ *   scene filter `in_progress` reads the same rule
+ * - `completed`: played at least once, and the last session finished
+ *   (resume point 0) or stopped within the final 10% of the scene
+ */
+export const WATCHED_SCENES_VIEWS = [
+  "all",
+  "in_progress",
+  "completed",
+] as const;
+export type WatchedScenesView = (typeof WATCHED_SCENES_VIEWS)[number];
+
+/**
+ * The orders: `recent` by last played (never-dated rows last),
+ * `most_watched` by play count, `longest_duration` by time watched
+ */
+export const WATCHED_SCENES_SORTS = [
+  "recent",
+  "most_watched",
+  "longest_duration",
+] as const;
+export type WatchedScenesSort = (typeof WATCHED_SCENES_SORTS)[number];
+
+/**
+ * GET /api/watch-history/scenes
+ * The viewer's watched scenes they can see, one page, in the view and order
+ * asked for. Unknown parameters or values are a 400.
+ */
+export interface GetWatchedScenesQuery extends Record<
+  string,
+  string | undefined
+> {
+  /** A `WatchedScenesView`; default `all` */
+  view?: string;
+  /** A `WatchedScenesSort`; default `recent` */
+  sort?: string;
+  /** Default 1 */
+  page?: string;
+  /** 1 to 250; default 24 */
+  per_page?: string;
+  /** `false` skips the totals (both answer null); default `true` */
+  count?: string;
+}
+
+export interface GetWatchedScenesResponse {
+  scenes: NormalizedScene[];
+  /** Every scene in the view; null when the request sent `count=false` */
+  total: number | null;
+  /** Seconds watched over every scene in the view; null with `count=false` */
+  totalPlayDuration: number | null;
 }
 
 // =============================================================================

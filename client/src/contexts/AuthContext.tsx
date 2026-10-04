@@ -1,6 +1,19 @@
 import React, { useEffect, useState } from "react";
+import type { AuthCheckResponse, LoginResponse } from "@peek/shared-types";
+import {
+  ApiError,
+  getErrorMessage,
+  readRetryAfterSeconds,
+  resetLibraryStamp,
+} from "../api/client";
+import { queryClient } from "../api/queryClient";
 import { AuthContext } from "./AuthContextProvider";
 import type { AuthUser } from "./AuthContextProvider";
+
+/** POST /api/auth/login refused: an error message */
+interface LoginErrorResponse {
+  error?: string;
+}
 
 export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -14,7 +27,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       });
 
       if (response.ok) {
-        const userData = await response.json();
+        const userData = (await response.json()) as AuthCheckResponse;
         setIsAuthenticated(true);
         setUser(userData.user);
       } else {
@@ -39,14 +52,23 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       body: JSON.stringify(credentials),
     });
 
-    const data = await response.json();
+    const data: unknown = await response.json();
 
     if (response.ok) {
+      const { user, landingPagePreference } = data as LoginResponse;
       setIsAuthenticated(true);
-      setUser(data.user);
-      return { success: true, user: data.user };
+      setUser(user);
+      return { success: true, user, landingPagePreference };
     } else {
-      return { success: false, error: data.error || "Login failed" };
+      const body = data as LoginErrorResponse & Record<string, unknown>;
+      // A lockout (423) or rate limit (429) says how long to wait
+      const refusal = new ApiError(
+        body.error || "Login failed",
+        response.status,
+        body,
+        readRetryAfterSeconds(response, body)
+      );
+      return { success: false, error: getErrorMessage(refusal) };
     }
   };
 
@@ -57,10 +79,19 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
         credentials: "include",
       });
     } catch {
-      // Error logging out - clear auth state regardless
+      // Error logging out - the session is dropped locally regardless
     } finally {
-      setIsAuthenticated(false);
-      setUser(null);
+      // The auth state stays as it is: flipping it would make the route guard
+      // navigate in-app to /login and race the full load below. The load
+      // resets it, so a sign-out navigates once.
+      // The next person to sign in on this browser gets neither this user's
+      // page nor cached data. Nothing in the tab's session storage outlives a
+      // sign-out. A full load also drops what components and contexts hold
+      // in memory.
+      sessionStorage.clear();
+      queryClient.clear();
+      resetLibraryStamp();
+      window.location.assign("/login");
     }
   };
 
@@ -73,7 +104,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   };
 
   useEffect(() => {
-    checkAuth();
+    void checkAuth();
   }, []);
 
   const value = {

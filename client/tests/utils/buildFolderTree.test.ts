@@ -1,464 +1,220 @@
-import { describe, it, expect } from "vitest";
-import { buildFolderTree, UNTAGGED_FOLDER_ID } from "../../src/utils/buildFolderTree";
+/**
+ * The folder view's folders (item 57, #398): the current tag's children, or
+ * the roots, each shown while its subtree holds a tag with items of the
+ * page's type; a folder's badge is its tag's own count for that type. Items
+ * are not placed here: the list pages them, the folder's tag at depth 0.
+ */
+import { describe, expect, it } from "vitest";
+import {
+  type FolderCountField,
+  type FolderTreeTag,
+  UNTAGGED_FOLDER_ID,
+  buildFolderTree,
+} from "../../src/utils/buildFolderTree";
 
-// Helper to create test tags with hierarchy
-const createTag = (id: string, name: string, parents: Array<{ id: string; name: string }> = [], children: Array<{ id: string; name: string }> = []) => ({
+/** A tag on instance "a" with its parents' ids and its counts */
+const tag = (
+  id: string,
+  name: string,
+  parents: string[] = [],
+  counts: Partial<Record<FolderCountField, number>> = {}
+): FolderTreeTag => ({
   id,
+  instanceId: "a",
   name,
-  parents: parents.map((p) => ({ id: p.id, name: p.name })),
-  children: children.map((c) => ({ id: c.id, name: c.name })),
+  parents: parents.map((p) => ({ id: p })),
+  ...counts,
 });
 
-// Helper to create test items
-const createItem = (id: string, tagIds: string[] = []) => ({
-  id,
-  tags: tagIds.map((tagId) => ({ id: tagId })),
-  paths: { screenshot: `/thumb/${id}.jpg` },
-});
+const folders = (
+  tags: readonly FolderTreeTag[],
+  path: string[],
+  field: FolderCountField
+) => buildFolderTree(tags, path, field).folders.map((f) => [f.name, f.count]);
 
-describe("buildFolderTree - empty/null handling", () => {
-  it("returns empty result for null items", () => {
-    const result = buildFolderTree(null as any, []);
-    expect(result).toEqual({ folders: [], items: [], breadcrumbs: [] });
-  });
-
-  it("returns empty result for null tags", () => {
-    const result = buildFolderTree([], null as any);
-    expect(result).toEqual({ folders: [], items: [], breadcrumbs: [] });
-  });
-
-  it("returns empty result for empty arrays", () => {
-    const result = buildFolderTree([], []);
-    expect(result).toEqual({ folders: [], items: [], breadcrumbs: [] });
-  });
-});
-
-describe("buildFolderTree - root level behavior", () => {
-  it("shows only root-level tag folders at root (no loose items)", () => {
+describe("buildFolderTree", () => {
+  it("a gallery folder view shows a folder whose subtree has galleries and hides one with scenes only", () => {
     const tags = [
-      createTag("action", "Action"),
-      createTag("comedy", "Comedy"),
-    ];
-    const items = [
-      createItem("scene1", ["action"]),
-      createItem("scene2", ["comedy"]),
-      createItem("scene3", ["action", "comedy"]),
+      tag("1", "Albums", [], { gallery_count: 2 }),
+      tag("2", "Clips only", [], { scene_count: 40 }),
+      tag("3", "Holder"),
+      tag("4", "Deep album", ["3"], { gallery_count: 1 }),
     ];
 
-    const result = buildFolderTree(items, tags, []);
-
-    expect(result.folders).toHaveLength(2);
-    expect(result.folders[0].name).toBe("Action");
-    expect(result.folders[1].name).toBe("Comedy");
-    // NO loose items at root
-    expect(result.items).toHaveLength(0);
-  });
-
-  it("shows Untagged folder at root for items with no tags", () => {
-    const tags = [createTag("action", "Action")];
-    const items = [
-      createItem("scene1", ["action"]),
-      createItem("scene2", []), // untagged
-      createItem("scene3", []), // untagged
-    ];
-
-    const result = buildFolderTree(items, tags, []);
-
-    const untaggedFolder = result.folders.find((f) => f.id === UNTAGGED_FOLDER_ID);
-    expect(untaggedFolder).toBeDefined();
-    expect(untaggedFolder!.totalCount).toBe(2);
-    expect(result.items).toHaveLength(0);
-  });
-
-  it("shows folders with pre-computed counts even when no items on current page", () => {
-    // Tag has image_count > 0 from pre-computed data, but no items on current page
-    const tags = [
-      { ...createTag("action", "Action"), image_count: 50 },
-      { ...createTag("comedy", "Comedy"), image_count: 30 }, // No items on page, but has content
-    ];
-    const items = [createItem("scene1", ["action"])]; // Only action has items on this page
-
-    const result = buildFolderTree(items, tags, []);
-
-    // Both folders should appear because comedy has image_count > 0
-    expect(result.folders).toHaveLength(2);
-    expect(result.folders.map(f => f.name).sort()).toEqual(["Action", "Comedy"]);
-  });
-
-  it("uses pre-computed count when no items on current page", () => {
-    const tags = [
-      { ...createTag("action", "Action"), image_count: 100 },
-      { ...createTag("comedy", "Comedy"), image_count: 50 }, // No items on page
-    ];
-    const items = [createItem("scene1", ["action"])];
-
-    const result = buildFolderTree(items, tags, []);
-
-    const comedyFolder = result.folders.find(f => f.name === "Comedy");
-    expect(comedyFolder).toBeDefined();
-    // Should use pre-computed count since no items on page
-    expect(comedyFolder!.totalCount).toBe(50);
-  });
-
-  it("hides folders that are truly empty (zero pre-computed count)", () => {
-    const tags = [
-      { ...createTag("action", "Action"), image_count: 50 },
-      { ...createTag("comedy", "Comedy"), image_count: 0 }, // Truly empty
-    ];
-    const items = [createItem("scene1", ["action"])];
-
-    const result = buildFolderTree(items, tags, []);
-
-    // Only action should appear - comedy is truly empty
-    expect(result.folders).toHaveLength(1);
-    expect(result.folders[0].name).toBe("Action");
-  });
-
-  it("sorts folders alphabetically", () => {
-    const tags = [
-      createTag("zebra", "Zebra"),
-      createTag("apple", "Apple"),
-      createTag("mango", "Mango"),
-    ];
-    const items = [
-      createItem("scene1", ["zebra"]),
-      createItem("scene2", ["apple"]),
-      createItem("scene3", ["mango"]),
-    ];
-
-    const result = buildFolderTree(items, tags, []);
-
-    expect(result.folders[0].name).toBe("Apple");
-    expect(result.folders[1].name).toBe("Mango");
-    expect(result.folders[2].name).toBe("Zebra");
-  });
-
-  it("items with non-root tags only do NOT appear at root", () => {
-    // Tag hierarchy: Genre (root) -> Action (child)
-    const genre = createTag("genre", "Genre", [], [{ id: "action", name: "Action" }]);
-    const action = createTag("action", "Action", [{ id: "genre", name: "Genre" }]);
-    const tags = [genre, action];
-
-    // Item only has child tag, not root tag
-    const items = [createItem("scene1", ["action"])];
-
-    const result = buildFolderTree(items, tags, []);
-
-    // Item should be inside Genre folder (via descendant), not loose at root
-    expect(result.items).toHaveLength(0);
-    expect(result.folders).toHaveLength(1);
-    expect(result.folders[0].name).toBe("Genre");
-    expect(result.folders[0].totalCount).toBe(1);
-  });
-});
-
-describe("buildFolderTree - inside tag folder (with pre-computed counts)", () => {
-  it("shows child folders with pre-computed counts even when no items on current page", () => {
-    // Hierarchy: Photo -> Color, B&W
-    const photo = {
-      ...createTag("photo", "Photo", [], [{ id: "color", name: "Color" }, { id: "bw", name: "B&W" }]),
-      image_count: 100,
-    };
-    const color = {
-      ...createTag("color", "Color", [{ id: "photo", name: "Photo" }]),
-      image_count: 60,
-    };
-    const bw = {
-      ...createTag("bw", "B&W", [{ id: "photo", name: "Photo" }]),
-      image_count: 40, // No items on current page, but has content
-    };
-    const tags = [photo, color, bw];
-
-    // Only Color has items on this page
-    const items = [createItem("scene1", ["photo", "color"])];
-
-    const result = buildFolderTree(items, tags, ["photo"]);
-
-    // Both Color and B&W should appear because B&W has image_count > 0
-    expect(result.folders).toHaveLength(2);
-    expect(result.folders.map(f => f.name).sort()).toEqual(["B&W", "Color"]);
-
-    // B&W should use pre-computed count
-    const bwFolder = result.folders.find(f => f.name === "B&W");
-    expect(bwFolder!.totalCount).toBe(40);
-
-    // Color should use item count (more accurate for current page)
-    const colorFolder = result.folders.find(f => f.name === "Color");
-    expect(colorFolder!.totalCount).toBe(1);
-  });
-});
-
-describe("buildFolderTree - inside tag folder", () => {
-  it("shows child tag folders and directly-tagged items", () => {
-    // Hierarchy: Horror -> Slasher
-    const horror = createTag("horror", "Horror", [], [{ id: "slasher", name: "Slasher" }]);
-    const slasher = createTag("slasher", "Slasher", [{ id: "horror", name: "Horror" }]);
-    const tags = [horror, slasher];
-
-    const items = [
-      createItem("scene1", ["horror"]), // directly tagged Horror, no child tag
-      createItem("scene2", ["horror", "slasher"]), // has both
-      createItem("scene3", ["slasher"]), // only has child tag
-    ];
-
-    const result = buildFolderTree(items, tags, ["horror"]);
-
-    // Slasher folder should contain scene2 and scene3
-    expect(result.folders).toHaveLength(1);
-    expect(result.folders[0].name).toBe("Slasher");
-    expect(result.folders[0].totalCount).toBe(2);
-
-    // Only scene1 should be a loose item (has Horror but not Slasher)
-    expect(result.items).toHaveLength(1);
-    expect(result.items[0].id).toBe("scene1");
-  });
-
-  it("item with parent+child tag only appears in child folder", () => {
-    // Hierarchy: Horror -> Slasher
-    const horror = createTag("horror", "Horror", [], [{ id: "slasher", name: "Slasher" }]);
-    const slasher = createTag("slasher", "Slasher", [{ id: "horror", name: "Horror" }]);
-    const tags = [horror, slasher];
-
-    // Scene has both Horror AND Slasher
-    const items = [createItem("scene1", ["horror", "slasher"])];
-
-    const result = buildFolderTree(items, tags, ["horror"]);
-
-    // Item should NOT be loose at Horror level
-    expect(result.items).toHaveLength(0);
-    // Item should be in Slasher folder
-    expect(result.folders[0].totalCount).toBe(1);
-  });
-
-  it("item appears in all child folders when it has multiple child tags", () => {
-    // Hierarchy: Genre -> [Action, Comedy]
-    const genre = createTag("genre", "Genre", [], [
-      { id: "action", name: "Action" },
-      { id: "comedy", name: "Comedy" },
+    expect(folders(tags, [], "gallery_count")).toEqual([
+      ["Albums", 2],
+      ["Holder", 0],
     ]);
-    const action = createTag("action", "Action", [{ id: "genre", name: "Genre" }]);
-    const comedy = createTag("comedy", "Comedy", [{ id: "genre", name: "Genre" }]);
-    const tags = [genre, action, comedy];
-
-    // Scene has both Action and Comedy
-    const items = [createItem("scene1", ["genre", "action", "comedy"])];
-
-    const result = buildFolderTree(items, tags, ["genre"]);
-
-    // Should appear in both Action and Comedy folders
-    expect(result.folders).toHaveLength(2);
-    expect(result.folders.find((f) => f.name === "Action")!.totalCount).toBe(1);
-    expect(result.folders.find((f) => f.name === "Comedy")!.totalCount).toBe(1);
-    // Should NOT be a loose item
-    expect(result.items).toHaveLength(0);
+    // The same tags on the scene list show the scene folder only
+    expect(folders(tags, [], "scene_count")).toEqual([["Clips only", 40]]);
   });
 
-  it("item without current tag directly does not appear as loose item", () => {
-    // Hierarchy: Horror -> Slasher
-    const horror = createTag("horror", "Horror", [], [{ id: "slasher", name: "Slasher" }]);
-    const slasher = createTag("slasher", "Slasher", [{ id: "horror", name: "Horror" }]);
-    const tags = [horror, slasher];
-
-    // Scene only has Slasher (child), not Horror directly
-    const items = [createItem("scene1", ["slasher"])];
-
-    const result = buildFolderTree(items, tags, ["horror"]);
-
-    // Should be in Slasher folder
-    expect(result.folders).toHaveLength(1);
-    expect(result.folders[0].totalCount).toBe(1);
-    // Should NOT be loose at Horror level (doesn't have Horror tag directly)
-    expect(result.items).toHaveLength(0);
-  });
-});
-
-describe("buildFolderTree - deep hierarchy", () => {
-  it("item only surfaces at exact tag level", () => {
-    // 3-level hierarchy: Genre -> Horror -> Slasher
-    const genre = createTag("genre", "Genre", [], [{ id: "horror", name: "Horror" }]);
-    const horror = createTag("horror", "Horror", [{ id: "genre", name: "Genre" }], [{ id: "slasher", name: "Slasher" }]);
-    const slasher = createTag("slasher", "Slasher", [{ id: "horror", name: "Horror" }]);
-    const tags = [genre, horror, slasher];
-
-    // Scene only has Slasher tag
-    const items = [createItem("scene1", ["slasher"])];
-
-    // At root: item is in Genre folder (via descendant)
-    const rootResult = buildFolderTree(items, tags, []);
-    expect(rootResult.folders[0].name).toBe("Genre");
-    expect(rootResult.folders[0].totalCount).toBe(1);
-    expect(rootResult.items).toHaveLength(0);
-
-    // At Genre level: item is in Horror folder
-    const genreResult = buildFolderTree(items, tags, ["genre"]);
-    expect(genreResult.folders[0].name).toBe("Horror");
-    expect(genreResult.folders[0].totalCount).toBe(1);
-    expect(genreResult.items).toHaveLength(0);
-
-    // At Horror level: item is in Slasher folder
-    const horrorResult = buildFolderTree(items, tags, ["genre", "horror"]);
-    expect(horrorResult.folders[0].name).toBe("Slasher");
-    expect(horrorResult.folders[0].totalCount).toBe(1);
-    expect(horrorResult.items).toHaveLength(0);
-
-    // At Slasher level: item appears as loose item (has the tag directly, no children)
-    const slasherResult = buildFolderTree(items, tags, ["genre", "horror", "slasher"]);
-    expect(slasherResult.folders).toHaveLength(0);
-    expect(slasherResult.items).toHaveLength(1);
-    expect(slasherResult.items[0].id).toBe("scene1");
-  });
-});
-
-describe("buildFolderTree - breadcrumbs", () => {
-  it("builds correct breadcrumb path", () => {
-    const genre = createTag("genre", "Genre", [], [{ id: "horror", name: "Horror" }]);
-    const horror = createTag("horror", "Horror", [{ id: "genre", name: "Genre" }]);
-    const tags = [genre, horror];
-    const items: ReturnType<typeof createItem>[] = [];
-
-    const result = buildFolderTree(items, tags, ["genre", "horror"]);
-
-    expect(result.breadcrumbs).toHaveLength(2);
-    expect(result.breadcrumbs[0]).toEqual({ id: "genre", name: "Genre" });
-    expect(result.breadcrumbs[1]).toEqual({ id: "horror", name: "Horror" });
-  });
-
-  it("returns empty breadcrumbs at root", () => {
-    const result = buildFolderTree([], [], []);
-    expect(result.breadcrumbs).toHaveLength(0);
-  });
-});
-
-describe("buildFolderTree - folder thumbnails", () => {
-  it("uses tag image_path when available", () => {
-    const tag = { ...createTag("action", "Action"), image_path: "/tag-image.jpg" };
-    const items = [createItem("scene1", ["action"])];
-
-    const result = buildFolderTree(items, [tag], []);
-
-    expect(result.folders[0].thumbnail).toBe("/tag-image.jpg");
-  });
-
-  it("falls back to first item thumbnail", () => {
-    const tag = createTag("action", "Action");
-    const items = [createItem("scene1", ["action"])];
-
-    const result = buildFolderTree(items, [tag], []);
-
-    expect(result.folders[0].thumbnail).toBe("/thumb/scene1.jpg");
-  });
-});
-
-describe("buildFolderTree - getItemThumbnail variants", () => {
-  it("uses gallery cover thumbnail as folder thumbnail", () => {
-    const tags = [createTag("art", "Art")];
-    // Gallery item (cover with thumbnail)
-    const galleryItem = {
-      id: "gallery1",
-      tags: [{ id: "art" }],
-      cover: { paths: { thumbnail: "/gallery-thumb.jpg" } },
-    };
-
-    const result = buildFolderTree([galleryItem], tags, []);
-
-    expect(result.folders[0].thumbnail).toBe("/gallery-thumb.jpg");
-  });
-
-  it("uses image paths.thumbnail as folder thumbnail", () => {
-    const tags = [createTag("art", "Art")];
-    // Image item (paths.thumbnail but no paths.screenshot)
-    const imageItem = {
-      id: "img1",
-      tags: [{ id: "art" }],
-      paths: { thumbnail: "/img-thumb.jpg" },
-    };
-
-    const result = buildFolderTree([imageItem], tags, []);
-
-    expect(result.folders[0].thumbnail).toBe("/img-thumb.jpg");
-  });
-
-  it("returns null thumbnail when item has no thumbnail paths", () => {
-    const tags = [createTag("art", "Art")];
-    const item = {
-      id: "item1",
-      tags: [{ id: "art" }],
-      // No paths at all
-    };
-
-    const result = buildFolderTree([item], tags, []);
-
-    // tag has no image_path, item has no thumbnail -> null thumbnail
-    expect(result.folders[0].thumbnail).toBeNull();
-  });
-});
-
-describe("buildFolderTree - container tags", () => {
-  it("shows container tags (with children) even if truly empty", () => {
-    // A parent tag with children should always show, even with 0 items and 0 pre-computed count
-    const parent = {
-      ...createTag("parent", "Parent", [], [{ id: "child", name: "Child" }]),
-      image_count: 0,
-    };
-    const child = {
-      ...createTag("child", "Child", [{ id: "parent", name: "Parent" }]),
-      image_count: 5,
-    };
-    const tags = [parent, child];
-    const items: ReturnType<typeof createItem>[] = [];
-
-    const result = buildFolderTree(items, tags, []);
-
-    // Parent should still show because it has children (is a container)
-    expect(result.folders).toHaveLength(1);
-    expect(result.folders[0].name).toBe("Parent");
-  });
-});
-
-describe("buildFolderTree - breadcrumbs with unknown tags", () => {
-  it("shows Unknown for breadcrumb tags not in tagMap", () => {
-    const tags = [createTag("known", "Known Tag")];
-    const items: ReturnType<typeof createItem>[] = [];
-
-    const result = buildFolderTree(items, tags, ["known", "missing-tag"]);
-
-    expect(result.breadcrumbs).toHaveLength(2);
-    expect(result.breadcrumbs[0].name).toBe("Known Tag");
-    expect(result.breadcrumbs[1].name).toBe("Unknown");
-  });
-});
-
-describe("buildFolderTree - untagged items not shown inside folders", () => {
-  it("does not show untagged items when inside a tag folder", () => {
-    const tags = [createTag("action", "Action")];
-    const items = [
-      createItem("scene1", ["action"]),
-      createItem("scene2", []), // untagged
-    ];
-
-    const result = buildFolderTree(items, tags, ["action"]);
-
-    // Untagged items should not appear as loose items inside a tag folder
-    // scene1 has the current tag directly and no child tags -> loose item
-    expect(result.items).toHaveLength(1);
-    expect(result.items[0].id).toBe("scene1");
-  });
-});
-
-describe("buildFolderTree - multi-tag items at root", () => {
-  it("item with multiple root tags appears in both folders", () => {
+  it("a folder's badge is its own count for the page's type", () => {
     const tags = [
-      createTag("action", "Action"),
-      createTag("comedy", "Comedy"),
+      tag("1", "Genre", [], { scene_count: 3, image_count: 9 }),
+      tag("2", "Action", ["1"], { scene_count: 5, image_count: 1 }),
     ];
-    // Scene has both Action and Comedy tags
-    const items = [createItem("scene1", ["action", "comedy"])];
 
-    const result = buildFolderTree(items, tags, []);
+    // Genre's own count, not its subtree's and not another type's
+    expect(folders(tags, [], "scene_count")).toEqual([["Genre", 3]]);
+    expect(folders(tags, [], "image_count")).toEqual([["Genre", 9]]);
+    expect(folders(tags, ["1:a"], "image_count")).toEqual([["Action", 1]]);
+  });
 
-    expect(result.folders).toHaveLength(2);
-    expect(result.folders.find((f) => f.name === "Action")!.totalCount).toBe(1);
-    expect(result.folders.find((f) => f.name === "Comedy")!.totalCount).toBe(1);
-    expect(result.items).toHaveLength(0);
+  it("a container tag with content only below shows", () => {
+    const tags = [
+      tag("1", "Container"),
+      tag("2", "Middle", ["1"]),
+      tag("3", "Leaf", ["2"], { image_count: 4 }),
+      tag("4", "Empty"),
+      tag("5", "Empty parent"),
+      tag("6", "Empty child", ["5"]),
+    ];
+
+    expect(folders(tags, [], "image_count")).toEqual([["Container", 0]]);
+    expect(folders(tags, ["1:a"], "image_count")).toEqual([["Middle", 0]]);
+    expect(folders(tags, ["1:a", "2:a"], "image_count")).toEqual([["Leaf", 4]]);
+  });
+
+  it("a tag under two parents shows under each, and a parent loop ends", () => {
+    const tags = [
+      tag("1", "Genre"),
+      tag("2", "Mood"),
+      tag("3", "Noir", ["1", "2"], { scene_count: 2 }),
+      // A loop with no content: neither shows
+      tag("8", "Loop A", ["9"]),
+      tag("9", "Loop B", ["8"]),
+    ];
+
+    expect(folders(tags, [], "scene_count")).toEqual([
+      ["Genre", 0],
+      ["Mood", 0],
+    ]);
+    expect(folders(tags, ["1:a"], "scene_count")).toEqual([["Noir", 2]]);
+    expect(folders(tags, ["2:a"], "scene_count")).toEqual([["Noir", 2]]);
+  });
+
+  it("folders sort by name and carry the tag's image", () => {
+    const tags = [
+      { ...tag("1", "Zeta", [], { scene_count: 1 }), image_path: "/z.jpg" },
+      tag("2", "Alpha", [], { scene_count: 1 }),
+    ];
+
+    const result = buildFolderTree(tags, [], "scene_count");
+
+    expect(result.folders.map((f) => [f.name, f.thumbnail])).toEqual([
+      ["Alpha", null],
+      ["Zeta", "/z.jpg"],
+    ]);
+  });
+
+  it("builds the breadcrumbs from the path, Unknown for a tag not loaded", () => {
+    const tags = [tag("1", "Genre"), tag("2", "Horror", ["1"])];
+
+    expect(
+      buildFolderTree(tags, ["1:a", "2:a", "9:a"], "scene_count").breadcrumbs
+    ).toEqual([
+      { id: "1:a", name: "Genre" },
+      { id: "2:a", name: "Horror" },
+      { id: "9:a", name: "Unknown" },
+    ]);
+    expect(buildFolderTree(tags, [], "scene_count").breadcrumbs).toEqual([]);
+  });
+
+  it("the root ends with Untagged while the tree counts untagged items of the page's type; nothing lies inside it", () => {
+    const tags = [tag("1", "Zeta", [], { gallery_count: 2 })];
+
+    const root = buildFolderTree(tags, [], "gallery_count", 7).folders;
+    expect(root.map((f) => [f.id, f.name, f.count, f.tag?.name])).toEqual([
+      ["1:a", "Zeta", 2, "Zeta"],
+      [UNTAGGED_FOLDER_ID, "Untagged", 7, undefined],
+    ]);
+    // None untagged: no folder
+    expect(folders(tags, [], "gallery_count")).toEqual([["Zeta", 2]]);
+
+    const inside = buildFolderTree(
+      tags,
+      [UNTAGGED_FOLDER_ID],
+      "gallery_count",
+      7
+    );
+    expect(inside.folders).toEqual([]);
+    expect(inside.breadcrumbs).toEqual([
+      { id: UNTAGGED_FOLDER_ID, name: "Untagged" },
+    ]);
+  });
+
+  describe("across instances", () => {
+    // Tag 5 on A (with child 6) and tag 5 on B (with child 7)
+    const tags: FolderTreeTag[] = [
+      { id: "5", instanceId: "a", name: "Five A", parents: [], scene_count: 1 },
+      {
+        id: "6",
+        instanceId: "a",
+        name: "Six A",
+        parents: [{ id: "5" }],
+        scene_count: 1,
+      },
+      { id: "5", instanceId: "b", name: "Five B", parents: [], scene_count: 2 },
+      {
+        id: "7",
+        instanceId: "b",
+        name: "Seven B",
+        parents: [{ id: "5" }],
+        scene_count: 1,
+      },
+    ];
+
+    it("same-numbered tags on two instances are two folders", () => {
+      const result = buildFolderTree(tags, [], "scene_count");
+
+      expect(
+        result.folders.map((f) => [f.id, f.name, f.count] as const)
+      ).toEqual([
+        ["5:a", "Five A", 1],
+        ["5:b", "Five B", 2],
+      ]);
+    });
+
+    it("a path of composite keys opens the folder on its own instance", () => {
+      const onA = buildFolderTree(tags, ["5:a"], "scene_count");
+      expect(onA.breadcrumbs).toEqual([{ id: "5:a", name: "Five A" }]);
+      expect(onA.folders.map((f) => f.id)).toEqual(["6:a"]);
+
+      const onB = buildFolderTree(tags, ["5:b"], "scene_count");
+      expect(onB.folders.map((f) => [f.id, f.count])).toEqual([["7:b", 1]]);
+    });
+  });
+
+  it("each tag's parents are read once per build", () => {
+    const base = [
+      tag("1", "Genre"),
+      tag("2", "Mood"),
+      tag("3", "Thriller", ["1", "2"]),
+      tag("4", "Dark", ["2"]),
+      tag("5", "Noir", ["3", "4"], { image_count: 2 }),
+      tag("6", "Action", ["1"], { image_count: 1 }),
+    ];
+    const reads = new Map<string, number>();
+    const counted = base.map((t) => ({
+      id: t.id,
+      instanceId: t.instanceId,
+      name: t.name,
+      image_count: t.image_count,
+      get parents() {
+        reads.set(t.id, (reads.get(t.id) ?? 0) + 1);
+        return t.parents;
+      },
+    }));
+
+    for (const path of [[], ["2:a"], ["2:a", "3:a"]]) {
+      reads.clear();
+      buildFolderTree(counted, path, "image_count");
+      expect(
+        Math.max(0, ...reads.values()),
+        path.join("/")
+      ).toBeLessThanOrEqual(1);
+    }
+    expect(reads.size).toBeGreaterThan(0);
   });
 });

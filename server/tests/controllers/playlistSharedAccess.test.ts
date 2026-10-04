@@ -4,16 +4,19 @@
  * Issue #415: Users with shared access should be able to add scenes
  * to playlists shared with them.
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { addSceneToPlaylist } from "../../controllers/playlist.js";
+import prisma from "../../prisma/singleton.js";
+import { getPlaylistAccess } from "../../services/PlaylistAccessService.js";
+import { appendItems } from "../../services/PlaylistQueryService.js";
+import { reqFor, resFor } from "../helpers/controllerTestUtils.js";
+import { partialRow } from "../helpers/prismaMock.js";
 
 // Mock prisma
-vi.mock("../../prisma/singleton.js", () => ({
-  default: {
-    playlist: { findFirst: vi.fn(), findUnique: vi.fn() },
-    playlistItem: { findUnique: vi.fn(), create: vi.fn() },
-    playlistShare: { findMany: vi.fn() },
-  },
-}));
+vi.mock(
+  "../../prisma/singleton.js",
+  () => import("../helpers/prismaSingletonMock.js")
+);
 
 // Mock PlaylistAccessService
 vi.mock("../../services/PlaylistAccessService.js", () => ({
@@ -21,29 +24,17 @@ vi.mock("../../services/PlaylistAccessService.js", () => ({
   getUserGroups: vi.fn(),
 }));
 
-// Mock entityInstanceId
-vi.mock("../../utils/entityInstanceId.js", () => ({
-  getEntityInstanceId: vi.fn(async () => "instance-1"),
-  getEntityInstanceIds: vi.fn(async () => new Map()),
-}));
-
-// Mock StashEntityService
-vi.mock("../../services/StashEntityService.js", () => ({
-  stashEntityService: {
-    getScenesByIdsWithRelations: vi.fn(async () => []),
-  },
-}));
-
-// Mock EntityExclusionHelper
-vi.mock("../../services/EntityExclusionHelper.js", () => ({
-  entityExclusionHelper: {
-    filterExcluded: vi.fn(async (scenes: unknown[]) => scenes),
-  },
+// Mock PlaylistQueryService (the playlist reads and the add's statement,
+// not under test here)
+vi.mock("../../services/PlaylistQueryService.js", () => ({
+  loadPlaylistPreviews: vi.fn(() => Promise.resolve(new Map())),
+  loadPlaylistItems: vi.fn(() => Promise.resolve({ items: [], totalItems: 0 })),
+  appendItems: vi.fn(),
 }));
 
 // Mock PermissionService
 vi.mock("../../services/PermissionService.js", () => ({
-  resolveUserPermissions: vi.fn(async () => ({})),
+  resolveUserPermissions: vi.fn(() => Promise.resolve({})),
 }));
 
 // Mock logger
@@ -51,36 +42,9 @@ vi.mock("../../utils/logger.js", () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
 }));
 
-import prisma from "../../prisma/singleton.js";
-import { getPlaylistAccess } from "../../services/PlaylistAccessService.js";
-import { addSceneToPlaylist } from "../../controllers/playlist.js";
-import type { Request, Response } from "express";
-
-const mockPrisma = vi.mocked(prisma);
+const mockPrisma = vi.mocked(prisma, true);
 const mockGetAccess = vi.mocked(getPlaylistAccess);
-
-function createMockRequest(options: {
-  params?: Record<string, string>;
-  body?: Record<string, unknown>;
-  user?: { id: number; username: string; role: string };
-}): Partial<Request> {
-  return {
-    params: options.params || {},
-    body: options.body || {},
-    user: options.user,
-  } as Partial<Request>;
-}
-
-function createMockResponse() {
-  const responseJson = vi.fn();
-  const responseStatus = vi.fn(() => ({ json: responseJson }));
-  return {
-    json: responseJson,
-    status: responseStatus,
-    responseJson,
-    responseStatus,
-  };
-}
+const mockAppendItems = vi.mocked(appendItems);
 
 describe("addSceneToPlaylist - shared access", () => {
   beforeEach(() => {
@@ -95,58 +59,52 @@ describe("addSceneToPlaylist - shared access", () => {
     // User 2 has shared access (not owner)
     mockGetAccess.mockResolvedValue({ level: "shared", groups: ["Family"] });
 
-    // Playlist exists (owned by user 1)
-    mockPrisma.playlist.findFirst.mockResolvedValue(null); // NOT owner
-    mockPrisma.playlist.findUnique.mockResolvedValue({
-      id: 1,
-      userId: 1, // Different user
-      name: "Shared Playlist",
-      items: [],
-    } as any);
+    // The scene is visible to user 2 and not in the playlist yet
+    mockAppendItems.mockResolvedValue({
+      added: 1,
+      alreadyInPlaylist: 0,
+      unavailable: 0,
+    });
+    mockPrisma.playlistItem.findUnique.mockResolvedValue(
+      partialRow({
+        id: 1,
+        playlistId: 1,
+        sceneId: "scene-123",
+        instanceId: "instance-1",
+        position: 0,
+      })
+    );
 
-    // Scene not already in playlist
-    mockPrisma.playlistItem.findUnique.mockResolvedValue(null);
-
-    // Create succeeds
-    mockPrisma.playlistItem.create.mockResolvedValue({
-      id: 1,
-      playlistId: 1,
-      sceneId: "scene-123",
-      instanceId: "instance-1",
-      position: 0,
-    } as any);
-
-    const mockReq = createMockRequest({
+    const req = reqFor(addSceneToPlaylist, {
       params: { id: "1" },
-      body: { sceneId: "scene-123" },
+      body: { sceneId: "scene-123", instanceId: "instance-1" },
       user: { id: 2, username: "shareduser", role: "USER" },
     });
-    const { json, status, responseStatus } = createMockResponse();
-    const mockRes = { json, status } as unknown as Response;
+    const res = resFor(addSceneToPlaylist);
 
-    await addSceneToPlaylist(mockReq as any, mockRes as any);
+    await addSceneToPlaylist(req, res);
 
     // Should succeed with 201, NOT 404
-    expect(responseStatus).not.toHaveBeenCalledWith(404);
-    expect(mockPrisma.playlistItem.create).toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(201);
+    expect(mockAppendItems).toHaveBeenCalledWith(1, 2, [
+      { id: "scene-123", instanceId: "instance-1" },
+    ]);
   });
 
   it("rejects user with no access from adding scenes", async () => {
     mockGetAccess.mockResolvedValue({ level: "none" });
 
-    const mockReq = createMockRequest({
+    const req = reqFor(addSceneToPlaylist, {
       params: { id: "1" },
-      body: { sceneId: "scene-123" },
+      body: { sceneId: "scene-123", instanceId: "instance-1" },
       user: { id: 3, username: "stranger", role: "USER" },
     });
-    const { json, status, responseJson, responseStatus } =
-      createMockResponse();
-    const mockRes = { json, status } as unknown as Response;
+    const res = resFor(addSceneToPlaylist);
 
-    await addSceneToPlaylist(mockReq as any, mockRes as any);
+    await addSceneToPlaylist(req, res);
 
     // Should be rejected
-    expect(responseStatus).toHaveBeenCalledWith(404);
-    expect(mockPrisma.playlistItem.create).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(404);
+    expect(mockAppendItems).not.toHaveBeenCalled();
   });
 });

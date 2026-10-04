@@ -1,35 +1,30 @@
-import { readFileSync, existsSync } from "node:fs";
 import { defineConfig, devices } from "@playwright/test";
+import {
+  REPLAY_API_KEY,
+  baseURL,
+  dbFile,
+  devStack,
+  ports,
+  replayStatsUrl,
+  runDir,
+} from "./e2e/support/env";
 
 /**
  * Playwright E2E test configuration for Peek Stash Browser.
  *
- * Local dev: tests run against the docker-compose dev environment (localhost:6969).
- * CI: tests start the server + client dev server and run against localhost:5173.
+ * Hermetic by default, locally and in CI: Playwright starts the Stash replay
+ * (serving item 83's second library), its own server and Vite client beside
+ * the dev stack, on a throwaway database. Their ports come from the checkout's
+ * path, so two worktrees can run the suite at once. Global setup creates the
+ * run admin and the replay's instance, and waits for the sync.
  *
- * Override the base URL with the E2E_BASE_URL environment variable.
- * Local credentials can be set in .env.e2e (gitignored):
- *   E2E_USERNAME=admin
- *   E2E_PASSWORD=yourpassword
+ * Dev-stack mode, for manual runs on real data: set E2E_BASE_URL (for example
+ * http://localhost:6969). Nothing is started; .env.e2e names a bootstrap admin
+ * of that stack, which creates a throwaway run admin and deletes it afterwards.
+ * image-smoke.yml uses this mode against the production image.
+ *
+ * Ports and the run directory are in e2e/support/env.ts.
  */
-
-// Load .env.e2e if it exists (simple key=value parsing, no dependency needed)
-const envFile = ".env.e2e";
-if (existsSync(envFile)) {
-  for (const line of readFileSync(envFile, "utf-8").split("\n")) {
-    const trimmed = line.trim();
-    if (trimmed && !trimmed.startsWith("#")) {
-      const eqIdx = trimmed.indexOf("=");
-      if (eqIdx > 0) {
-        const key = trimmed.slice(0, eqIdx);
-        const value = trimmed.slice(eqIdx + 1);
-        if (!process.env[key]) {
-          process.env[key] = value;
-        }
-      }
-    }
-  }
-}
 
 const isCI = !!process.env.CI;
 
@@ -37,10 +32,12 @@ export default defineConfig({
   testDir: "./e2e",
   testMatch: "**/*.spec.ts",
   globalSetup: "./e2e/global-setup.ts",
+  globalTeardown: "./e2e/global-teardown.ts",
 
   fullyParallel: true,
   forbidOnly: isCI,
-  retries: isCI ? 2 : 0,
+  retries: isCI ? 1 : 0,
+  failOnFlakyTests: isCI,
   workers: isCI ? "50%" : undefined,
 
   reporter: isCI
@@ -51,24 +48,24 @@ export default defineConfig({
   expect: { timeout: 5_000 },
 
   use: {
-    baseURL: process.env.E2E_BASE_URL || (isCI ? "http://localhost:5173" : "http://localhost:6969"),
+    baseURL,
     actionTimeout: 10_000,
     navigationTimeout: 15_000,
 
-    // Artifacts — only capture on failure
+    // Artifacts: only captured on failure
     trace: "on-first-retry",
     screenshot: "only-on-failure",
     video: "retain-on-failure",
   },
 
   projects: [
-    // Auth setup — runs first, saves login state for other tests
+    // Auth setup: runs first, saves login state for other tests
     {
       name: "setup",
       testMatch: /auth\.setup\.ts/,
     },
 
-    // Main test suite — Chromium only (start simple, expand later)
+    // Main test suite: Chromium only (start simple, expand later)
     {
       name: "chromium",
       use: {
@@ -79,33 +76,45 @@ export default defineConfig({
     },
   ],
 
-  // In CI, start both the server and client dev server.
-  // Locally, assume docker-compose is already running.
-  ...(isCI
-    ? {
-        webServer: [
-          {
-            command:
-              "cd server && npx prisma migrate deploy && npx tsx index.ts",
-            url: "http://localhost:8000/api/health",
-            reuseExistingServer: false,
-            timeout: 30_000,
-            env: {
-              DATABASE_URL: "file:./e2e-test.db",
-              JWT_SECRET: "e2e-test-secret",
-              NODE_ENV: "test",
-            },
+  // Hermetic mode starts the Stash replay (item 83), then the server on a
+  // fresh database, which it migrates itself, then the client. stdout is
+  // shown so the log names the ports, the database file and the sync.
+  webServer: devStack
+    ? undefined
+    : [
+        {
+          // tsx straight from server/node_modules, not npx: Playwright's stop
+          // signal then reaches the replay rather than an npm wrapper
+          command: `cd server && node_modules/.bin/tsx integration/stash-replay/cli.ts --port ${ports.stash} --api-key ${REPLAY_API_KEY} --library second`,
+          url: replayStatsUrl,
+          reuseExistingServer: false,
+          timeout: 30_000,
+          stdout: "pipe",
+        },
+        {
+          command:
+            "node e2e/support/reset-db.mjs && cd server && npx tsx index.ts",
+          url: `http://localhost:${ports.server}/api/health`,
+          reuseExistingServer: false,
+          timeout: 120_000, // slow disks without /dev/shm
+          stdout: "pipe",
+          env: {
+            E2E_RUN_DIR: runDir,
+            DATABASE_URL: `file:${dbFile}`,
+            CONFIG_DIR: runDir,
+            PEEK_SERVER_PORT: String(ports.server),
+            JWT_SECRET: "e2e-test-secret",
+            STASH_URL: "", // dotenv never overrides a set variable, so the root .env's Stash is not used
+            STASH_API_KEY: "",
           },
-          {
-            command: "cd client && npm run dev",
-            url: "http://localhost:5173",
-            reuseExistingServer: false,
-            timeout: 30_000,
-            env: {
-              VITE_API_PROXY_TARGET: "http://localhost:8000",
-            },
-          },
-        ],
-      }
-    : {}),
+        },
+        {
+          command: `cd client && npx vite --port ${ports.client} --strictPort`,
+          url: baseURL,
+          reuseExistingServer: false,
+          timeout: 60_000,
+          stdout: "pipe",
+          env: { VITE_API_PROXY_TARGET: `http://localhost:${ports.server}` },
+        },
+      ],
 });

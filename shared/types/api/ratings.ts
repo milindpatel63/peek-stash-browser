@@ -9,12 +9,30 @@
 // COMMON RATING TYPES
 // =============================================================================
 
+/** The entity types a user can rate, favorite or (scenes, images) press O on */
+export const RATABLE_ENTITY_TYPES = [
+  "scene",
+  "performer",
+  "studio",
+  "tag",
+  "gallery",
+  "group",
+  "image",
+] as const;
+
+export type RatableEntityType = (typeof RATABLE_ENTITY_TYPES)[number];
+
+/** Whether the entity type takes ratings (a clip does not) */
+export function isRatableEntityType(type: string): type is RatableEntityType {
+  return (RATABLE_ENTITY_TYPES as readonly string[]).includes(type);
+}
+
 /**
  * Common request body for all rating updates
  */
 export interface UpdateRatingRequest {
-  /** Optional Stash instance ID - for multi-instance disambiguation when the same entity ID exists in multiple instances */
-  instanceId?: string;
+  /** The entity's Stash instance (required: the server never guesses one) */
+  instanceId: string;
   rating?: number | null;
   favorite?: boolean;
 }
@@ -26,7 +44,7 @@ export interface UpdateRatingResponse {
   success: true;
   rating: {
     id: number;
-    instanceId: string | null;
+    instanceId: string;
     rating: number | null;
     favorite: boolean;
   };

@@ -1,7 +1,11 @@
 import { type CSSProperties } from "react";
-import { useState, useCallback, useEffect } from "react";
+import { useEffect, useRef } from "react";
+import { useMediaFallback } from "../../hooks/useMediaFallback";
 
-interface Props extends Omit<React.ImgHTMLAttributes<HTMLImageElement>, "onLoad" | "onError" | "src"> {
+interface Props extends Omit<
+  React.ImgHTMLAttributes<HTMLImageElement>,
+  "onLoad" | "onError" | "src"
+> {
   src: string | null | undefined;
   alt?: string;
   className?: string;
@@ -16,7 +20,8 @@ interface Props extends Omit<React.ImgHTMLAttributes<HTMLImageElement>, "onLoad"
  * Problem: Some tags have video files (.mp4, .webm) as their images (e.g., from feederbox
  * tag-import plugin). Standard <img> tags can't play these, so they appear broken.
  *
- * Solution: When an image fails to load, check the Content-Type via HEAD request.
+ * Solution: When an image fails to load, check the Content-Type via one cached,
+ * abortable HEAD request (`useMediaFallback`).
  * If it's a video type, render as a <video> element instead.
  *
  * @param {string} src - Image/video source URL
@@ -36,43 +41,17 @@ const MediaImage = ({
   style = {},
   ...props
 }: Props) => {
-  const [isVideo, setIsVideo] = useState(false);
-  const [hasError, setHasError] = useState(false);
+  const { isVideo, hasError, onImageError, onVideoError } =
+    useMediaFallback(src);
 
-  // Reset state when src changes
+  // The parent hears about a failure once, however it came
+  const onErrorRef = useRef(onError);
   useEffect(() => {
-    setIsVideo(false);
-    setHasError(false);
-  }, [src]);
-
-  const handleImageError = useCallback(async () => {
-    if (!src) {
-      setHasError(true);
-      onError?.();
-      return;
-    }
-
-    // Check Content-Type via HEAD request to determine if it's actually a video
-    try {
-      const res = await fetch(src, { method: "HEAD" });
-      const contentType = res.headers.get("Content-Type");
-
-      if (contentType?.startsWith("video/")) {
-        setIsVideo(true);
-        return;
-      }
-    } catch {
-      // Network error or CORS issue - fall through to error state
-    }
-
-    setHasError(true);
-    onError?.();
-  }, [src, onError]);
-
-  const handleVideoError = useCallback(() => {
-    setHasError(true);
-    onError?.();
+    onErrorRef.current = onError;
   }, [onError]);
+  useEffect(() => {
+    if (hasError) onErrorRef.current?.();
+  }, [hasError]);
 
   // Show nothing if there's an error (let parent handle placeholder)
   if (hasError) {
@@ -90,7 +69,7 @@ const MediaImage = ({
         aria-hidden="true"
         className={className}
         style={style}
-        onError={handleVideoError}
+        onError={onVideoError}
       />
     );
   }
@@ -102,7 +81,7 @@ const MediaImage = ({
       className={className}
       style={style}
       onLoad={onLoad}
-      onError={handleImageError}
+      onError={onImageError}
       {...props}
     />
   );

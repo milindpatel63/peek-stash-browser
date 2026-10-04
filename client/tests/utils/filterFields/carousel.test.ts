@@ -1,0 +1,732 @@
+/**
+ * Custom carousels read the scene panel's table: the builder offers every
+ * scene row, a stored rule reads back into panel state through each codec's
+ * `fromCriterion`, and a rule no row can edit is kept as stored, so editing
+ * a carousel never drops one.
+ */
+import {
+  PANEL_FIELDS,
+  type PanelField,
+  SCENE_FIELDS,
+} from "@peek/shared-types";
+import { untrusted } from "@tests/helpers/untrusted";
+import { must } from "@tests/testUtils";
+import { describe, expect, it } from "vitest";
+import { buildCustomCarouselUrl } from "@/utils/carouselUrl";
+import {
+  CAROUSEL_FILTER_DEFINITIONS,
+  SCENE_FILTER_OPTIONS,
+  buildCarouselRules,
+  buildSceneFilter,
+  carouselBody,
+  carouselEditTree,
+  carouselRulesToFilterState,
+} from "@/utils/filterConfig";
+import {
+  type EditTree,
+  buildPanelFilter,
+  editTreeOf,
+  readPanelFilter,
+  stateOfWhere,
+  treeOf,
+} from "@/utils/filterFields";
+import { buildSearchParams } from "@/utils/urlParams";
+
+const SCENE_ROWS: readonly PanelField[] = PANEL_FIELDS.scene;
+
+/** A stored rule and the panel state it reads as, per scene row */
+const ROUND_TRIPS: Record<
+  string,
+  { rules: Record<string, unknown>; state: Record<string, unknown> }
+> = {
+  title: {
+    rules: { title: { value: "beach", modifier: "INCLUDES" } },
+    state: { title: "beach" },
+  },
+  details: {
+    rules: { details: { value: "sunset", modifier: "INCLUDES" } },
+    state: { details: "sunset" },
+  },
+  performerIds: {
+    rules: {
+      performers: { value: ["1:inst-a", "2:inst-b"], modifier: "INCLUDES_ALL" },
+    },
+    state: {
+      performerIds: ["1:inst-a", "2:inst-b"],
+      performerIdsModifier: "INCLUDES_ALL",
+    },
+  },
+  studioId: {
+    rules: {
+      studios: { value: ["7:inst-a"], modifier: "INCLUDES", depth: -1 },
+    },
+    state: {
+      studioId: ["7:inst-a"],
+      studioIdModifier: "INCLUDES",
+      studioIdDepth: -1,
+    },
+  },
+  tagIds: {
+    rules: {
+      tags: { value: ["3:inst-a"], modifier: "EXCLUDES", depth: -1 },
+    },
+    state: {
+      tagIds: ["3:inst-a"],
+      tagIdsModifier: "EXCLUDES",
+      tagIdsDepth: -1,
+    },
+  },
+  groupIds: {
+    rules: { groups: { value: ["9:inst-a"], modifier: "EXCLUDES" } },
+    state: { groupIds: ["9:inst-a"], groupIdsModifier: "EXCLUDES" },
+  },
+  rating: {
+    rules: { rating100: { modifier: "BETWEEN", value: 60, value2: 90 } },
+    state: { rating: { min: 60, max: 90 } },
+  },
+  oCount: {
+    rules: { o_counter: { modifier: "BETWEEN", value: 3 } },
+    state: { oCount: { min: 3 } },
+  },
+  duration: {
+    rules: { duration: { modifier: "BETWEEN", value: 600, value2: 1800 } },
+    state: { duration: { min: 10, max: 30 } },
+  },
+  favorite: { rules: { favorite: true }, state: { favorite: "true" } },
+  performerFavorite: {
+    rules: { performer_favorite: false },
+    state: { performerFavorite: "false" },
+  },
+  studioFavorite: {
+    rules: { studio_favorite: true },
+    state: { studioFavorite: "true" },
+  },
+  tagFavorite: {
+    rules: { tag_favorite: true },
+    state: { tagFavorite: "true" },
+  },
+  date: {
+    rules: {
+      date: { modifier: "BETWEEN", value: "2020-01-01", value2: "2020-12-31" },
+    },
+    state: { date: { start: "2020-01-01", end: "2020-12-31" } },
+  },
+  createdAt: {
+    rules: { created_at: { modifier: "BETWEEN", value: "2024-01-01" } },
+    state: { createdAt: { start: "2024-01-01" } },
+  },
+  updatedAt: {
+    rules: { updated_at: { modifier: "BETWEEN", value2: "2025-06-30" } },
+    state: { updatedAt: { end: "2025-06-30" } },
+  },
+  lastPlayedAt: {
+    rules: {
+      last_played_at: {
+        modifier: "BETWEEN",
+        value: "2024-01-01",
+        value2: "2024-06-30",
+      },
+    },
+    state: { lastPlayedAt: { start: "2024-01-01", end: "2024-06-30" } },
+  },
+  resolution: {
+    rules: { resolution: { value: "FULL_HD", modifier: "GREATER_THAN" } },
+    state: { resolution: "FULL_HD", resolutionModifier: "GREATER_THAN" },
+  },
+  bitrate: {
+    rules: {
+      bitrate: { modifier: "BETWEEN", value: 2_000_000, value2: 8_000_000 },
+    },
+    state: { bitrate: { min: 2, max: 8 } },
+  },
+  framerate: {
+    rules: { framerate: { modifier: "BETWEEN", value2: 30 } },
+    state: { framerate: { max: 30 } },
+  },
+  orientation: {
+    rules: { orientation: { value: ["PORTRAIT"] } },
+    state: { orientation: ["PORTRAIT"] },
+  },
+  videoCodec: {
+    rules: { video_codec: { value: "hevc", modifier: "INCLUDES" } },
+    state: { videoCodec: "hevc" },
+  },
+  audioCodec: {
+    rules: { audio_codec: { value: "aac", modifier: "INCLUDES" } },
+    state: { audioCodec: "aac" },
+  },
+  director: {
+    rules: { director: { value: "Smith", modifier: "INCLUDES" } },
+    state: { director: "Smith" },
+  },
+  playDuration: {
+    rules: { play_duration: { modifier: "BETWEEN", value: 300 } },
+    state: { playDuration: { min: 5 } },
+  },
+  playCount: {
+    rules: { play_count: { modifier: "BETWEEN", value: 1, value2: 4 } },
+    state: { playCount: { min: 1, max: 4 } },
+  },
+  performerCount: {
+    rules: { performer_count: { modifier: "BETWEEN", value2: 2 } },
+    state: { performerCount: { max: 2 } },
+  },
+  performerAge: {
+    rules: { performer_age: { modifier: "BETWEEN", value: 20, value2: 30 } },
+    state: { performerAge: { min: 20, max: 30 } },
+  },
+  tagCount: {
+    rules: { tag_count: { modifier: "BETWEEN", value: 5 } },
+    state: { tagCount: { min: 5 } },
+  },
+  // F18's rows
+  performerTagIds: {
+    rules: {
+      performer_tags: { value: ["5:inst-a"], modifier: "INCLUDES", depth: -1 },
+    },
+    state: {
+      performerTagIds: ["5:inst-a"],
+      performerTagIdsModifier: "INCLUDES",
+      performerTagIdsDepth: -1,
+    },
+  },
+  galleryIds: {
+    rules: { galleries: { value: ["3:inst-a"], modifier: "INCLUDES_ALL" } },
+    state: { galleryIds: ["3:inst-a"], galleryIdsModifier: "INCLUDES_ALL" },
+  },
+  playlistIds: {
+    rules: { playlists: { value: [12, 7], modifier: "INCLUDES_ALL" } },
+    state: { playlistIds: ["12", "7"], playlistIdsModifier: "INCLUDES_ALL" },
+  },
+  inAnyPlaylist: {
+    rules: { in_any_playlist: true },
+    state: { inAnyPlaylist: "true" },
+  },
+  organized: { rules: { organized: false }, state: { organized: "false" } },
+  path: {
+    rules: { path: { value: "/media/new", modifier: "STARTS_WITH" } },
+    state: { path: "/media/new", pathModifier: "STARTS_WITH" },
+  },
+  url: {
+    rules: { url: { value: "example.com", modifier: "INCLUDES" } },
+    state: { url: "example.com" },
+  },
+  code: {
+    rules: { code: { value: "ABC-123", modifier: "INCLUDES" } },
+    state: { code: "ABC-123" },
+  },
+  captions: {
+    rules: { captions: { value: "en", modifier: "NOT_EQUALS" } },
+    state: { captions: "en", captionsModifier: "NOT_EQUALS" },
+  },
+  hasMarkers: { rules: { has_markers: true }, state: { hasMarkers: "true" } },
+  duplicated: { rules: { duplicated: false }, state: { duplicated: "false" } },
+  watched: { rules: { watched: true }, state: { watched: "true" } },
+  inProgress: {
+    rules: { in_progress: false },
+    state: { inProgress: "false" },
+  },
+};
+
+/** Each row's state alone, then the rows 20 at a time (WHERE_LIMITS.rows) */
+const ROW_STATES: readonly Record<string, unknown>[] = (() => {
+  const states = Object.values(ROUND_TRIPS).map((each) => each.state);
+  return [
+    ...states,
+    ...[0, 20, 40].map(
+      (from) =>
+        Object.assign({}, ...states.slice(from, from + 20)) as Record<
+          string,
+          unknown
+        >
+    ),
+  ];
+})();
+
+/** A flat rule set as the root "all" tree the server serves it as */
+const rootAll = (flat: Record<string, unknown>) => ({
+  match: "all" as const,
+  rules: Object.entries(flat).map(([field, criterion]) => ({
+    field,
+    criterion,
+  })),
+});
+
+describe("carousel rules", () => {
+  it("a Performer Age rule survives an edit", () => {
+    const stored = {
+      performer_age: { modifier: "BETWEEN", value: 20, value2: 30 },
+    };
+
+    const { state, kept } = carouselRulesToFilterState(stored);
+
+    expect(state).toEqual({ performerAge: { min: 20, max: 30 } });
+    expect(kept).toEqual({});
+    expect(buildSceneFilter(state)).toEqual(stored);
+  });
+
+  it("every scene panel field round-trips through a stored rule", () => {
+    // The table covers every row, the 7 the builder lacked included
+    expect(Object.keys(ROUND_TRIPS).sort()).toEqual(
+      SCENE_ROWS.map((row) => row.key).sort()
+    );
+    for (const [key, { rules, state }] of Object.entries(ROUND_TRIPS)) {
+      const read = carouselRulesToFilterState(rules);
+      expect(read, key).toEqual({ state, kept: {} });
+      expect(buildSceneFilter(read.state), key).toEqual(rules);
+    }
+  });
+
+  it("a bare id stays bare", () => {
+    // Prod's carousel, stored before rules named their instance
+    const stored = { tags: { value: ["284"], modifier: "INCLUDES_ALL" } };
+
+    const { state, kept } = carouselRulesToFilterState(stored);
+
+    expect(state).toEqual({ tagIds: ["284"], tagIdsModifier: "INCLUDES_ALL" });
+    expect(kept).toEqual({});
+    expect(buildSceneFilter(state)).toEqual(stored);
+  });
+
+  it("a rule with excludes reads back with its exclude companion and builds the same", () => {
+    const stored = {
+      tags: {
+        value: ["1:a"],
+        excludes: ["2:a", "3"],
+        modifier: "INCLUDES_ALL",
+        depth: -1,
+      },
+      performers: { value: [], excludes: ["9:a"], modifier: "INCLUDES" },
+    };
+
+    const { state, kept } = carouselRulesToFilterState(stored);
+
+    expect(state).toEqual({
+      tagIds: ["1:a"],
+      tagIdsExclude: ["2:a", "3"],
+      tagIdsModifier: "INCLUDES_ALL",
+      tagIdsDepth: -1,
+      performerIdsExclude: ["9:a"],
+      performerIdsModifier: "INCLUDES",
+    });
+    expect(kept).toEqual({});
+    expect(buildSceneFilter(state)).toEqual(stored);
+  });
+
+  it("the carousel offers the scene panel's fields and choices", () => {
+    const offered = SCENE_ROWS.filter((row) => row.carousel !== false);
+
+    expect(CAROUSEL_FILTER_DEFINITIONS.map((each) => each.key).sort()).toEqual(
+      offered.map((row) => row.key).sort()
+    );
+    // Sorted by label, with no section headers
+    const labels = CAROUSEL_FILTER_DEFINITIONS.map((each) => each.label ?? "");
+    expect(labels).toEqual([...labels].sort((a, b) => a.localeCompare(b)));
+    expect(
+      CAROUSEL_FILTER_DEFINITIONS.some((each) => each.type === "section-header")
+    ).toBe(false);
+
+    const resolution = CAROUSEL_FILTER_DEFINITIONS.find(
+      (each) => each.key === "resolution"
+    );
+    expect(resolution?.options).toHaveLength(14);
+    expect(resolution?.defaultModifier).toBe("EQUALS");
+  });
+
+  it("keeps every rule no row can edit, as stored", () => {
+    const stored = {
+      // No row edits Tagged, a duration NOT_BETWEEN or a studio's Has ALL
+      tagged: true,
+      tags: { value: ["5"], modifier: "INCLUDES", depth: -1 },
+      duration: { modifier: "NOT_BETWEEN", value: 60, value2: 120 },
+      studios: { value: ["3"], modifier: "INCLUDES_ALL" },
+      // Stash's VR resolution is no choice of the panel's
+      resolution: { value: "VR_HD", modifier: "EQUALS" },
+    };
+
+    const { state, kept } = carouselRulesToFilterState(stored);
+
+    expect(state).toEqual({
+      tagIds: ["5"],
+      tagIdsModifier: "INCLUDES",
+      tagIdsDepth: -1,
+    });
+    expect(kept).toEqual({
+      tagged: true,
+      duration: { modifier: "NOT_BETWEEN", value: 60, value2: 120 },
+      studios: { value: ["3"], modifier: "INCLUDES_ALL" },
+      resolution: { value: "VR_HD", modifier: "EQUALS" },
+    });
+  });
+
+  it("reads an old lone bound back and a lone id as a one-element list", () => {
+    const { state, kept } = carouselRulesToFilterState({
+      rating100: { value: 79, modifier: "GREATER_THAN" },
+      bitrate: { value: 5_000_001, modifier: "LESS_THAN" },
+      performers: { value: "12", modifier: "INCLUDES" },
+    });
+
+    expect(state).toEqual({
+      rating: { min: 80 },
+      bitrate: { max: 5 },
+      performerIds: ["12"],
+      performerIdsModifier: "INCLUDES",
+    });
+    expect(kept).toEqual({});
+  });
+
+  it("reads a one-sided BETWEEN back as a min or a max, decimals kept", () => {
+    const { state, kept } = carouselRulesToFilterState({
+      framerate: { modifier: "BETWEEN", value: 29.97 },
+      o_counter: { modifier: "BETWEEN", value2: 9 },
+      created_at: { modifier: "BETWEEN", value: "2024-05-15" },
+      updated_at: { modifier: "BETWEEN", value2: "2024-05-20" },
+    });
+
+    expect(state).toEqual({
+      framerate: { min: 29.97 },
+      oCount: { max: 9 },
+      createdAt: { start: "2024-05-15" },
+      updatedAt: { end: "2024-05-20" },
+    });
+    expect(kept).toEqual({});
+  });
+
+  it("a decimal bound survives an edit", () => {
+    const stored = { framerate: { modifier: "BETWEEN", value: 29.97 } };
+
+    const { state } = carouselRulesToFilterState(stored);
+
+    expect(buildSceneFilter(state)).toEqual(stored);
+  });
+
+  it("reads an old lone number bound back: GREATER_THAN 14 is a min of 15", () => {
+    const { state, kept } = carouselRulesToFilterState({
+      o_counter: { modifier: "GREATER_THAN", value: 14 },
+      tag_count: { modifier: "LESS_THAN", value: 9 },
+    });
+
+    expect(state).toEqual({ oCount: { min: 15 }, tagCount: { max: 8 } });
+    expect(kept).toEqual({});
+  });
+
+  it("reads an old calendar-date GREATER_THAN as the next day, a timestamp one as that day", () => {
+    const { state, kept } = carouselRulesToFilterState({
+      date: { modifier: "GREATER_THAN", value: "2024-05-15" },
+      created_at: { modifier: "GREATER_THAN", value: "2024-05-15" },
+      updated_at: { modifier: "GREATER_THAN", value: "2024-05-15" },
+      last_played_at: { modifier: "GREATER_THAN", value: "2024-05-15" },
+    });
+
+    expect(state).toEqual({
+      date: { start: "2024-05-16" },
+      createdAt: { start: "2024-05-15" },
+      updatedAt: { start: "2024-05-15" },
+      lastPlayedAt: { start: "2024-05-15" },
+    });
+    expect(kept).toEqual({});
+  });
+
+  it("reads an old date LESS_THAN as the day before: saved unedited, it matches the same days", () => {
+    const stored = {
+      date: { modifier: "LESS_THAN", value: "2024-05-20" },
+      created_at: { modifier: "LESS_THAN", value: "2024-05-20" },
+      last_played_at: { modifier: "LESS_THAN", value: "2024-01-01" },
+    };
+    const { state, kept } = carouselRulesToFilterState(stored);
+
+    // "Before the 20th" never matched the 20th: the inclusive end is the 19th
+    expect(state).toEqual({
+      date: { end: "2024-05-19" },
+      createdAt: { end: "2024-05-19" },
+      lastPlayedAt: { end: "2023-12-31" },
+    });
+    expect(kept).toEqual({});
+    expect(buildSceneFilter(state).date).toEqual({
+      modifier: "BETWEEN",
+      value2: "2024-05-19",
+    });
+  });
+
+  it("reads nothing from no rules", () => {
+    expect(carouselRulesToFilterState(null)).toEqual({ state: {}, kept: {} });
+    expect(carouselRulesToFilterState(undefined)).toEqual({
+      state: {},
+      kept: {},
+    });
+  });
+});
+
+describe("carousel rules stored as a tree", () => {
+  /** The prod "Goddesses" carousel's rules, flat as stored before 9b */
+  const GODDESSES = { tags: { value: ["284"], modifier: "INCLUDES_ALL" } };
+  const leaf = (field: string, criterion: unknown) => ({ field, criterion });
+
+  it("carouselRulesToFilterState reads a root all tree as it read the flat rules", () => {
+    const flat = {
+      ...GODDESSES,
+      rating100: { modifier: "BETWEEN", value: 60, value2: 90 },
+      title: { value: "beach", modifier: "STARTS_WITH" },
+    };
+    const tree = {
+      match: "all",
+      rules: Object.entries(flat).map(([field, criterion]) =>
+        leaf(field, criterion)
+      ),
+    };
+
+    expect(carouselRulesToFilterState(tree)).toEqual(
+      carouselRulesToFilterState(flat)
+    );
+    expect(
+      carouselRulesToFilterState({
+        match: "all",
+        rules: [leaf("tags", GODDESSES.tags)],
+      })
+    ).toEqual({
+      state: { tagIds: ["284"], tagIdsModifier: "INCLUDES_ALL" },
+      kept: {},
+    });
+  });
+
+  it("a tree with a group, a repeated field or an any root reads as rows", () => {
+    const tags = { tagIds: ["284"], tagIdsModifier: "INCLUDES_ALL" };
+
+    expect(
+      carouselRulesToFilterState({
+        match: "all",
+        rules: [
+          leaf("tags", GODDESSES.tags),
+          { match: "any", rules: [leaf("favorite", true)] },
+        ],
+      })
+    ).toEqual({
+      state: { ...tags, g1: "any", "g1.favorite": "true" },
+      kept: {},
+    });
+    expect(
+      carouselRulesToFilterState({
+        match: "all",
+        rules: [leaf("tags", GODDESSES.tags), leaf("tags", GODDESSES.tags)],
+      })
+    ).toEqual({
+      state: {
+        ...tags,
+        "2.tagIds": ["284"],
+        "2.tagIdsModifier": "INCLUDES_ALL",
+      },
+      kept: {},
+    });
+    expect(
+      carouselRulesToFilterState({
+        match: "any",
+        rules: [leaf("tags", GODDESSES.tags)],
+      })
+    ).toEqual({ state: { ...tags, match: "any" }, kept: {} });
+  });
+
+  it("a flat stored carousel and its root-all tree read to the same state", () => {
+    for (const definition of CAROUSEL_FILTER_DEFINITIONS) {
+      const { rules } = must(ROUND_TRIPS[definition.key], definition.key);
+      const tree = rootAll(rules);
+
+      const fromFlat = carouselRulesToFilterState(rules);
+      expect(carouselRulesToFilterState(tree), definition.key).toEqual(
+        fromFlat
+      );
+      expect(stateOfWhere("scene", tree).state, definition.key).toEqual(
+        fromFlat.state
+      );
+      expect(
+        carouselBody(carouselEditTree({ rules: untrusted(rules) })),
+        definition.key
+      ).toEqual(carouselBody(carouselEditTree({ rules: untrusted(tree) })));
+    }
+  });
+
+  it("carouselBody of a state with only root rows is a root all tree whose leaves equal buildCarouselRules(state) field by field", () => {
+    for (const state of ROW_STATES) {
+      const body = carouselBody(editTreeOf("scene", treeOf("scene", state)));
+
+      expect(body.match).toBe("all");
+      expect(body.rules.every((node) => "field" in node)).toBe(true);
+      expect(
+        Object.fromEntries(
+          body.rules.map((node) =>
+            "field" in node ? [node.field, node.criterion] : []
+          )
+        )
+      ).toEqual(buildCarouselRules(state));
+    }
+  });
+
+  it("See More of root rows is the URL the flat writer gave, byte for byte", () => {
+    for (const state of ROW_STATES) {
+      const rules = buildCarouselRules(state);
+      const flatWriter = buildSearchParams({
+        searchText: "",
+        sortField: "created_at",
+        sortDirection: "ASC",
+        currentPage: 1,
+        perPage: 24,
+        filters: state,
+        filterOptions: SCENE_FILTER_OPTIONS,
+        viewMode: "grid",
+        zoomLevel: "medium",
+        gridDensity: "medium",
+        timelinePeriod: null,
+      }).toString();
+
+      expect(buildCustomCarouselUrl(rules, "created_at", "ASC")).toBe(
+        `/scenes?${flatWriter}`
+      );
+      expect(buildCustomCarouselUrl(rootAll(rules), "created_at", "ASC")).toBe(
+        `/scenes?${flatWriter}`
+      );
+    }
+  });
+
+  it("a repeated root field gives two leaves", () => {
+    const state = {
+      tagIds: ["1:a", "2:a"],
+      tagIdsModifier: "INCLUDES_ALL",
+      "2.tagIds": ["3:a"],
+      "2.tagIdsModifier": "INCLUDES",
+    };
+
+    expect(carouselBody(editTreeOf("scene", treeOf("scene", state)))).toEqual({
+      match: "all",
+      rules: [
+        leaf("tags", { value: ["1:a", "2:a"], modifier: "INCLUDES_ALL" }),
+        leaf("tags", { value: ["3:a"], modifier: "INCLUDES" }),
+      ],
+    });
+  });
+
+  it("an empty tree saves an empty root all tree", () => {
+    expect(
+      carouselBody(carouselEditTree({ rules: { match: "all", rules: [] } }))
+    ).toEqual({
+      match: "all",
+      rules: [],
+    });
+  });
+});
+
+describe("a stored carousel tree in the builder", () => {
+  const leaf = (field: string, criterion: unknown) => ({ field, criterion });
+  /** Leaves no scene row can read: Has ALL of studios, a duration NOT_BETWEEN */
+  const UNREAD = [
+    leaf("studios", { value: ["3:a"], modifier: "INCLUDES_ALL" }),
+    leaf("duration", { modifier: "NOT_BETWEEN", value: 60, value2: 120 }),
+  ];
+  const kinds = (tree: EditTree) => ({
+    match: tree.match,
+    rows: tree.rows.map((item) => item.kind),
+    groups: tree.groups.map((group) => ({
+      match: group.match,
+      rows: group.rows.map((item) =>
+        item.kind === "row" ? item.field.key : item.kind
+      ),
+    })),
+  });
+
+  it("a kept leaf stays in its container, after the rows, and saves there", () => {
+    const stored = {
+      match: "all" as const,
+      rules: [
+        leaf("rating100", { modifier: "BETWEEN", value: 80 }),
+        must(UNREAD[0]),
+        {
+          match: "any" as const,
+          rules: [leaf("favorite", true), must(UNREAD[1])],
+        },
+      ],
+    };
+
+    const tree = carouselEditTree({ rules: untrusted(stored) });
+
+    expect(kinds(tree)).toEqual({
+      match: "all",
+      rows: ["row", "kept"],
+      groups: [{ match: "any", rows: ["favorite", "kept"] }],
+    });
+    expect(carouselBody(tree)).toEqual(stored);
+  });
+
+  it("a group holding only kept leaves keeps its place and its match before a group with rows", () => {
+    const stored = {
+      match: "all" as const,
+      rules: [
+        { match: "any" as const, rules: UNREAD },
+        {
+          match: "all" as const,
+          rules: [leaf("favorite", true), leaf("watched", false)],
+        },
+      ],
+    };
+
+    const tree = carouselEditTree({ rules: untrusted(stored) });
+
+    expect(kinds(tree)).toEqual({
+      match: "all",
+      rows: [],
+      groups: [
+        { match: "any", rows: ["kept", "kept"] },
+        { match: "all", rows: ["favorite", "watched"] },
+      ],
+    });
+    expect(carouselBody(tree)).toEqual(stored);
+  });
+
+  it("a group nested in a group is kept whole in its group", () => {
+    const nested = { match: "any" as const, rules: [leaf("favorite", true)] };
+    const stored = {
+      match: "all" as const,
+      rules: [
+        { match: "all" as const, rules: [leaf("watched", false), nested] },
+      ],
+    };
+
+    const tree = carouselEditTree({ rules: untrusted(stored) });
+
+    expect(kinds(tree).groups).toEqual([
+      { match: "all", rows: ["watched", "kept"] },
+    ]);
+    expect(carouselBody(tree)).toEqual(stored);
+  });
+});
+
+describe("carousel rules of the F22b editors (the real Path and Playlists rows)", () => {
+  const table = { rows: SCENE_ROWS, specs: SCENE_FIELDS };
+
+  it("a Path condition and a playlist rule read back and build the same", () => {
+    const stored = {
+      path: { value: "/media/new", modifier: "STARTS_WITH" },
+      playlists: { value: [12, 7], modifier: "INCLUDES_ALL" },
+    };
+
+    const { state, kept } = readPanelFilter("scene", stored, table);
+
+    expect(state).toEqual({
+      path: "/media/new",
+      pathModifier: "STARTS_WITH",
+      playlistIds: ["12", "7"],
+      playlistIdsModifier: "INCLUDES_ALL",
+    });
+    expect(kept).toEqual({});
+    expect(buildPanelFilter("scene", state, table)).toEqual(stored);
+  });
+
+  it("a condition the row does not offer is kept as stored", () => {
+    const stored = {
+      title: { value: "beach", modifier: "STARTS_WITH" },
+      playlists: { value: [12], modifier: "IS_NULL" },
+    };
+
+    expect(readPanelFilter("scene", stored, table)).toEqual({
+      state: {},
+      kept: stored,
+    });
+  });
+});

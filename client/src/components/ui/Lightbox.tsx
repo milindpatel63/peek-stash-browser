@@ -1,31 +1,58 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ChevronLeft, ChevronRight, Clock, Heart, Info, Maximize, Minimize, Pause, Play, Plus, X } from "lucide-react";
+import type { ImageListItem } from "@peek/shared-types";
+import {
+  ChevronLeft,
+  ChevronRight,
+  Clock,
+  Download,
+  Heart,
+  Info,
+  Maximize,
+  Minimize,
+  Pause,
+  Play,
+  Plus,
+  X,
+} from "lucide-react";
 import { useSwipeable } from "react-swipeable";
-import { TransformWrapper, TransformComponent, type ReactZoomPanPinchContentRef } from "react-zoom-pan-pinch";
+import {
+  type ReactZoomPanPinchContentRef,
+  TransformComponent,
+  TransformWrapper,
+} from "react-zoom-pan-pinch";
+import { imageViewHistoryApi } from "../../api";
+import {
+  useIncrementOCounter,
+  useUpdateFavorite,
+  useUpdateRating,
+} from "../../api/hooks";
+import { useUserSettings } from "../../api/hooks/useUserSettings";
 import { useFullscreen } from "../../hooks/useFullscreen";
-import { useRatingHotkeys } from "../../hooks/useRatingHotkeys";
-import { apiGet, imageViewHistoryApi, libraryApi } from "../../api";
-import { getImageTitle } from "../../utils/imageGalleryInheritance";
+import { useHoverCapable } from "../../hooks/useHoverCapable";
+import { useImageDownload } from "../../hooks/useImageDownload";
+import { useMediaQuery } from "../../hooks/useMediaQuery";
+import { useShortcutScope } from "../../hooks/useShortcutScope";
+import { isVideoImage } from "../../utils/imageMedia";
+import { getImageTitle } from "../../utils/imageTitle";
+import { ratingSequence } from "../../utils/ratingSequence";
 import MetadataDrawer from "./MetadataDrawer";
-import type { NormalizedImage } from "@peek/shared-types";
 
 // Percentage of screen width on each side that triggers navigation on click
 const EDGE_ZONE_PERCENT = 0.15;
 
 interface Props {
-  images: NormalizedImage[];
+  images: ImageListItem[];
   initialIndex?: number;
   isOpen: boolean;
   onClose: () => void;
   autoPlay?: boolean;
-  onImagesUpdate?: (images: NormalizedImage[]) => void;
   onPageBoundary?: (direction: "next" | "prev") => boolean;
   totalCount?: number;
   pageOffset?: number;
   onIndexChange?: (index: number) => void;
   isPageTransitioning?: boolean;
   transitionKey?: number;
-  prefetchImages?: NormalizedImage[];
+  prefetchImages?: ImageListItem[];
 }
 
 const Lightbox = ({
@@ -34,7 +61,6 @@ const Lightbox = ({
   isOpen,
   onClose,
   autoPlay = false,
-  onImagesUpdate,
   onPageBoundary,
   totalCount,
   pageOffset = 0,
@@ -54,40 +80,48 @@ const Lightbox = ({
   const [rating, setRating] = useState<number | null>(null);
   const [isFavorite, setIsFavorite] = useState(false);
   const [oCounter, setOCounter] = useState(0);
+  const { mutateAsync: saveRating } = useUpdateRating();
+  const { mutateAsync: saveFavorite } = useUpdateFavorite();
+  const { mutate: pressO } = useIncrementOCounter();
 
   // New state for enhanced features
   const [controlsVisible, setControlsVisible] = useState(true);
   const [drawerOpen, setDrawerOpen] = useState(false);
-  const [hasHoverCapability, setHasHoverCapability] = useState(true);
+  const hasHoverCapability = useHoverCapable();
+  // Mobile in portrait: the nav arrows sit lower, clear of the controls
+  const isPortraitMobile = useMediaQuery(
+    "(max-width: 768px) and (orientation: portrait)"
+  );
   const { isFullscreen, toggleFullscreen, supportsFullscreen } = useFullscreen({
     autoOnLandscape: true,
     enabled: isOpen,
   });
+  const {
+    canDownload,
+    downloading,
+    download: downloadImage,
+  } = useImageDownload(isOpen);
   const controlsTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // The dialog element: the root of the lightbox's keyboard scope
+  const dialogRef = useRef<HTMLDivElement | null>(null);
 
   // Zoom/pan state
   const [zoomScale, setZoomScale] = useState(1);
   const transformRef = useRef<ReactZoomPanPinchContentRef | null>(null);
 
-  // Double-tap/double-click preference and feedback
-  const [doubleTapAction, setDoubleTapAction] = useState("favorite");
-  const [doubleTapFeedback, setDoubleTapFeedback] = useState<string | null>(null); // "favorite_add" | "favorite_remove" | "o_counter" | "fullscreen" | null
+  // Double-tap/double-click preference (from the settings query) and feedback
+  const { data: userSettings } = useUserSettings();
+  const doubleTapAction =
+    userSettings?.settings.lightboxDoubleTapAction ?? "favorite";
+  const [doubleTapFeedback, setDoubleTapFeedback] = useState<string | null>(
+    null
+  ); // "favorite_add" | "favorite_remove" | "o_counter" | "fullscreen" | null
   const lastTapTimeRef = useRef(0);
-  const doubleTapFeedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const doubleTapFeedbackTimerRef = useRef<ReturnType<
+    typeof setTimeout
+  > | null>(null);
   const doubleTapGuardRef = useRef(0);
-
-  // Fetch user's lightbox double-tap preference
-  useEffect(() => {
-    if (!isOpen) return;
-    apiGet("/user/settings")
-      .then((data) => {
-        const action = (data as { settings?: { lightboxDoubleTapAction?: string } })?.settings?.lightboxDoubleTapAction;
-        if (action) setDoubleTapAction(action);
-      })
-      .catch(() => {
-        // Silently fall back to default
-      });
-  }, [isOpen]);
 
   // Reset index when initialIndex changes, lightbox opens, or page transition occurs.
   // transitionKey ensures this fires even when initialIndex is the same value
@@ -129,14 +163,20 @@ const Lightbox = ({
   // When we navigate across a page boundary, we store the current image ID as stale.
   // We refuse to show any image with this ID, preventing the flash of the wrong image
   // while waiting for the new page's data to arrive.
-  const staleImageIdRef = useRef<string | null>(null);
+  // Holds undefined when the boundary is crossed with no image at the index
+  const staleImageIdRef = useRef<string | null | undefined>(null);
 
   // Check if current image is stale (should not be displayed)
-  const isShowingStaleImage = staleImageIdRef.current !== null && currentImageId === staleImageIdRef.current;
+  const isShowingStaleImage =
+    staleImageIdRef.current !== null &&
+    currentImageId === staleImageIdRef.current;
 
   // Clear stale ref when we get a new (non-stale) image
   useEffect(() => {
-    if (staleImageIdRef.current !== null && currentImageId !== staleImageIdRef.current) {
+    if (
+      staleImageIdRef.current !== null &&
+      currentImageId !== staleImageIdRef.current
+    ) {
       staleImageIdRef.current = null;
     }
   }, [currentImageId]);
@@ -152,10 +192,9 @@ const Lightbox = ({
 
   // Reset zoom when image changes
   useEffect(() => {
-    if (transformRef.current) {
-      transformRef.current.resetTransform(0); // instant reset (0ms)
-      setZoomScale(1);
-    }
+    // The wrapper is absent while a video entry shows, but the scale resets anyway
+    transformRef.current?.resetTransform(0); // instant reset (0ms)
+    setZoomScale(1);
   }, [currentIndex]);
 
   // Notify parent of index changes (for syncing page on close)
@@ -174,54 +213,34 @@ const Lightbox = ({
     }
   }, [isOpen, autoPlay]);
 
-  // Detect hover capability (mouse/trackpad vs touch-only) to hide keyboard hints on mobile
-  useEffect(() => {
-    const mediaQuery = window.matchMedia("(hover: hover)");
-    setHasHoverCapability(mediaQuery.matches);
-
-    const handleChange = (e: MediaQueryListEvent) => setHasHoverCapability(e.matches);
-    mediaQuery.addEventListener("change", handleChange);
-    return () => mediaQuery.removeEventListener("change", handleChange);
-  }, []);
-
-  // Detect portrait orientation on mobile for nav arrow positioning
-  const [isPortraitMobile, setIsPortraitMobile] = useState(false);
-  useEffect(() => {
-    const check = () => {
-      setIsPortraitMobile(
-        window.innerWidth <= 768 && window.matchMedia("(orientation: portrait)").matches
-      );
-    };
-    check();
-    window.addEventListener("resize", check);
-    window.addEventListener("orientationchange", check);
-    return () => {
-      window.removeEventListener("resize", check);
-      window.removeEventListener("orientationchange", check);
-    };
-  }, []);
-
   // Prefetch images from adjacent pages into browser cache
   useEffect(() => {
     if (!isOpen || prefetchImages.length === 0) return;
 
-    // Use fetch with low priority to avoid blocking the main image request
-    // AbortController lets us cancel prefetches if component unmounts or images change
-    const controller = new AbortController();
+    // An Image loads at low priority, fills the HTTP cache and frees its
+    // connection when done; an unread fetch body would hold it under
+    // backpressure. Clearing src on cleanup cancels what is still loading.
+    // A video entry is skipped: its file is the whole clip, which an Image
+    // would download only to fail to decode it.
+    const images: HTMLImageElement[] = [];
 
     prefetchImages.forEach((img) => {
-      const url = img?.paths?.image || img?.paths?.preview;
+      if (isVideoImage(img)) return;
+      const url = img.paths.image ?? img.paths.preview;
       if (url) {
-        fetch(url, {
-          signal: controller.signal,
-          priority: "low",
-        }).catch(() => {
-          // Silently ignore - prefetch is best-effort
-        });
+        const el = new Image();
+        el.decoding = "async";
+        el.fetchPriority = "low";
+        el.src = url;
+        images.push(el);
       }
     });
 
-    return () => controller.abort();
+    return () => {
+      images.forEach((el) => {
+        el.src = "";
+      });
+    };
   }, [isOpen, prefetchImages]);
 
   // Navigation functions with cross-page support
@@ -276,40 +295,30 @@ const Lightbox = ({
     setIsPlaying((prev) => !prev);
   }, []);
 
-  // Handle rating change
+  // Handle rating change. The mutation shows it in every cached row of the
+  // image (the list the lightbox opened from included) and puts it back
+  // when the save fails.
   const handleRatingChange = useCallback(
     async (newRating: number | null) => {
       const currentImage = images[currentIndex];
       if (!currentImage?.id) return;
 
-      // Optimistic update
       const previousRating = rating;
       setRating(newRating);
 
-      // Update the images array so navigation preserves the change
-      const updatedImages = [...images];
-      updatedImages[currentIndex] = {
-        ...currentImage,
-        rating100: newRating,
-        rating: newRating,
-      };
-      // Call parent update if provided
-      if (onImagesUpdate) {
-        onImagesUpdate(updatedImages);
-      }
-
       try {
-        await libraryApi.updateRating("image", currentImage.id, newRating, currentImage.instanceId);
+        await saveRating({
+          entityType: "image",
+          entityId: currentImage.id,
+          rating: newRating,
+          instanceId: currentImage.instanceId,
+        });
       } catch (error) {
         console.error("Failed to update image rating:", error);
-        // Revert on error
         setRating(previousRating);
-        if (onImagesUpdate) {
-          onImagesUpdate(images);
-        }
       }
     },
-    [images, currentIndex, rating, onImagesUpdate]
+    [images, currentIndex, rating, saveRating]
   );
 
   // Handle favorite change
@@ -318,55 +327,31 @@ const Lightbox = ({
       const currentImage = images[currentIndex];
       if (!currentImage?.id) return;
 
-      // Optimistic update
       const previousFavorite = isFavorite;
       setIsFavorite(newFavorite);
 
-      // Update the images array so navigation preserves the change
-      const updatedImages = [...images];
-      updatedImages[currentIndex] = {
-        ...currentImage,
-        favorite: newFavorite,
-      };
-      // Call parent update if provided
-      if (onImagesUpdate) {
-        onImagesUpdate(updatedImages);
-      }
-
       try {
-        await libraryApi.updateFavorite("image", currentImage.id, newFavorite, currentImage.instanceId);
+        await saveFavorite({
+          entityType: "image",
+          entityId: currentImage.id,
+          favorite: newFavorite,
+          instanceId: currentImage.instanceId,
+        });
       } catch (error) {
         console.error("Failed to update image favorite:", error);
-        // Revert on error
         setIsFavorite(previousFavorite);
-        if (onImagesUpdate) {
-          onImagesUpdate(images);
-        }
       }
     },
-    [images, currentIndex, isFavorite, onImagesUpdate]
+    [images, currentIndex, isFavorite, saveFavorite]
   );
 
-  // Handle O counter change
-  const handleOCounterChange = useCallback(
-    (newCount: number) => {
-      const currentImage = images[currentIndex];
-      if (!currentImage?.id) return;
-
-      setOCounter(newCount);
-
-      // Update the images array so navigation preserves the change
-      const updatedImages = [...images];
-      updatedImages[currentIndex] = {
-        ...currentImage,
-        oCounter: newCount,
-      };
-      if (onImagesUpdate) {
-        onImagesUpdate(updatedImages);
-      }
-    },
-    [images, currentIndex, onImagesUpdate]
-  );
+  // The O count shown. The O writes (the button, Remove last O, the
+  // double tap) put the server's count into every cached row of the image
+  // themselves, so the host's images follow; the viewer writes no copy of
+  // the image back, which could carry an older rating or favorite.
+  const handleOCounterChange = useCallback((newCount: number) => {
+    setOCounter(newCount);
+  }, []);
 
   // Trigger double-tap/double-click action with visual feedback
   const triggerDoubleTapAction = useCallback(() => {
@@ -387,17 +372,24 @@ const Lightbox = ({
     if (doubleTapAction === "o_counter") {
       const newCount = oCounter + 1;
       handleOCounterChange(newCount);
-      imageViewHistoryApi.incrementO(currentImage.id, currentImage.instanceId).catch((err) => {
-        console.error("Failed to increment O counter:", err);
-      });
+      pressO(
+        { imageId: currentImage.id, instanceId: currentImage.instanceId },
+        {
+          onError: (err: unknown) => {
+            console.error("Failed to increment O counter:", err);
+          },
+        }
+      );
       setDoubleTapFeedback("o_counter");
     } else if (doubleTapAction === "fullscreen") {
-      toggleFullscreen();
+      void toggleFullscreen();
       setDoubleTapFeedback("fullscreen");
     } else {
       const newFavoriteValue = !isFavorite;
-      handleFavoriteChange(newFavoriteValue);
-      setDoubleTapFeedback(newFavoriteValue ? "favorite_add" : "favorite_remove");
+      void handleFavoriteChange(newFavoriteValue);
+      setDoubleTapFeedback(
+        newFavoriteValue ? "favorite_add" : "favorite_remove"
+      );
     }
 
     // Clear feedback after animation
@@ -405,18 +397,35 @@ const Lightbox = ({
       setDoubleTapFeedback(null);
       doubleTapFeedbackTimerRef.current = null;
     }, 800);
-  }, [images, currentIndex, doubleTapAction, oCounter, isFavorite, handleOCounterChange, handleFavoriteChange, toggleFullscreen]);
+  }, [
+    images,
+    currentIndex,
+    doubleTapAction,
+    oCounter,
+    isFavorite,
+    handleOCounterChange,
+    pressO,
+    handleFavoriteChange,
+    toggleFullscreen,
+  ]);
 
   // Desktop double-click handler on image container
-  const handleDoubleClick = useCallback((e: React.MouseEvent) => {
-    // Only trigger in center zone (not edge navigation zones)
-    const clickX = e.clientX;
-    const screenWidth = window.innerWidth;
-    const clickPercent = clickX / screenWidth;
-    if (clickPercent < EDGE_ZONE_PERCENT || clickPercent > 1 - EDGE_ZONE_PERCENT) return;
+  const handleDoubleClick = useCallback(
+    (e: React.MouseEvent) => {
+      // Only trigger in center zone (not edge navigation zones)
+      const clickX = e.clientX;
+      const screenWidth = window.innerWidth;
+      const clickPercent = clickX / screenWidth;
+      if (
+        clickPercent < EDGE_ZONE_PERCENT ||
+        clickPercent > 1 - EDGE_ZONE_PERCENT
+      )
+        return;
 
-    triggerDoubleTapAction();
-  }, [triggerDoubleTapAction]);
+      triggerDoubleTapAction();
+    },
+    [triggerDoubleTapAction]
+  );
 
   // Auto-hide controls after inactivity
   const showControls = useCallback(() => {
@@ -448,32 +457,44 @@ const Lightbox = ({
   }, [showControls]);
 
   // Toggle controls on tap (mobile), with double-tap detection
-  const handleTap = useCallback(({ event }: { event: React.MouseEvent | TouchEvent | MouseEvent }) => {
-    const now = Date.now();
-    const timeSinceLastTap = now - lastTapTimeRef.current;
-    lastTapTimeRef.current = now;
+  const handleTap = useCallback(
+    ({ event }: { event: React.MouseEvent | TouchEvent | MouseEvent }) => {
+      const now = Date.now();
+      const timeSinceLastTap = now - lastTapTimeRef.current;
+      lastTapTimeRef.current = now;
 
-    if (timeSinceLastTap < 300) {
-      // Double-tap detected — check if in center zone
-      const tapX = "clientX" in event ? event.clientX : window.innerWidth / 2;
-      const screenWidth = window.innerWidth;
-      const tapPercent = tapX / screenWidth;
-      if (tapPercent >= EDGE_ZONE_PERCENT && tapPercent <= 1 - EDGE_ZONE_PERCENT) {
-        triggerDoubleTapAction();
-        return;
+      if (timeSinceLastTap < 300) {
+        // Double-tap detected — check if in center zone
+        const tapX = "clientX" in event ? event.clientX : window.innerWidth / 2;
+        const screenWidth = window.innerWidth;
+        const tapPercent = tapX / screenWidth;
+        if (
+          tapPercent >= EDGE_ZONE_PERCENT &&
+          tapPercent <= 1 - EDGE_ZONE_PERCENT
+        ) {
+          triggerDoubleTapAction();
+          return;
+        }
       }
-    }
 
-    setControlsVisible((prev) => !prev);
-  }, [triggerDoubleTapAction]);
+      setControlsVisible((prev) => !prev);
+    },
+    [triggerDoubleTapAction]
+  );
 
   const isZoomed = zoomScale > 1;
 
   // Swipe gesture handlers — disabled when zoomed in so pan gestures work
   const swipeHandlers = useSwipeable({
-    onSwipedLeft: () => { if (!isZoomed) goToNext(); },
-    onSwipedRight: () => { if (!isZoomed) goToPrevious(); },
-    onSwipedUp: () => { if (!isZoomed) setDrawerOpen(true); },
+    onSwipedLeft: () => {
+      if (!isZoomed) goToNext();
+    },
+    onSwipedRight: () => {
+      if (!isZoomed) goToPrevious();
+    },
+    onSwipedUp: () => {
+      if (!isZoomed) setDrawerOpen(true);
+    },
     onSwipedDown: () => {
       if (isZoomed) return;
       if (drawerOpen) {
@@ -516,9 +537,11 @@ const Lightbox = ({
 
     // Start 3-second dwell timer
     viewTimerRef.current = setTimeout(() => {
-      imageViewHistoryApi.recordView(currentImage.id, currentImage.instanceId).catch((err) => {
-        console.error("Failed to record image view:", err);
-      });
+      imageViewHistoryApi
+        .recordView(currentImage.id, currentImage.instanceId)
+        .catch((err: unknown) => {
+          console.error("Failed to record image view:", err);
+        });
       viewTimerRef.current = null;
     }, 3000);
 
@@ -530,13 +553,6 @@ const Lightbox = ({
       }
     };
   }, [currentIndex, images, isOpen, imageLoaded]);
-
-  // Rating hotkeys (r + 1-5 for ratings, r + 0 to clear)
-  useRatingHotkeys({
-    enabled: isOpen && images.length > 0,
-    setRating: handleRatingChange,
-    toggleFavorite: () => handleFavoriteChange(!isFavorite),
-  });
 
   // Auto-advance slideshow
   useEffect(() => {
@@ -558,49 +574,55 @@ const Lightbox = ({
     };
   }, [isPlaying, intervalDuration, goToNext]);
 
-  // Keyboard controls
-  useEffect(() => {
-    if (!isOpen) return;
-
-    const handleKeyDown = (e: KeyboardEvent) => {
-      // Ignore if typing in an input
-      if ((e.target as HTMLElement)?.tagName === "INPUT" || (e.target as HTMLElement)?.tagName === "TEXTAREA") return;
-
-      switch (e.key) {
-        case "Escape":
-          if (drawerOpen) {
-            setDrawerOpen(false);
-          } else {
-            handleCloseWithFullscreenExit();
-          }
-          break;
-        case "ArrowLeft":
-          goToPrevious();
-          break;
-        case "ArrowRight":
-          goToNext();
-          break;
-        case " ":
-          e.preventDefault();
-          toggleSlideshow();
-          break;
-        case "i":
-        case "I":
-          setDrawerOpen((prev) => !prev);
-          break;
-        case "f":
-        case "F":
-          toggleFullscreen();
-          break;
-        default:
-          break;
-      }
+  // Keyboard: while open the lightbox is a modal overlay scope, so it takes
+  // every key and nothing behind it (the page's own r-then-number rating, g
+  // navigation) runs. r then 1-5, 0 or f rates or favorites the image.
+  const hasImages = isOpen && images.length > 0;
+  const withControls =
+    (action: () => void): (() => void) =>
+    () => {
+      action();
       showControls();
     };
+  useShortcutScope({
+    layer: "overlay",
+    enabled: hasImages,
+    root: () => dialogRef.current,
+    keys: {
+      esc: withControls(() => {
+        if (drawerOpen) {
+          setDrawerOpen(false);
+        } else {
+          handleCloseWithFullscreenExit();
+        }
+      }),
+      left: withControls(goToPrevious),
+      right: withControls(goToNext),
+      space: withControls(toggleSlideshow),
+      i: withControls(() => setDrawerOpen((prev) => !prev)),
+      f: withControls(() => void toggleFullscreen()),
+    },
+    sequences: {
+      r: ratingSequence(
+        (newRating) => void handleRatingChange(newRating),
+        () => void handleFavoriteChange(!isFavorite)
+      ),
+    },
+  });
 
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isOpen, handleCloseWithFullscreenExit, goToPrevious, goToNext, toggleSlideshow, drawerOpen, isFullscreen, toggleFullscreen, showControls]);
+  // Focus moves into the dialog when it opens (its keys act while focus is
+  // inside it) and back to where it was when it closes
+  useEffect(() => {
+    if (!hasImages) return;
+    const previous =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    dialogRef.current?.focus({ preventScroll: true });
+    return () => {
+      if (previous?.isConnected) previous.focus({ preventScroll: true });
+    };
+  }, [hasImages]);
 
   // Cleanup timers
   useEffect(() => {
@@ -630,8 +652,9 @@ const Lightbox = ({
   if (!isOpen || !images || images.length === 0) return null;
 
   const currentImage = images[currentIndex];
-  const imageSrc = currentImage?.paths?.image || currentImage?.paths?.preview;
-  const imageTitle = getImageTitle(currentImage as Parameters<typeof getImageTitle>[0]);
+  const imageSrc = currentImage?.paths.image ?? currentImage?.paths.preview;
+  const isVideoEntry = isVideoImage(currentImage);
+  const imageTitle = getImageTitle(currentImage);
 
   // Handle backdrop click - edge zones navigate, center does nothing
   // Left 15% = previous, right 15% = next, center = no action
@@ -657,7 +680,12 @@ const Lightbox = ({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center"
+      ref={dialogRef}
+      role="dialog"
+      aria-modal="true"
+      aria-label="Image viewer"
+      tabIndex={-1}
+      className="fixed inset-0 z-50 flex items-center justify-center outline-none"
       style={{
         backgroundColor: "rgba(0, 0, 0, 0.95)",
       }}
@@ -711,14 +739,53 @@ const Lightbox = ({
               className="bg-transparent border-0 outline-none cursor-pointer text-sm"
               style={{ color: "var(--text-primary)" }}
             >
-              <option value={2000} style={{ backgroundColor: "var(--bg-primary)", color: "var(--text-primary)" }}>2s</option>
-              <option value={3000} style={{ backgroundColor: "var(--bg-primary)", color: "var(--text-primary)" }}>3s</option>
-              <option value={5000} style={{ backgroundColor: "var(--bg-primary)", color: "var(--text-primary)" }}>5s</option>
-              <option value={10000} style={{ backgroundColor: "var(--bg-primary)", color: "var(--text-primary)" }}>10s</option>
-              <option value={15000} style={{ backgroundColor: "var(--bg-primary)", color: "var(--text-primary)" }}>15s</option>
+              <option
+                value={2000}
+                style={{
+                  backgroundColor: "var(--bg-primary)",
+                  color: "var(--text-primary)",
+                }}
+              >
+                2s
+              </option>
+              <option
+                value={3000}
+                style={{
+                  backgroundColor: "var(--bg-primary)",
+                  color: "var(--text-primary)",
+                }}
+              >
+                3s
+              </option>
+              <option
+                value={5000}
+                style={{
+                  backgroundColor: "var(--bg-primary)",
+                  color: "var(--text-primary)",
+                }}
+              >
+                5s
+              </option>
+              <option
+                value={10000}
+                style={{
+                  backgroundColor: "var(--bg-primary)",
+                  color: "var(--text-primary)",
+                }}
+              >
+                10s
+              </option>
+              <option
+                value={15000}
+                style={{
+                  backgroundColor: "var(--bg-primary)",
+                  color: "var(--text-primary)",
+                }}
+              >
+                15s
+              </option>
             </select>
           </div>
-
         </div>
 
         {/* Right side - Lightbox controls */}
@@ -739,12 +806,35 @@ const Lightbox = ({
             <Info size={24} />
           </button>
 
+          {/* Download button (Can Download Files) */}
+          {canDownload && currentImage?.id && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                void downloadImage({
+                  id: currentImage.id,
+                  instanceId: currentImage.instanceId,
+                });
+              }}
+              disabled={downloading}
+              className="p-2 rounded-full transition-colors disabled:opacity-50"
+              style={{
+                backgroundColor: "rgba(0, 0, 0, 0.5)",
+                color: "var(--text-primary)",
+              }}
+              aria-label="Download image"
+              title={downloading ? "Starting download..." : "Download"}
+            >
+              <Download size={24} />
+            </button>
+          )}
+
           {/* Fullscreen button */}
           {supportsFullscreen && (
             <button
               onClick={(e) => {
                 e.stopPropagation();
-                toggleFullscreen();
+                void toggleFullscreen();
               }}
               className="p-2 rounded-full transition-colors"
               style={{
@@ -833,7 +923,10 @@ const Lightbox = ({
       )}
 
       {/* Loading spinner - show when image loading, page transitioning, post-transition, or showing stale image */}
-      {(!imageLoaded || isPageTransitioning || isPostTransition || isShowingStaleImage) && (
+      {(!imageLoaded ||
+        isPageTransitioning ||
+        isPostTransition ||
+        isShowingStaleImage) && (
         <div
           className="absolute inset-0 flex items-center justify-center pointer-events-none"
           style={{ color: "var(--text-primary)" }}
@@ -849,37 +942,65 @@ const Lightbox = ({
         onClick={(e) => e.stopPropagation()}
         onDoubleClick={handleDoubleClick}
         style={{
-          visibility: isPageTransitioning || isShowingStaleImage || isPostTransition ? "hidden" : "visible",
+          visibility:
+            isPageTransitioning || isShowingStaleImage || isPostTransition
+              ? "hidden"
+              : "visible",
         }}
       >
-        {/* Image with pinch-to-zoom and pan support */}
-        <TransformWrapper
-          ref={transformRef}
-          initialScale={1}
-          minScale={1}
-          maxScale={5}
-          doubleClick={{ disabled: true }}
-          onTransformed={(_ref, state) => setZoomScale(state.scale)}
-          panning={{ disabled: zoomScale <= 1 }}
-          wheel={{ step: 0.2 }}
-        >
-          <TransformComponent
-            wrapperStyle={{ width: "100%", height: "100%" }}
-            contentStyle={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center" }}
+        {/* Video entries play in a plain <video>; the zoom wrapper is for images only */}
+        {isVideoEntry ? (
+          <video
+            key={currentImageId}
+            src={imageSrc ?? undefined}
+            className="w-full h-full object-contain"
+            style={{
+              opacity: imageLoaded ? 1 : 0,
+              transition: "opacity 0.2s ease-in-out",
+            }}
+            controls
+            loop
+            playsInline
+            muted
+            tabIndex={-1}
+            onLoadedData={() => setImageLoaded(true)}
+            onError={() => setImageLoaded(true)}
+          />
+        ) : (
+          <TransformWrapper
+            ref={transformRef}
+            initialScale={1}
+            minScale={1}
+            maxScale={5}
+            doubleClick={{ disabled: true }}
+            onTransformed={(_ref, state) => setZoomScale(state.scale)}
+            panning={{ disabled: zoomScale <= 1 }}
+            wheel={{ step: 0.2 }}
           >
-            <img
-              src={imageSrc ?? undefined}
-              alt={imageTitle ?? undefined}
-              className="max-w-full max-h-full object-contain"
-              style={{
-                opacity: imageLoaded ? 1 : 0,
-                transition: "opacity 0.2s ease-in-out",
+            <TransformComponent
+              wrapperStyle={{ width: "100%", height: "100%" }}
+              contentStyle={{
+                width: "100%",
+                height: "100%",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
               }}
-              onLoad={() => setImageLoaded(true)}
-              onError={() => setImageLoaded(true)}
-            />
-          </TransformComponent>
-        </TransformWrapper>
+            >
+              <img
+                src={imageSrc ?? undefined}
+                alt={imageTitle ?? undefined}
+                className="w-full h-full object-contain"
+                style={{
+                  opacity: imageLoaded ? 1 : 0,
+                  transition: "opacity 0.2s ease-in-out",
+                }}
+                onLoad={() => setImageLoaded(true)}
+                onError={() => setImageLoaded(true)}
+              />
+            </TransformComponent>
+          </TransformWrapper>
+        )}
 
         {/* Double-tap/double-click visual feedback */}
         {doubleTapFeedback && (
@@ -887,11 +1008,15 @@ const Lightbox = ({
             className="absolute inset-0 flex items-center justify-center pointer-events-none z-50"
             key={Date.now()}
           >
-            <div className={`rounded-full bg-white/20 p-6 ${
-              doubleTapFeedback === "favorite_add" ? "animate-heart-pop" :
-              doubleTapFeedback === "favorite_remove" ? "animate-heart-shrink" :
-              "animate-ping-once"
-            }`}>
+            <div
+              className={`rounded-full bg-white/20 p-6 ${
+                doubleTapFeedback === "favorite_add"
+                  ? "animate-heart-pop"
+                  : doubleTapFeedback === "favorite_remove"
+                    ? "animate-heart-shrink"
+                    : "animate-ping-once"
+              }`}
+            >
               {doubleTapFeedback === "favorite_add" ? (
                 <Heart size={48} className="text-red-500 fill-red-500" />
               ) : doubleTapFeedback === "favorite_remove" ? (
@@ -946,12 +1071,14 @@ const Lightbox = ({
       <MetadataDrawer
         open={drawerOpen}
         onClose={() => setDrawerOpen(false)}
-        image={currentImage}
+        image={currentImage ?? null}
         rating={rating}
         isFavorite={isFavorite}
         oCounter={oCounter}
-        onRatingChange={handleRatingChange}
-        onFavoriteChange={handleFavoriteChange}
+        onRatingChange={(newRating) => void handleRatingChange(newRating)}
+        onFavoriteChange={(newFavorite) =>
+          void handleFavoriteChange(newFavorite)
+        }
         onOCounterChange={handleOCounterChange}
       />
     </div>

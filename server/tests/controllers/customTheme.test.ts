@@ -6,42 +6,47 @@
  * validation (name length, hex colors, ThemeConfig structure), conflict detection,
  * not-found, happy paths, and error handling.
  */
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import type { CustomTheme } from "@prisma/client";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  createCustomTheme,
+  deleteCustomTheme,
+  duplicateCustomTheme,
+  getCustomTheme,
+  getUserCustomThemes,
+  updateCustomTheme,
+} from "../../controllers/customTheme.js";
+import prisma from "../../prisma/singleton.js";
+import { dbWriteBatch } from "../../utils/dbWrite.js";
+import type * as dbWriteModule from "../../utils/dbWrite.js";
+import { authenticated } from "../../utils/routeHelpers.js";
+import { malformed, reqFor, resFor } from "../helpers/controllerTestUtils.js";
+import { objectContaining } from "../helpers/matchers.js";
+import { must } from "../helpers/must.js";
 
 // Mock prisma — BEFORE imports
-vi.mock("../../prisma/singleton.js", () => ({
-  default: {
-    customTheme: {
-      findMany: vi.fn(),
-      findFirst: vi.fn(),
-      create: vi.fn(),
-      update: vi.fn(),
-      delete: vi.fn(),
-    },
-  },
-}));
+vi.mock(
+  "../../prisma/singleton.js",
+  () => import("../helpers/prismaSingletonMock.js")
+);
+
+// The real queue, watched
+vi.mock("../../utils/dbWrite.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof dbWriteModule>();
+  return { ...actual, dbWriteBatch: vi.fn(actual.dbWriteBatch) };
+});
 
 // Mock logger
 vi.mock("../../utils/logger.js", () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }));
 
-import prisma from "../../prisma/singleton.js";
-import {
-  getUserCustomThemes,
-  getCustomTheme,
-  createCustomTheme,
-  updateCustomTheme,
-  deleteCustomTheme,
-  duplicateCustomTheme,
-} from "../../controllers/customTheme.js";
-import { mockReq, mockRes } from "../helpers/controllerTestUtils.js";
-
-const mockPrisma = vi.mocked(prisma);
+const mockPrisma = vi.mocked(prisma, true);
+const mockDbWriteBatch = vi.mocked(dbWriteBatch);
 
 const USER = { id: 1, username: "testuser", role: "USER" };
 
-interface ThemeConfig {
+type ThemeConfig = {
   mode: "dark" | "light";
   fonts: { brand: string; heading: string; body: string; mono: string };
   colors: {
@@ -53,12 +58,17 @@ interface ThemeConfig {
   };
   accents: { primary: string; secondary: string };
   status: { success: string; error: string; info: string; warning: string };
-}
+};
 
 function validThemeConfig(): ThemeConfig {
   return {
     mode: "dark",
-    fonts: { brand: "Inter", heading: "Inter", body: "Inter", mono: "Fira Code" },
+    fonts: {
+      brand: "Inter",
+      heading: "Inter",
+      body: "Inter",
+      mono: "Fira Code",
+    },
     colors: {
       background: "#1a1a2e",
       backgroundSecondary: "#16213e",
@@ -67,12 +77,17 @@ function validThemeConfig(): ThemeConfig {
       border: "#333333",
     },
     accents: { primary: "#e94560", secondary: "#533483" },
-    status: { success: "#00b894", error: "#d63031", info: "#0984e3", warning: "#fdcb6e" },
+    status: {
+      success: "#00b894",
+      error: "#d63031",
+      info: "#0984e3",
+      warning: "#fdcb6e",
+    },
   };
 }
 
 /** Factory for a stored theme row */
-function themeRow(overrides: Record<string, unknown> = {}) {
+function themeRow(overrides: Partial<CustomTheme> = {}): CustomTheme {
   return {
     id: 1,
     userId: USER.id,
@@ -93,18 +108,18 @@ describe("Custom Theme Controller", () => {
 
   describe("getUserCustomThemes", () => {
     it("returns 401 when no user", async () => {
-      const req = mockReq();
-      const res = mockRes();
-      await getUserCustomThemes(req, res);
+      const req = reqFor(getUserCustomThemes);
+      const res = resFor(getUserCustomThemes);
+      await authenticated(getUserCustomThemes)(req, res, vi.fn());
       expect(res._getStatus()).toBe(401);
     });
 
     it("returns themes array on success", async () => {
       const themes = [themeRow(), themeRow({ id: 2, name: "Second Theme" })];
-      mockPrisma.customTheme.findMany.mockResolvedValue(themes as any);
+      mockPrisma.customTheme.findMany.mockResolvedValue(themes);
 
-      const req = mockReq({}, {}, USER);
-      const res = mockRes();
+      const req = reqFor(getUserCustomThemes, { user: USER });
+      const res = resFor(getUserCustomThemes);
       await getUserCustomThemes(req, res);
 
       expect(res._getStatus()).toBe(200);
@@ -114,14 +129,14 @@ describe("Custom Theme Controller", () => {
       );
     });
 
-    it("returns 500 on database error", async () => {
+    it("a failure reaches the error handler: database error", async () => {
       mockPrisma.customTheme.findMany.mockRejectedValue(new Error("DB fail"));
 
-      const req = mockReq({}, {}, USER);
-      const res = mockRes();
-      await getUserCustomThemes(req, res);
+      const req = reqFor(getUserCustomThemes, { user: USER });
+      const res = resFor(getUserCustomThemes);
+      await expect(getUserCustomThemes(req, res)).rejects.toThrow("DB fail");
 
-      expect(res._getStatus()).toBe(500);
+      expect(res.json).not.toHaveBeenCalled();
     });
   });
 
@@ -129,15 +144,15 @@ describe("Custom Theme Controller", () => {
 
   describe("getCustomTheme", () => {
     it("returns 401 when no user", async () => {
-      const req = mockReq({}, { id: "1" });
-      const res = mockRes();
-      await getCustomTheme(req, res);
+      const req = reqFor(getCustomTheme, { params: { id: "1" } });
+      const res = resFor(getCustomTheme);
+      await authenticated(getCustomTheme)(req, res, vi.fn());
       expect(res._getStatus()).toBe(401);
     });
 
     it("returns 400 for invalid (non-numeric) ID", async () => {
-      const req = mockReq({}, { id: "abc" }, USER);
-      const res = mockRes();
+      const req = reqFor(getCustomTheme, { params: { id: "abc" }, user: USER });
+      const res = resFor(getCustomTheme);
       await getCustomTheme(req, res);
 
       expect(res._getStatus()).toBe(400);
@@ -149,8 +164,8 @@ describe("Custom Theme Controller", () => {
     it("returns 404 when theme not found", async () => {
       mockPrisma.customTheme.findFirst.mockResolvedValue(null);
 
-      const req = mockReq({}, { id: "999" }, USER);
-      const res = mockRes();
+      const req = reqFor(getCustomTheme, { params: { id: "999" }, user: USER });
+      const res = resFor(getCustomTheme);
       await getCustomTheme(req, res);
 
       expect(res._getStatus()).toBe(404);
@@ -158,24 +173,24 @@ describe("Custom Theme Controller", () => {
 
     it("returns theme on success", async () => {
       const theme = themeRow();
-      mockPrisma.customTheme.findFirst.mockResolvedValue(theme as any);
+      mockPrisma.customTheme.findFirst.mockResolvedValue(theme);
 
-      const req = mockReq({}, { id: "1" }, USER);
-      const res = mockRes();
+      const req = reqFor(getCustomTheme, { params: { id: "1" }, user: USER });
+      const res = resFor(getCustomTheme);
       await getCustomTheme(req, res);
 
       expect(res._getStatus()).toBe(200);
       expect(res._getBody()).toEqual(expect.objectContaining({ theme }));
     });
 
-    it("returns 500 on database error", async () => {
+    it("a failure reaches the error handler: database error", async () => {
       mockPrisma.customTheme.findFirst.mockRejectedValue(new Error("DB fail"));
 
-      const req = mockReq({}, { id: "1" }, USER);
-      const res = mockRes();
-      await getCustomTheme(req, res);
+      const req = reqFor(getCustomTheme, { params: { id: "1" }, user: USER });
+      const res = resFor(getCustomTheme);
+      await expect(getCustomTheme(req, res)).rejects.toThrow("DB fail");
 
-      expect(res._getStatus()).toBe(500);
+      expect(res.json).not.toHaveBeenCalled();
     });
   });
 
@@ -183,15 +198,20 @@ describe("Custom Theme Controller", () => {
 
   describe("createCustomTheme", () => {
     it("returns 401 when no user", async () => {
-      const req = mockReq({ name: "Test", config: validThemeConfig() });
-      const res = mockRes();
-      await createCustomTheme(req, res);
+      const req = reqFor(createCustomTheme, {
+        body: { name: "Test", config: validThemeConfig() },
+      });
+      const res = resFor(createCustomTheme);
+      await authenticated(createCustomTheme)(req, res, vi.fn());
       expect(res._getStatus()).toBe(401);
     });
 
     it("returns 400 when name is missing", async () => {
-      const req = mockReq({ config: validThemeConfig() }, {}, USER);
-      const res = mockRes();
+      const req = reqFor(createCustomTheme, {
+        body: malformed({ config: validThemeConfig() }),
+        user: USER,
+      });
+      const res = resFor(createCustomTheme);
       await createCustomTheme(req, res);
 
       expect(res._getStatus()).toBe(400);
@@ -201,8 +221,11 @@ describe("Custom Theme Controller", () => {
     });
 
     it("returns 400 when name is empty string", async () => {
-      const req = mockReq({ name: "", config: validThemeConfig() }, {}, USER);
-      const res = mockRes();
+      const req = reqFor(createCustomTheme, {
+        body: { name: "", config: validThemeConfig() },
+        user: USER,
+      });
+      const res = resFor(createCustomTheme);
       await createCustomTheme(req, res);
 
       expect(res._getStatus()).toBe(400);
@@ -213,21 +236,46 @@ describe("Custom Theme Controller", () => {
 
     it("returns 400 when name exceeds 50 characters", async () => {
       const longName = "A".repeat(51);
-      const req = mockReq({ name: longName, config: validThemeConfig() }, {}, USER);
-      const res = mockRes();
+      const req = reqFor(createCustomTheme, {
+        body: { name: longName, config: validThemeConfig() },
+        user: USER,
+      });
+      const res = resFor(createCustomTheme);
       await createCustomTheme(req, res);
 
       expect(res._getStatus()).toBe(400);
       expect(res._getBody()).toEqual(
-        expect.objectContaining({ error: "Theme name must be 50 characters or less" })
+        expect.objectContaining({
+          error: "Theme name must be 50 characters or less",
+        })
       );
     });
 
     // ── validateThemeConfig failure modes ──
 
     it("returns 400 for null config", async () => {
-      const req = mockReq({ name: "Test", config: null }, {}, USER);
-      const res = mockRes();
+      const req = reqFor(createCustomTheme, {
+        body: malformed({ name: "Test", config: null }),
+        user: USER,
+      });
+      const res = resFor(createCustomTheme);
+      await createCustomTheme(req, res);
+
+      expect(res._getStatus()).toBe(400);
+      expect(res._getBody()).toEqual(
+        expect.objectContaining({ error: "Invalid theme configuration" })
+      );
+    });
+
+    it.each([
+      ["an array", []],
+      ["a string", "dark"],
+    ])("rejects %s as the config with 400", async (_label, config) => {
+      const req = reqFor(createCustomTheme, {
+        body: malformed({ name: "Test", config }),
+        user: USER,
+      });
+      const res = resFor(createCustomTheme);
       await createCustomTheme(req, res);
 
       expect(res._getStatus()).toBe(400);
@@ -237,8 +285,11 @@ describe("Custom Theme Controller", () => {
     });
 
     it("returns 400 for undefined config", async () => {
-      const req = mockReq({ name: "Test" }, {}, USER);
-      const res = mockRes();
+      const req = reqFor(createCustomTheme, {
+        body: malformed({ name: "Test" }),
+        user: USER,
+      });
+      const res = resFor(createCustomTheme);
       await createCustomTheme(req, res);
 
       expect(res._getStatus()).toBe(400);
@@ -249,8 +300,11 @@ describe("Custom Theme Controller", () => {
 
     it("returns 400 for invalid mode", async () => {
       const config = { ...validThemeConfig(), mode: "neon" };
-      const req = mockReq({ name: "Test", config }, {}, USER);
-      const res = mockRes();
+      const req = reqFor(createCustomTheme, {
+        body: malformed({ name: "Test", config }),
+        user: USER,
+      });
+      const res = resFor(createCustomTheme);
       await createCustomTheme(req, res);
 
       expect(res._getStatus()).toBe(400);
@@ -260,10 +314,12 @@ describe("Custom Theme Controller", () => {
     });
 
     it("returns 400 when fonts object is missing", async () => {
-      const config = { ...validThemeConfig() } as any;
-      delete config.fonts;
-      const req = mockReq({ name: "Test", config }, {}, USER);
-      const res = mockRes();
+      const { fonts: _fonts, ...config } = validThemeConfig();
+      const req = reqFor(createCustomTheme, {
+        body: malformed({ name: "Test", config }),
+        user: USER,
+      });
+      const res = resFor(createCustomTheme);
       await createCustomTheme(req, res);
 
       expect(res._getStatus()).toBe(400);
@@ -273,10 +329,13 @@ describe("Custom Theme Controller", () => {
     });
 
     it("returns 400 when a required font key is missing", async () => {
-      const config = validThemeConfig() as any;
-      delete config.fonts.brand;
-      const req = mockReq({ name: "Test", config }, {}, USER);
-      const res = mockRes();
+      const { brand: _brand, ...fonts } = validThemeConfig().fonts;
+      const config = { ...validThemeConfig(), fonts };
+      const req = reqFor(createCustomTheme, {
+        body: malformed({ name: "Test", config }),
+        user: USER,
+      });
+      const res = resFor(createCustomTheme);
       await createCustomTheme(req, res);
 
       expect(res._getStatus()).toBe(400);
@@ -286,10 +345,12 @@ describe("Custom Theme Controller", () => {
     });
 
     it("returns 400 when colors object is missing", async () => {
-      const config = { ...validThemeConfig() } as any;
-      delete config.colors;
-      const req = mockReq({ name: "Test", config }, {}, USER);
-      const res = mockRes();
+      const { colors: _colors, ...config } = validThemeConfig();
+      const req = reqFor(createCustomTheme, {
+        body: malformed({ name: "Test", config }),
+        user: USER,
+      });
+      const res = resFor(createCustomTheme);
       await createCustomTheme(req, res);
 
       expect(res._getStatus()).toBe(400);
@@ -301,8 +362,11 @@ describe("Custom Theme Controller", () => {
     it("returns 400 for invalid hex color in colors", async () => {
       const config = validThemeConfig();
       config.colors.background = "#xyz123";
-      const req = mockReq({ name: "Test", config }, {}, USER);
-      const res = mockRes();
+      const req = reqFor(createCustomTheme, {
+        body: { name: "Test", config },
+        user: USER,
+      });
+      const res = resFor(createCustomTheme);
       await createCustomTheme(req, res);
 
       expect(res._getStatus()).toBe(400);
@@ -314,8 +378,11 @@ describe("Custom Theme Controller", () => {
     it("returns 400 for short hex color (not 6 digits)", async () => {
       const config = validThemeConfig();
       config.colors.background = "#1234";
-      const req = mockReq({ name: "Test", config }, {}, USER);
-      const res = mockRes();
+      const req = reqFor(createCustomTheme, {
+        body: { name: "Test", config },
+        user: USER,
+      });
+      const res = resFor(createCustomTheme);
       await createCustomTheme(req, res);
 
       expect(res._getStatus()).toBe(400);
@@ -324,18 +391,23 @@ describe("Custom Theme Controller", () => {
     it("returns 400 for named color instead of hex", async () => {
       const config = validThemeConfig();
       config.colors.text = "red";
-      const req = mockReq({ name: "Test", config }, {}, USER);
-      const res = mockRes();
+      const req = reqFor(createCustomTheme, {
+        body: { name: "Test", config },
+        user: USER,
+      });
+      const res = resFor(createCustomTheme);
       await createCustomTheme(req, res);
 
       expect(res._getStatus()).toBe(400);
     });
 
     it("returns 400 when accents object is missing", async () => {
-      const config = { ...validThemeConfig() } as any;
-      delete config.accents;
-      const req = mockReq({ name: "Test", config }, {}, USER);
-      const res = mockRes();
+      const { accents: _accents, ...config } = validThemeConfig();
+      const req = reqFor(createCustomTheme, {
+        body: malformed({ name: "Test", config }),
+        user: USER,
+      });
+      const res = resFor(createCustomTheme);
       await createCustomTheme(req, res);
 
       expect(res._getStatus()).toBe(400);
@@ -347,18 +419,23 @@ describe("Custom Theme Controller", () => {
     it("returns 400 for invalid accent colors", async () => {
       const config = validThemeConfig();
       config.accents.primary = "notahex";
-      const req = mockReq({ name: "Test", config }, {}, USER);
-      const res = mockRes();
+      const req = reqFor(createCustomTheme, {
+        body: { name: "Test", config },
+        user: USER,
+      });
+      const res = resFor(createCustomTheme);
       await createCustomTheme(req, res);
 
       expect(res._getStatus()).toBe(400);
     });
 
     it("returns 400 when status object is missing", async () => {
-      const config = { ...validThemeConfig() } as any;
-      delete config.status;
-      const req = mockReq({ name: "Test", config }, {}, USER);
-      const res = mockRes();
+      const { status: _status, ...config } = validThemeConfig();
+      const req = reqFor(createCustomTheme, {
+        body: malformed({ name: "Test", config }),
+        user: USER,
+      });
+      const res = resFor(createCustomTheme);
       await createCustomTheme(req, res);
 
       expect(res._getStatus()).toBe(400);
@@ -367,8 +444,11 @@ describe("Custom Theme Controller", () => {
     it("returns 400 for invalid status colors", async () => {
       const config = validThemeConfig();
       config.status.error = "#GGG000";
-      const req = mockReq({ name: "Test", config }, {}, USER);
-      const res = mockRes();
+      const req = reqFor(createCustomTheme, {
+        body: { name: "Test", config },
+        user: USER,
+      });
+      const res = resFor(createCustomTheme);
       await createCustomTheme(req, res);
 
       expect(res._getStatus()).toBe(400);
@@ -377,19 +457,20 @@ describe("Custom Theme Controller", () => {
     // ── duplicate name ──
 
     it("returns 409 when theme name already exists", async () => {
-      mockPrisma.customTheme.findFirst.mockResolvedValue(themeRow() as any);
+      mockPrisma.customTheme.findFirst.mockResolvedValue(themeRow());
 
-      const req = mockReq(
-        { name: "My Theme", config: validThemeConfig() },
-        {},
-        USER
-      );
-      const res = mockRes();
+      const req = reqFor(createCustomTheme, {
+        body: { name: "My Theme", config: validThemeConfig() },
+        user: USER,
+      });
+      const res = resFor(createCustomTheme);
       await createCustomTheme(req, res);
 
       expect(res._getStatus()).toBe(409);
       expect(res._getBody()).toEqual(
-        expect.objectContaining({ error: "A theme with this name already exists" })
+        expect.objectContaining({
+          error: "A theme with this name already exists",
+        })
       );
     });
 
@@ -398,32 +479,32 @@ describe("Custom Theme Controller", () => {
     it("creates theme and returns 201", async () => {
       mockPrisma.customTheme.findFirst.mockResolvedValue(null);
       const created = themeRow({ name: "New Theme" });
-      mockPrisma.customTheme.create.mockResolvedValue(created as any);
+      mockPrisma.customTheme.create.mockResolvedValue(created);
 
-      const req = mockReq(
-        { name: "New Theme", config: validThemeConfig() },
-        {},
-        USER
-      );
-      const res = mockRes();
+      const req = reqFor(createCustomTheme, {
+        body: { name: "New Theme", config: validThemeConfig() },
+        user: USER,
+      });
+      const res = resFor(createCustomTheme);
       await createCustomTheme(req, res);
 
       expect(res._getStatus()).toBe(201);
-      expect(res._getBody()).toEqual(expect.objectContaining({ theme: created }));
+      expect(res._getBody()).toEqual(
+        expect.objectContaining({ theme: created })
+      );
     });
 
-    it("returns 500 on database error", async () => {
+    it("a failure reaches the error handler: database error", async () => {
       mockPrisma.customTheme.findFirst.mockRejectedValue(new Error("DB fail"));
 
-      const req = mockReq(
-        { name: "Test", config: validThemeConfig() },
-        {},
-        USER
-      );
-      const res = mockRes();
-      await createCustomTheme(req, res);
+      const req = reqFor(createCustomTheme, {
+        body: { name: "Test", config: validThemeConfig() },
+        user: USER,
+      });
+      const res = resFor(createCustomTheme);
+      await expect(createCustomTheme(req, res)).rejects.toThrow("DB fail");
 
-      expect(res._getStatus()).toBe(500);
+      expect(res.json).not.toHaveBeenCalled();
     });
   });
 
@@ -431,15 +512,22 @@ describe("Custom Theme Controller", () => {
 
   describe("updateCustomTheme", () => {
     it("returns 401 when no user", async () => {
-      const req = mockReq({ name: "Updated" }, { id: "1" });
-      const res = mockRes();
-      await updateCustomTheme(req, res);
+      const req = reqFor(updateCustomTheme, {
+        body: { name: "Updated" },
+        params: { id: "1" },
+      });
+      const res = resFor(updateCustomTheme);
+      await authenticated(updateCustomTheme)(req, res, vi.fn());
       expect(res._getStatus()).toBe(401);
     });
 
     it("returns 400 for invalid ID", async () => {
-      const req = mockReq({ name: "Updated" }, { id: "abc" }, USER);
-      const res = mockRes();
+      const req = reqFor(updateCustomTheme, {
+        body: { name: "Updated" },
+        params: { id: "abc" },
+        user: USER,
+      });
+      const res = resFor(updateCustomTheme);
       await updateCustomTheme(req, res);
 
       expect(res._getStatus()).toBe(400);
@@ -451,18 +539,26 @@ describe("Custom Theme Controller", () => {
     it("returns 404 when theme not found", async () => {
       mockPrisma.customTheme.findFirst.mockResolvedValue(null);
 
-      const req = mockReq({ name: "Updated" }, { id: "999" }, USER);
-      const res = mockRes();
+      const req = reqFor(updateCustomTheme, {
+        body: { name: "Updated" },
+        params: { id: "999" },
+        user: USER,
+      });
+      const res = resFor(updateCustomTheme);
       await updateCustomTheme(req, res);
 
       expect(res._getStatus()).toBe(404);
     });
 
     it("returns 400 when name is empty string", async () => {
-      mockPrisma.customTheme.findFirst.mockResolvedValue(themeRow() as any);
+      mockPrisma.customTheme.findFirst.mockResolvedValue(themeRow());
 
-      const req = mockReq({ name: "" }, { id: "1" }, USER);
-      const res = mockRes();
+      const req = reqFor(updateCustomTheme, {
+        body: { name: "" },
+        params: { id: "1" },
+        user: USER,
+      });
+      const res = resFor(updateCustomTheme);
       await updateCustomTheme(req, res);
 
       expect(res._getStatus()).toBe(400);
@@ -472,16 +568,22 @@ describe("Custom Theme Controller", () => {
     });
 
     it("returns 400 when name exceeds 50 characters", async () => {
-      mockPrisma.customTheme.findFirst.mockResolvedValue(themeRow() as any);
+      mockPrisma.customTheme.findFirst.mockResolvedValue(themeRow());
 
       const longName = "B".repeat(51);
-      const req = mockReq({ name: longName }, { id: "1" }, USER);
-      const res = mockRes();
+      const req = reqFor(updateCustomTheme, {
+        body: { name: longName },
+        params: { id: "1" },
+        user: USER,
+      });
+      const res = resFor(updateCustomTheme);
       await updateCustomTheme(req, res);
 
       expect(res._getStatus()).toBe(400);
       expect(res._getBody()).toEqual(
-        expect.objectContaining({ error: "Theme name must be 50 characters or less" })
+        expect.objectContaining({
+          error: "Theme name must be 50 characters or less",
+        })
       );
     });
 
@@ -489,22 +591,30 @@ describe("Custom Theme Controller", () => {
       // First findFirst returns the current theme (exists check)
       // Second findFirst returns a different theme with the same name (duplicate check)
       mockPrisma.customTheme.findFirst
-        .mockResolvedValueOnce(themeRow({ id: 1 }) as any)
-        .mockResolvedValueOnce(themeRow({ id: 2, name: "Taken Name" }) as any);
+        .mockResolvedValueOnce(themeRow({ id: 1 }))
+        .mockResolvedValueOnce(themeRow({ id: 2, name: "Taken Name" }));
 
-      const req = mockReq({ name: "Taken Name" }, { id: "1" }, USER);
-      const res = mockRes();
+      const req = reqFor(updateCustomTheme, {
+        body: { name: "Taken Name" },
+        params: { id: "1" },
+        user: USER,
+      });
+      const res = resFor(updateCustomTheme);
       await updateCustomTheme(req, res);
 
       expect(res._getStatus()).toBe(409);
     });
 
     it("returns 400 for invalid config", async () => {
-      mockPrisma.customTheme.findFirst.mockResolvedValue(themeRow() as any);
+      mockPrisma.customTheme.findFirst.mockResolvedValue(themeRow());
 
       const config = { ...validThemeConfig(), mode: "invalid" };
-      const req = mockReq({ config }, { id: "1" }, USER);
-      const res = mockRes();
+      const req = reqFor(updateCustomTheme, {
+        body: malformed({ config }),
+        params: { id: "1" },
+        user: USER,
+      });
+      const res = resFor(updateCustomTheme);
       await updateCustomTheme(req, res);
 
       expect(res._getStatus()).toBe(400);
@@ -516,65 +626,83 @@ describe("Custom Theme Controller", () => {
     it("updates name only", async () => {
       const existing = themeRow();
       mockPrisma.customTheme.findFirst
-        .mockResolvedValueOnce(existing as any)
+        .mockResolvedValueOnce(existing)
         .mockResolvedValueOnce(null); // no duplicate
       const updated = themeRow({ name: "Renamed" });
-      mockPrisma.customTheme.update.mockResolvedValue(updated as any);
+      mockPrisma.customTheme.update.mockResolvedValue(updated);
 
-      const req = mockReq({ name: "Renamed" }, { id: "1" }, USER);
-      const res = mockRes();
+      const req = reqFor(updateCustomTheme, {
+        body: { name: "Renamed" },
+        params: { id: "1" },
+        user: USER,
+      });
+      const res = resFor(updateCustomTheme);
       await updateCustomTheme(req, res);
 
       expect(res._getStatus()).toBe(200);
-      expect(res._getBody()).toEqual(expect.objectContaining({ theme: updated }));
+      expect(res._getBody()).toEqual(
+        expect.objectContaining({ theme: updated })
+      );
     });
 
     it("updates config only", async () => {
       const existing = themeRow();
-      mockPrisma.customTheme.findFirst.mockResolvedValue(existing as any);
+      mockPrisma.customTheme.findFirst.mockResolvedValue(existing);
       const newConfig = validThemeConfig();
       newConfig.mode = "light";
       const updated = themeRow({ config: newConfig });
-      mockPrisma.customTheme.update.mockResolvedValue(updated as any);
+      mockPrisma.customTheme.update.mockResolvedValue(updated);
 
-      const req = mockReq({ config: newConfig }, { id: "1" }, USER);
-      const res = mockRes();
+      const req = reqFor(updateCustomTheme, {
+        body: { config: newConfig },
+        params: { id: "1" },
+        user: USER,
+      });
+      const res = resFor(updateCustomTheme);
       await updateCustomTheme(req, res);
 
       expect(res._getStatus()).toBe(200);
-      expect(res._getBody()).toEqual(expect.objectContaining({ theme: updated }));
+      expect(res._getBody()).toEqual(
+        expect.objectContaining({ theme: updated })
+      );
     });
 
     it("updates both name and config", async () => {
       const existing = themeRow();
       mockPrisma.customTheme.findFirst
-        .mockResolvedValueOnce(existing as any)
+        .mockResolvedValueOnce(existing)
         .mockResolvedValueOnce(null); // no duplicate
       const newConfig = validThemeConfig();
       newConfig.mode = "light";
       const updated = themeRow({ name: "New Name", config: newConfig });
-      mockPrisma.customTheme.update.mockResolvedValue(updated as any);
+      mockPrisma.customTheme.update.mockResolvedValue(updated);
 
-      const req = mockReq(
-        { name: "New Name", config: newConfig },
-        { id: "1" },
-        USER
-      );
-      const res = mockRes();
+      const req = reqFor(updateCustomTheme, {
+        body: { name: "New Name", config: newConfig },
+        params: { id: "1" },
+        user: USER,
+      });
+      const res = resFor(updateCustomTheme);
       await updateCustomTheme(req, res);
 
       expect(res._getStatus()).toBe(200);
-      expect(res._getBody()).toEqual(expect.objectContaining({ theme: updated }));
+      expect(res._getBody()).toEqual(
+        expect.objectContaining({ theme: updated })
+      );
     });
 
-    it("returns 500 on database error", async () => {
+    it("a failure reaches the error handler: database error", async () => {
       mockPrisma.customTheme.findFirst.mockRejectedValue(new Error("DB fail"));
 
-      const req = mockReq({ name: "Test" }, { id: "1" }, USER);
-      const res = mockRes();
-      await updateCustomTheme(req, res);
+      const req = reqFor(updateCustomTheme, {
+        body: { name: "Test" },
+        params: { id: "1" },
+        user: USER,
+      });
+      const res = resFor(updateCustomTheme);
+      await expect(updateCustomTheme(req, res)).rejects.toThrow("DB fail");
 
-      expect(res._getStatus()).toBe(500);
+      expect(res.json).not.toHaveBeenCalled();
     });
   });
 
@@ -582,15 +710,18 @@ describe("Custom Theme Controller", () => {
 
   describe("deleteCustomTheme", () => {
     it("returns 401 when no user", async () => {
-      const req = mockReq({}, { id: "1" });
-      const res = mockRes();
-      await deleteCustomTheme(req, res);
+      const req = reqFor(deleteCustomTheme, { params: { id: "1" } });
+      const res = resFor(deleteCustomTheme);
+      await authenticated(deleteCustomTheme)(req, res, vi.fn());
       expect(res._getStatus()).toBe(401);
     });
 
     it("returns 400 for invalid ID", async () => {
-      const req = mockReq({}, { id: "abc" }, USER);
-      const res = mockRes();
+      const req = reqFor(deleteCustomTheme, {
+        params: { id: "abc" },
+        user: USER,
+      });
+      const res = resFor(deleteCustomTheme);
       await deleteCustomTheme(req, res);
 
       expect(res._getStatus()).toBe(400);
@@ -602,19 +733,51 @@ describe("Custom Theme Controller", () => {
     it("returns 404 when theme not found", async () => {
       mockPrisma.customTheme.findFirst.mockResolvedValue(null);
 
-      const req = mockReq({}, { id: "999" }, USER);
-      const res = mockRes();
+      const req = reqFor(deleteCustomTheme, {
+        params: { id: "999" },
+        user: USER,
+      });
+      const res = resFor(deleteCustomTheme);
       await deleteCustomTheme(req, res);
 
       expect(res._getStatus()).toBe(404);
     });
 
-    it("deletes theme and returns success", async () => {
-      mockPrisma.customTheme.findFirst.mockResolvedValue(themeRow() as any);
-      mockPrisma.customTheme.delete.mockResolvedValue(themeRow() as any);
+    it("deleting the custom theme a user has selected sets their theme to null in the same write unit", async () => {
+      mockPrisma.customTheme.findFirst.mockResolvedValue(themeRow({ id: 5 }));
+      mockPrisma.customTheme.delete.mockResolvedValue(themeRow({ id: 5 }));
+      mockPrisma.user.updateMany.mockResolvedValue({ count: 1 });
 
-      const req = mockReq({}, { id: "1" }, USER);
-      const res = mockRes();
+      const req = reqFor(deleteCustomTheme, {
+        params: { id: "5" },
+        user: USER,
+      });
+      const res = resFor(deleteCustomTheme);
+      await deleteCustomTheme(req, res);
+
+      expect(res._getStatus()).toBe(200);
+      expect(mockDbWriteBatch).toHaveBeenCalledTimes(1);
+      const [label, ops] = must(mockDbWriteBatch.mock.calls[0], "batch call");
+      expect(label).toBe("theme.delete");
+      expect(ops).toHaveLength(2);
+      expect(mockPrisma.customTheme.delete).toHaveBeenCalledWith({
+        where: { id: 5 },
+      });
+      expect(mockPrisma.user.updateMany).toHaveBeenCalledWith({
+        where: { id: 1, theme: "custom-5" },
+        data: { theme: null },
+      });
+    });
+
+    it("deletes theme and returns success", async () => {
+      mockPrisma.customTheme.findFirst.mockResolvedValue(themeRow());
+      mockPrisma.customTheme.delete.mockResolvedValue(themeRow());
+
+      const req = reqFor(deleteCustomTheme, {
+        params: { id: "1" },
+        user: USER,
+      });
+      const res = resFor(deleteCustomTheme);
       await deleteCustomTheme(req, res);
 
       expect(res._getStatus()).toBe(200);
@@ -623,14 +786,17 @@ describe("Custom Theme Controller", () => {
       );
     });
 
-    it("returns 500 on database error", async () => {
+    it("a failure reaches the error handler: database error", async () => {
       mockPrisma.customTheme.findFirst.mockRejectedValue(new Error("DB fail"));
 
-      const req = mockReq({}, { id: "1" }, USER);
-      const res = mockRes();
-      await deleteCustomTheme(req, res);
+      const req = reqFor(deleteCustomTheme, {
+        params: { id: "1" },
+        user: USER,
+      });
+      const res = resFor(deleteCustomTheme);
+      await expect(deleteCustomTheme(req, res)).rejects.toThrow("DB fail");
 
-      expect(res._getStatus()).toBe(500);
+      expect(res.json).not.toHaveBeenCalled();
     });
   });
 
@@ -638,15 +804,18 @@ describe("Custom Theme Controller", () => {
 
   describe("duplicateCustomTheme", () => {
     it("returns 401 when no user", async () => {
-      const req = mockReq({}, { id: "1" });
-      const res = mockRes();
-      await duplicateCustomTheme(req, res);
+      const req = reqFor(duplicateCustomTheme, { params: { id: "1" } });
+      const res = resFor(duplicateCustomTheme);
+      await authenticated(duplicateCustomTheme)(req, res, vi.fn());
       expect(res._getStatus()).toBe(401);
     });
 
     it("returns 400 for invalid ID", async () => {
-      const req = mockReq({}, { id: "abc" }, USER);
-      const res = mockRes();
+      const req = reqFor(duplicateCustomTheme, {
+        params: { id: "abc" },
+        user: USER,
+      });
+      const res = resFor(duplicateCustomTheme);
       await duplicateCustomTheme(req, res);
 
       expect(res._getStatus()).toBe(400);
@@ -658,8 +827,11 @@ describe("Custom Theme Controller", () => {
     it("returns 404 when source theme not found", async () => {
       mockPrisma.customTheme.findFirst.mockResolvedValue(null);
 
-      const req = mockReq({}, { id: "999" }, USER);
-      const res = mockRes();
+      const req = reqFor(duplicateCustomTheme, {
+        params: { id: "999" },
+        user: USER,
+      });
+      const res = resFor(duplicateCustomTheme);
       await duplicateCustomTheme(req, res);
 
       expect(res._getStatus()).toBe(404);
@@ -670,13 +842,16 @@ describe("Custom Theme Controller", () => {
       // 1st findFirst: ownership check returns original
       // 2nd findFirst: while-loop name collision check returns null (no collision)
       mockPrisma.customTheme.findFirst
-        .mockResolvedValueOnce(original as any)
+        .mockResolvedValueOnce(original)
         .mockResolvedValueOnce(null);
       const duplicated = themeRow({ id: 2, name: "Cyberpunk (Copy)" });
-      mockPrisma.customTheme.create.mockResolvedValue(duplicated as any);
+      mockPrisma.customTheme.create.mockResolvedValue(duplicated);
 
-      const req = mockReq({}, { id: "1" }, USER);
-      const res = mockRes();
+      const req = reqFor(duplicateCustomTheme, {
+        params: { id: "1" },
+        user: USER,
+      });
+      const res = resFor(duplicateCustomTheme);
       await duplicateCustomTheme(req, res);
 
       expect(res._getStatus()).toBe(201);
@@ -685,7 +860,7 @@ describe("Custom Theme Controller", () => {
       );
       expect(mockPrisma.customTheme.create).toHaveBeenCalledWith(
         expect.objectContaining({
-          data: expect.objectContaining({ name: "Cyberpunk (Copy)" }),
+          data: objectContaining({ name: "Cyberpunk (Copy)" }),
         })
       );
     });
@@ -696,20 +871,23 @@ describe("Custom Theme Controller", () => {
       // 2nd findFirst: "(Copy)" exists → collision
       // 3rd findFirst: "(Copy 2)" doesn't exist → null
       mockPrisma.customTheme.findFirst
-        .mockResolvedValueOnce(original as any)
-        .mockResolvedValueOnce(themeRow({ id: 2, name: "Cyberpunk (Copy)" }) as any)
+        .mockResolvedValueOnce(original)
+        .mockResolvedValueOnce(themeRow({ id: 2, name: "Cyberpunk (Copy)" }))
         .mockResolvedValueOnce(null);
       const duplicated = themeRow({ id: 3, name: "Cyberpunk (Copy 2)" });
-      mockPrisma.customTheme.create.mockResolvedValue(duplicated as any);
+      mockPrisma.customTheme.create.mockResolvedValue(duplicated);
 
-      const req = mockReq({}, { id: "1" }, USER);
-      const res = mockRes();
+      const req = reqFor(duplicateCustomTheme, {
+        params: { id: "1" },
+        user: USER,
+      });
+      const res = resFor(duplicateCustomTheme);
       await duplicateCustomTheme(req, res);
 
       expect(res._getStatus()).toBe(201);
       expect(mockPrisma.customTheme.create).toHaveBeenCalledWith(
         expect.objectContaining({
-          data: expect.objectContaining({ name: "Cyberpunk (Copy 2)" }),
+          data: objectContaining({ name: "Cyberpunk (Copy 2)" }),
         })
       );
     });
@@ -721,33 +899,39 @@ describe("Custom Theme Controller", () => {
       // 3rd findFirst: "(Copy 2)" exists → collision
       // 4th findFirst: "(Copy 3)" doesn't exist → null
       mockPrisma.customTheme.findFirst
-        .mockResolvedValueOnce(original as any)
-        .mockResolvedValueOnce(themeRow({ id: 2, name: "Cyberpunk (Copy)" }) as any)
-        .mockResolvedValueOnce(themeRow({ id: 3, name: "Cyberpunk (Copy 2)" }) as any)
+        .mockResolvedValueOnce(original)
+        .mockResolvedValueOnce(themeRow({ id: 2, name: "Cyberpunk (Copy)" }))
+        .mockResolvedValueOnce(themeRow({ id: 3, name: "Cyberpunk (Copy 2)" }))
         .mockResolvedValueOnce(null);
       const duplicated = themeRow({ id: 4, name: "Cyberpunk (Copy 3)" });
-      mockPrisma.customTheme.create.mockResolvedValue(duplicated as any);
+      mockPrisma.customTheme.create.mockResolvedValue(duplicated);
 
-      const req = mockReq({}, { id: "1" }, USER);
-      const res = mockRes();
+      const req = reqFor(duplicateCustomTheme, {
+        params: { id: "1" },
+        user: USER,
+      });
+      const res = resFor(duplicateCustomTheme);
       await duplicateCustomTheme(req, res);
 
       expect(res._getStatus()).toBe(201);
       expect(mockPrisma.customTheme.create).toHaveBeenCalledWith(
         expect.objectContaining({
-          data: expect.objectContaining({ name: "Cyberpunk (Copy 3)" }),
+          data: objectContaining({ name: "Cyberpunk (Copy 3)" }),
         })
       );
     });
 
-    it("returns 500 on database error", async () => {
+    it("a failure reaches the error handler: database error", async () => {
       mockPrisma.customTheme.findFirst.mockRejectedValue(new Error("DB fail"));
 
-      const req = mockReq({}, { id: "1" }, USER);
-      const res = mockRes();
-      await duplicateCustomTheme(req, res);
+      const req = reqFor(duplicateCustomTheme, {
+        params: { id: "1" },
+        user: USER,
+      });
+      const res = resFor(duplicateCustomTheme);
+      await expect(duplicateCustomTheme(req, res)).rejects.toThrow("DB fail");
 
-      expect(res._getStatus()).toBe(500);
+      expect(res.json).not.toHaveBeenCalled();
     });
   });
 });

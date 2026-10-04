@@ -1,20 +1,33 @@
 /**
  * Admin API — groups, permissions, recovery keys, password reset.
  */
-import { apiGet, apiPost, apiPut, apiDelete } from "./client";
+import type {
+  CreateUserGroupBody,
+  CreateUserGroupResponse,
+  GetAllUserGroupsResponse,
+  GetCurrentUserGroupsResponse,
+  GetMyPermissionsResponse,
+  GetRecoveryKeyResponse,
+  GetUserGroupMembershipsResponse,
+  GetUserGroupResponse,
+  RegenerateRecoveryKeyResponse,
+  UpdateUserGroupBody,
+  UpdateUserGroupResponse,
+} from "@peek/shared-types";
+import { apiDelete, apiGet, apiPost, apiPut } from "./client";
 
 // ── User Groups (admin management) ────────────────────────────────────
 
-export const getGroups = () => apiGet<{ groups: unknown[] }>("/groups");
+export const getGroups = () => apiGet<GetAllUserGroupsResponse>("/groups");
 
 export const getGroup = (groupId: string) =>
-  apiGet<{ group: unknown }>(`/groups/${groupId}`);
+  apiGet<GetUserGroupResponse>(`/groups/${groupId}`);
 
-export const createGroup = (data: Record<string, unknown>) =>
-  apiPost<{ group: unknown }>("/groups", data);
+export const createGroup = (data: CreateUserGroupBody) =>
+  apiPost<CreateUserGroupResponse>("/groups", data);
 
-export const updateGroup = (groupId: string, data: Record<string, unknown>) =>
-  apiPut<{ group: unknown }>(`/groups/${groupId}`, data);
+export const updateGroup = (groupId: string, data: UpdateUserGroupBody) =>
+  apiPut<UpdateUserGroupResponse>(`/groups/${groupId}`, data);
 
 export const deleteGroup = (groupId: string) =>
   apiDelete<{ success: boolean; message: string }>(`/groups/${groupId}`);
@@ -26,38 +39,54 @@ export const removeGroupMember = (groupId: string, userId: string) =>
   apiDelete(`/groups/${groupId}/members/${userId}`);
 
 export const getUserGroupMemberships = (userId: number) =>
-  apiGet<{ groups: unknown[] }>(`/user/${userId}/groups`);
+  apiGet<GetUserGroupMembershipsResponse>(`/user/${userId}/groups`);
 
 export const getMyGroups = () =>
-  apiGet<{ groups: unknown[] }>("/groups/user/mine");
+  apiGet<GetCurrentUserGroupsResponse>("/groups/user/mine");
 
 // ── Permissions ────────────────────────────────────────────────────────
 
-export const getMyPermissions = () =>
-  apiGet<{ permissions: Record<string, unknown> }>("/user/permissions");
+export const getMyPermissions = (signal?: AbortSignal) =>
+  apiGet<GetMyPermissionsResponse>("/user/permissions", signal);
 
 export const getUserPermissions = (userId: number) =>
-  apiGet<{ permissions: Record<string, unknown> }>(`/user/${userId}/permissions`);
+  apiGet<GetMyPermissionsResponse>(`/user/${userId}/permissions`);
 
-export const updateUserPermissionOverrides = (userId: number, overrides: Record<string, unknown>) =>
-  apiPut(`/user/${userId}/permissions`, overrides);
+export const updateUserPermissionOverrides = (
+  userId: number,
+  overrides: Record<string, unknown>
+) => apiPut(`/user/${userId}/permissions`, overrides);
 
 // ── Recovery Key & Password Reset ─────────────────────────────────────
 
 export const getRecoveryKey = () =>
-  apiGet<{ recoveryKey: string | null }>("/user/recovery-key");
+  apiGet<GetRecoveryKeyResponse>("/user/recovery-key");
 
-export const regenerateRecoveryKey = () =>
-  apiPost<{ recoveryKey: string }>("/user/recovery-key/regenerate");
+export const regenerateRecoveryKey = (currentPassword: string) =>
+  apiPost<RegenerateRecoveryKeyResponse>("/user/recovery-key/regenerate", {
+    currentPassword,
+  });
 
 export const forgotPasswordInit = (username: string) =>
-  apiPost<{ hasRecoveryKey: boolean }>("/auth/forgot-password/init", { username });
+  apiPost<{ hasRecoveryKey: boolean }>("/auth/forgot-password/init", {
+    username,
+  });
 
-export const forgotPasswordReset = (username: string, recoveryKey: string, newPassword: string) =>
-  apiPost<{ success: boolean }>("/auth/forgot-password/reset", { username, recoveryKey, newPassword });
+export const forgotPasswordReset = (
+  username: string,
+  recoveryKey: string,
+  newPassword: string
+) =>
+  apiPost<{ success: boolean }>("/auth/forgot-password/reset", {
+    username,
+    recoveryKey,
+    newPassword,
+  });
 
 export const adminResetPassword = (userId: number, newPassword: string) =>
-  apiPost<{ success: boolean }>(`/user/${userId}/reset-password`, { newPassword });
+  apiPost<{ success: boolean }>(`/user/${userId}/reset-password`, {
+    newPassword,
+  });
 
 export const adminRegenerateRecoveryKey = (userId: number) =>
   apiPost<{ recoveryKey: string }>(`/user/${userId}/regenerate-recovery-key`);

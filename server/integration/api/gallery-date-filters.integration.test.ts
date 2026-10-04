@@ -1,6 +1,25 @@
-import { describe, it, expect, beforeAll } from "vitest";
-import { adminClient } from "../helpers/testClient.js";
+import { beforeAll, describe, expect, it } from "vitest";
+import { must } from "../../tests/helpers/must.js";
 import { TEST_ADMIN } from "../fixtures/testEntities.js";
+import { adminClient, findTestInstanceId } from "../helpers/testClient.js";
+
+const CHICAGO = "America/Chicago";
+
+/** The calendar day an instant falls on in a zone, as YYYY-MM-DD */
+function localDay(iso: string, timeZone: string): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date(iso));
+  const part = (type: string) =>
+    must(
+      parts.find((p) => p.type === type),
+      type
+    ).value;
+  return `${part("year")}-${part("month")}-${part("day")}`;
+}
 
 /**
  * Gallery Date Filters Integration Tests
@@ -19,6 +38,7 @@ interface FindGalleriesResponse {
   findGalleries: {
     galleries: Array<{
       id: string;
+      instanceId?: string;
       title?: string;
       date?: string | null;
       created_at?: string;
@@ -35,15 +55,18 @@ describe("Gallery Date Filters", () => {
 
   describe("date filter (gallery date)", () => {
     it("filters galleries by date GREATER_THAN", async () => {
-      const response = await adminClient.post<FindGalleriesResponse>("/api/library/galleries", {
-        filter: { per_page: 50 },
-        gallery_filter: {
-          date: {
-            value: "2020-01-01",
-            modifier: "GREATER_THAN",
+      const response = await adminClient.post<FindGalleriesResponse>(
+        "/api/library/galleries",
+        {
+          filter: { per_page: 50 },
+          gallery_filter: {
+            date: {
+              value: "2020-01-01",
+              modifier: "GREATER_THAN",
+            },
           },
-        },
-      });
+        }
+      );
 
       expect(response.ok).toBe(true);
       expect(response.data.findGalleries).toBeDefined();
@@ -51,22 +74,24 @@ describe("Gallery Date Filters", () => {
 
       // All returned galleries should have a date > 2020-01-01
       for (const gallery of response.data.findGalleries.galleries) {
-        if (gallery.date) {
-          expect(gallery.date > "2020-01-01").toBe(true);
-        }
+        // The filter matches only dated gallerys
+        expect(must(gallery.date, "gallery.date") > "2020-01-01").toBe(true);
       }
     });
 
     it("filters galleries by date LESS_THAN", async () => {
-      const response = await adminClient.post<FindGalleriesResponse>("/api/library/galleries", {
-        filter: { per_page: 50 },
-        gallery_filter: {
-          date: {
-            value: "2025-01-01",
-            modifier: "LESS_THAN",
+      const response = await adminClient.post<FindGalleriesResponse>(
+        "/api/library/galleries",
+        {
+          filter: { per_page: 50 },
+          gallery_filter: {
+            date: {
+              value: "2025-01-01",
+              modifier: "LESS_THAN",
+            },
           },
-        },
-      });
+        }
+      );
 
       expect(response.ok).toBe(true);
       expect(response.data.findGalleries).toBeDefined();
@@ -74,16 +99,19 @@ describe("Gallery Date Filters", () => {
     });
 
     it("filters galleries by date BETWEEN", async () => {
-      const response = await adminClient.post<FindGalleriesResponse>("/api/library/galleries", {
-        filter: { per_page: 50 },
-        gallery_filter: {
-          date: {
-            value: "2022-01-01",
-            value2: "2022-12-31",
-            modifier: "BETWEEN",
+      const response = await adminClient.post<FindGalleriesResponse>(
+        "/api/library/galleries",
+        {
+          filter: { per_page: 50 },
+          gallery_filter: {
+            date: {
+              value: "2022-01-01",
+              value2: "2022-12-31",
+              modifier: "BETWEEN",
+            },
           },
-        },
-      });
+        }
+      );
 
       expect(response.ok).toBe(true);
       expect(response.data.findGalleries).toBeDefined();
@@ -91,26 +119,26 @@ describe("Gallery Date Filters", () => {
 
       // All returned galleries should have a date within the range
       for (const gallery of response.data.findGalleries.galleries) {
-        expect(gallery.date).not.toBeNull();
-        expect(gallery.date).toBeDefined();
-        if (gallery.date) {
-          expect(gallery.date >= "2022-01-01").toBe(true);
-          expect(gallery.date <= "2022-12-31").toBe(true);
-        }
+        const date = must(gallery.date, "gallery.date");
+        expect(date >= "2022-01-01").toBe(true);
+        expect(date <= "2022-12-31").toBe(true);
       }
     });
 
     it("filters galleries by date NOT_BETWEEN", async () => {
-      const response = await adminClient.post<FindGalleriesResponse>("/api/library/galleries", {
-        filter: { per_page: 50 },
-        gallery_filter: {
-          date: {
-            value: "2022-01-01",
-            value2: "2022-12-31",
-            modifier: "NOT_BETWEEN",
+      const response = await adminClient.post<FindGalleriesResponse>(
+        "/api/library/galleries",
+        {
+          filter: { per_page: 50 },
+          gallery_filter: {
+            date: {
+              value: "2022-01-01",
+              value2: "2022-12-31",
+              modifier: "NOT_BETWEEN",
+            },
           },
-        },
-      });
+        }
+      );
 
       expect(response.ok).toBe(true);
       expect(response.data.findGalleries).toBeDefined();
@@ -118,14 +146,17 @@ describe("Gallery Date Filters", () => {
     });
 
     it("filters galleries by date IS_NULL", async () => {
-      const response = await adminClient.post<FindGalleriesResponse>("/api/library/galleries", {
-        filter: { per_page: 50 },
-        gallery_filter: {
-          date: {
-            modifier: "IS_NULL",
+      const response = await adminClient.post<FindGalleriesResponse>(
+        "/api/library/galleries",
+        {
+          filter: { per_page: 50 },
+          gallery_filter: {
+            date: {
+              modifier: "IS_NULL",
+            },
           },
-        },
-      });
+        }
+      );
 
       expect(response.ok).toBe(true);
       expect(response.data.findGalleries).toBeDefined();
@@ -137,14 +168,17 @@ describe("Gallery Date Filters", () => {
     });
 
     it("filters galleries by date NOT_NULL", async () => {
-      const response = await adminClient.post<FindGalleriesResponse>("/api/library/galleries", {
-        filter: { per_page: 50 },
-        gallery_filter: {
-          date: {
-            modifier: "NOT_NULL",
+      const response = await adminClient.post<FindGalleriesResponse>(
+        "/api/library/galleries",
+        {
+          filter: { per_page: 50 },
+          gallery_filter: {
+            date: {
+              modifier: "NOT_NULL",
+            },
           },
-        },
-      });
+        }
+      );
 
       expect(response.ok).toBe(true);
       expect(response.data.findGalleries).toBeDefined();
@@ -179,7 +213,9 @@ describe("Gallery Date Filters", () => {
 
       // If there are no galleries with null dates, skip this test
       if (galleriesWithNullDates === 0) {
-        console.log("Skipping NULL date exclusion test - no galleries with NULL dates in test data");
+        console.log(
+          "Skipping NULL date exclusion test - no galleries with NULL dates in test data"
+        );
         return;
       }
 
@@ -215,15 +251,18 @@ describe("Gallery Date Filters", () => {
       oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
       const dateStr = oneYearAgo.toISOString().split("T")[0];
 
-      const response = await adminClient.post<FindGalleriesResponse>("/api/library/galleries", {
-        filter: { per_page: 50 },
-        gallery_filter: {
-          created_at: {
-            value: dateStr,
-            modifier: "GREATER_THAN",
+      const response = await adminClient.post<FindGalleriesResponse>(
+        "/api/library/galleries",
+        {
+          filter: { per_page: 50 },
+          gallery_filter: {
+            created_at: {
+              value: dateStr,
+              modifier: "GREATER_THAN",
+            },
           },
-        },
-      });
+        }
+      );
 
       expect(response.ok).toBe(true);
       expect(response.data.findGalleries).toBeDefined();
@@ -235,16 +274,19 @@ describe("Gallery Date Filters", () => {
       sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
       const today = new Date();
 
-      const response = await adminClient.post<FindGalleriesResponse>("/api/library/galleries", {
-        filter: { per_page: 50 },
-        gallery_filter: {
-          created_at: {
-            value: sixMonthsAgo.toISOString().split("T")[0],
-            value2: today.toISOString().split("T")[0],
-            modifier: "BETWEEN",
+      const response = await adminClient.post<FindGalleriesResponse>(
+        "/api/library/galleries",
+        {
+          filter: { per_page: 50 },
+          gallery_filter: {
+            created_at: {
+              value: sixMonthsAgo.toISOString().split("T")[0],
+              value2: today.toISOString().split("T")[0],
+              modifier: "BETWEEN",
+            },
           },
-        },
-      });
+        }
+      );
 
       expect(response.ok).toBe(true);
       expect(response.data.findGalleries).toBeDefined();
@@ -257,15 +299,18 @@ describe("Gallery Date Filters", () => {
       oneMonthAgo.setMonth(oneMonthAgo.getMonth() - 1);
       const dateStr = oneMonthAgo.toISOString().split("T")[0];
 
-      const response = await adminClient.post<FindGalleriesResponse>("/api/library/galleries", {
-        filter: { per_page: 50 },
-        gallery_filter: {
-          updated_at: {
-            value: dateStr,
-            modifier: "GREATER_THAN",
+      const response = await adminClient.post<FindGalleriesResponse>(
+        "/api/library/galleries",
+        {
+          filter: { per_page: 50 },
+          gallery_filter: {
+            updated_at: {
+              value: dateStr,
+              modifier: "GREATER_THAN",
+            },
           },
-        },
-      });
+        }
+      );
 
       expect(response.ok).toBe(true);
       expect(response.data.findGalleries).toBeDefined();
@@ -276,16 +321,19 @@ describe("Gallery Date Filters", () => {
       threeMonthsAgo.setMonth(threeMonthsAgo.getMonth() - 3);
       const today = new Date();
 
-      const response = await adminClient.post<FindGalleriesResponse>("/api/library/galleries", {
-        filter: { per_page: 50 },
-        gallery_filter: {
-          updated_at: {
-            value: threeMonthsAgo.toISOString().split("T")[0],
-            value2: today.toISOString().split("T")[0],
-            modifier: "BETWEEN",
+      const response = await adminClient.post<FindGalleriesResponse>(
+        "/api/library/galleries",
+        {
+          filter: { per_page: 50 },
+          gallery_filter: {
+            updated_at: {
+              value: threeMonthsAgo.toISOString().split("T")[0],
+              value2: today.toISOString().split("T")[0],
+              modifier: "BETWEEN",
+            },
           },
-        },
-      });
+        }
+      );
 
       expect(response.ok).toBe(true);
       expect(response.data.findGalleries).toBeDefined();
@@ -294,22 +342,71 @@ describe("Gallery Date Filters", () => {
 
   describe("combined date filters", () => {
     it("can combine date with created_at filter", async () => {
-      const response = await adminClient.post<FindGalleriesResponse>("/api/library/galleries", {
-        filter: { per_page: 50 },
-        gallery_filter: {
-          date: {
-            value: "2021-01-01",
-            modifier: "GREATER_THAN",
+      const response = await adminClient.post<FindGalleriesResponse>(
+        "/api/library/galleries",
+        {
+          filter: { per_page: 50 },
+          gallery_filter: {
+            date: {
+              value: "2021-01-01",
+              modifier: "GREATER_THAN",
+            },
+            created_at: {
+              value: "2022-01-01",
+              modifier: "GREATER_THAN",
+            },
           },
-          created_at: {
-            value: "2022-01-01",
-            modifier: "GREATER_THAN",
-          },
-        },
-      });
+        }
+      );
 
       expect(response.ok).toBe(true);
       expect(response.data.findGalleries).toBeDefined();
     });
+  });
+});
+
+/**
+ * One day rule (item 43): created and updated days are the viewer's, in the
+ * zone the request names (`X-Peek-Time-Zone`), and BETWEEN includes both ends
+ */
+describe("Gallery date filters: the viewer's day", () => {
+  beforeAll(async () => {
+    await adminClient.login(TEST_ADMIN.username, TEST_ADMIN.password);
+  });
+
+  it("a same-day created range lists the galleries created that local day", async () => {
+    const instanceId = await findTestInstanceId();
+    const newest = await adminClient.post<FindGalleriesResponse>(
+      "/api/library/galleries",
+      { filter: { per_page: 250, sort: "created_at", direction: "DESC" } }
+    );
+    expect(newest.ok, JSON.stringify(newest.data)).toBe(true);
+    const item = must(
+      newest.data.findGalleries.galleries.find(
+        (x) => x.instanceId === instanceId && x.created_at
+      ),
+      "a gallery with a created time on the test instance"
+    );
+    const ref = `${item.id}:${instanceId}`;
+    const day = localDay(must(item.created_at, "created_at"), CHICAGO);
+
+    const response = await adminClient.post<FindGalleriesResponse>(
+      "/api/library/galleries",
+      {
+        filter: { per_page: 10 },
+        gallery_filter: {
+          ids: { value: [ref], modifier: "INCLUDES" },
+          created_at: { modifier: "BETWEEN", value: day, value2: day },
+        },
+      },
+      { headers: { "X-Peek-Time-Zone": CHICAGO } }
+    );
+
+    expect(response.ok, JSON.stringify(response.data)).toBe(true);
+    expect(
+      response.data.findGalleries.galleries.map(
+        (x) => `${x.id}:${x.instanceId ?? ""}`
+      )
+    ).toEqual([ref]);
   });
 });

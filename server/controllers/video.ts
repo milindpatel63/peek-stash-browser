@@ -1,115 +1,328 @@
+import type {
+  ExternalPlayerLinkRequest,
+  ExternalPlayerLinkResponse,
+} from "@peek/shared-types/api/video.js";
 import type { Response } from "express";
-import { stashInstanceManager } from "../services/StashInstanceManager.js";
-import type { TypedRequest } from "../types/api/express.js";
+import { NotFoundError } from "../middleware/errorHandler.js";
+import prisma from "../prisma/singleton.js";
+import { canUserAccessEntity } from "../services/EntityAccessService.js";
+import {
+  type StashCredentials,
+  UnknownInstanceError,
+  stashInstanceManager,
+} from "../services/StashInstanceManager.js";
+import type { ApiErrorResponse } from "../types/api/common.js";
+import type { TypedAuthRequest, TypedResponse } from "../types/api/express.js";
+import { privateCacheControl } from "../utils/cacheControl.js";
+import { redactUrl } from "../utils/logRedaction.js";
 import { logger } from "../utils/logger.js";
-import { pipeResponseToClient } from "../utils/streamProxy.js";
+import {
+  INSTANCE_ID_REQUIRED,
+  canUserLoadMedia,
+  isValidInstanceId,
+} from "../utils/mediaAccess.js";
+import {
+  INSTANCE_ID_PATTERN,
+  SCENE_ID_PATTERN,
+  isAllowedCaption,
+  isAllowedStreamPath,
+  pickStreamQuery,
+} from "../utils/stashMediaPath.js";
+import {
+  STREAM_LINK_TTL_SECONDS,
+  type StreamLinkClaims,
+  buildStreamLinkPath,
+  getStreamLinkKey,
+  signStreamLink,
+} from "../utils/streamLink.js";
+import {
+  HEAD_PROBE_RANGE,
+  fetchFromStash,
+  headAnswer,
+  pipeResponseToClient,
+  readStashText,
+  stashFailure,
+  stashFetchError,
+} from "../utils/streamProxy.js";
+import { videoMimeType } from "../utils/videoMimeType.js";
+
+/** How long Stash may take to answer, and to go quiet mid-body, on a stream. */
+const STREAM_HEADERS_TIMEOUT_MS = 60_000;
+const STREAM_IDLE_TIMEOUT_MS = 60_000;
+/** A caption is answered and read whole within this. */
+const CAPTION_TIMEOUT_MS = 15_000;
 
 // Track active upstream stream controllers per scene to ensure
 // only one proxied stream is active at any time.
 const activeStreamControllers = new Map<string, AbortController>();
 /**
- * Get credentials for a specific Stash instance
- * @param instanceId - Optional instance ID. If not provided, uses default instance.
- * @returns Object with baseUrl and apiKey
+ * Run a Stash fetch or read. A failure is thrown as the error the central
+ * handler answers (502, or 504 for a timeout); undefined when the client's
+ * own close ended it, which needs no answer.
  */
-function getInstanceCredentials(instanceId?: string): { baseUrl: string; apiKey: string } {
-  // Treat "default" the same as undefined - use the default instance
-  if (instanceId && instanceId !== "default") {
-    const instance = stashInstanceManager.get(instanceId);
-    if (!instance) {
-      throw new Error(`Stash instance not found: ${instanceId}`);
-    }
-    return {
-      baseUrl: stashInstanceManager.getBaseUrl(instanceId),
-      apiKey: stashInstanceManager.getApiKey(instanceId),
-    };
+async function fromStash<T>(
+  res: Response,
+  work: () => Promise<T>
+): Promise<T | undefined> {
+  try {
+    return await work();
+  } catch (error) {
+    const mapped = stashFetchError(error, res);
+    if (mapped) throw mapped;
+    return undefined;
   }
-  // Default instance
-  return {
-    baseUrl: stashInstanceManager.getBaseUrl(),
-    apiKey: stashInstanceManager.getApiKey(),
-  };
+}
+
+/** Stash's headers a stream response passes on, beside its own Cache-Control. */
+const STREAM_RESPONSE_HEADERS = [
+  "content-type",
+  "content-length",
+  "accept-ranges",
+  "content-range",
+  "last-modified",
+  "etag",
+];
+
+/**
+ * Answer a HEAD on a stream from Stash's response headers alone, as the GET
+ * would have answered: the direct file's one-byte probe as 200 with its
+ * whole length (`headAnswer`), a manifest with the type Peek sends it as and
+ * no length (Peek rewrites it, so Stash's length is not the one a GET gets).
+ * The caller then aborts Stash's response unread.
+ */
+function answerStreamHead(
+  res: Response,
+  response: globalThis.Response,
+  o: { rangeAdded: boolean; manifest: "hls" | "dash" | undefined }
+): void {
+  const { status, contentLength, keepContentRange } = headAnswer(
+    {
+      status: response.status,
+      contentLength: response.headers.get("content-length"),
+      contentRange: response.headers.get("content-range"),
+    },
+    o.rangeAdded
+  );
+  res.status(status);
+  if (o.manifest === "hls") {
+    res.setHeader("content-type", "application/vnd.apple.mpegurl");
+    res.setHeader("cache-control", "private, no-cache");
+    res.end();
+    return;
+  }
+  for (const name of STREAM_RESPONSE_HEADERS) {
+    const value =
+      name === "content-length" ? contentLength : response.headers.get(name);
+    if (!value) continue;
+    if (name === "content-range" && !keepContentRange) continue;
+    if (name === "content-length" && o.manifest === "dash") continue;
+    res.setHeader(name, value);
+  }
+  if (o.manifest === "dash" && !response.headers.get("content-type")) {
+    res.setHeader("content-type", "application/dash+xml");
+  }
+  res.setHeader(
+    "cache-control",
+    privateCacheControl(
+      response.headers.get("cache-control"),
+      "private, no-cache"
+    )
+  );
+  res.end();
+}
+
+/**
+ * The address and key of the instance a request names, or null once the
+ * response is sent: 404 for an instance that is not enabled (disabled or
+ * deleted; invariant 11).
+ */
+function credentialsOrRespond(
+  instanceId: string,
+  res: Response
+): StashCredentials | null {
+  try {
+    return stashInstanceManager.getCredentials(instanceId);
+  } catch (error) {
+    if (!(error instanceof UnknownInstanceError)) throw error;
+    res.status(404).send("Not found");
+    return null;
+  }
 }
 
 // ============================================================================
 // STASH STREAM PROXY
 // ============================================================================
 
+/** Delete every `apikey` query parameter, in any casing. */
+function deleteApiKeyParams(params: URLSearchParams): void {
+  for (const key of [...params.keys()]) {
+    if (key.toLowerCase() === "apikey") {
+      params.delete(key);
+    }
+  }
+}
+
+/**
+ * One URI from a Stash HLS playlist as a Peek proxy-stream path, without
+ * apikey and with instanceId. Null when the URI cannot be parsed.
+ */
+function rewriteStashUri(
+  uri: string,
+  sceneId: string,
+  instanceId: string
+): string | null {
+  if (!uri.trim()) {
+    return null;
+  }
+
+  try {
+    let urlPath: string;
+    let queryParams: URLSearchParams;
+
+    if (uri.includes("://")) {
+      // Absolute URL: http://stash:9999/scene/123/stream.m3u8/0.ts?apikey=xxx
+      const url = new URL(uri);
+      urlPath = url.pathname;
+      queryParams = url.searchParams;
+    } else {
+      // Absolute path (/scene/123/stream.m3u8/0.ts?apikey=xxx), relative
+      // path (stream.m3u8/0.ts?apikey=xxx) or bare segment (0.ts?apikey=xxx)
+      const [path, query] = uri.split("?");
+      urlPath = path ?? "";
+      queryParams = new URLSearchParams(query || "");
+    }
+
+    deleteApiKeyParams(queryParams);
+
+    // Every segment names the instance, as the playlist request did
+    queryParams.set("instanceId", instanceId);
+
+    // Extract the stream path (everything after /scene/{id}/)
+    let streamPath: string;
+    const scenePathMatch = urlPath.match(/\/scene\/\d+\/(.+)/);
+    if (scenePathMatch) {
+      streamPath = scenePathMatch[1] as string;
+    } else {
+      // If no scene path pattern, use the path as-is
+      streamPath = urlPath.startsWith("/") ? urlPath.slice(1) : urlPath;
+    }
+
+    const cleanQuery = queryParams.toString();
+    const queryString = cleanQuery ? `?${cleanQuery}` : "";
+
+    return `/api/scene/${sceneId}/proxy-stream/${streamPath}${queryString}`;
+  } catch {
+    return null;
+  }
+}
+
+/** A URI attribute in an HLS tag (#EXT-X-KEY, #EXT-X-MAP, #EXT-X-MEDIA, ...). */
+const HLS_URI_ATTRIBUTE = /([:,])URI="([^"]*)"/g;
+
+/** Any spelling of apikey, anywhere: no line matching it leaves Peek. */
+const API_KEY_ANYWHERE = /apikey/i;
+
+/**
+ * One playlist line rewritten for Peek, or "" when it cannot be made safe.
+ * Tags keep their text with each URI attribute rewritten; a tag with a URI
+ * that cannot be rewritten is dropped whole.
+ */
+function rewriteHlsLine(
+  line: string,
+  sceneId: string,
+  instanceId: string
+): string {
+  if (!line.trim()) {
+    return line;
+  }
+
+  if (line.startsWith("#")) {
+    const rewrite = { unparsable: false };
+    const rewritten = line.replace(
+      HLS_URI_ATTRIBUTE,
+      (match, separator: string, uri: string) => {
+        const proxied = rewriteStashUri(uri, sceneId, instanceId);
+        if (proxied === null) {
+          rewrite.unparsable = true;
+          return match;
+        }
+        return `${separator}URI="${proxied}"`;
+      }
+    );
+    if (rewrite.unparsable) {
+      logger.warn(`[PROXY] Dropped an HLS tag: ${redactUrl(line)}`);
+      return "";
+    }
+    return rewritten;
+  }
+
+  const proxied = rewriteStashUri(line, sceneId, instanceId);
+  if (proxied === null) {
+    // Never return the raw line: Stash's playlist lines can carry apikey
+    logger.warn(`[PROXY] Failed to rewrite HLS line: ${redactUrl(line)}`);
+    return "";
+  }
+  return proxied;
+}
+
 /**
  * Rewrite URLs in HLS playlist to use Peek's proxy
  * Stash includes apikey in segment URLs - we need to strip that and route through our proxy
  *
- * HLS playlists can contain various URL formats:
- * - Absolute: http://stash:9999/scene/123/stream/segment_0.ts?apikey=xxx&resolution=FULL_HD
- * - Absolute path: /scene/123/stream/segment_0.ts?apikey=xxx
- * - Relative: stream/segment_0.ts?apikey=xxx
- * - Just segment: segment_0.ts?apikey=xxx
+ * Stash 0.31 lists each segment as /scene/{id}/stream.m3u8/{n}.ts?resolution=...
+ * (its segment route is stream.m3u8/{n}.ts). The line may arrive as:
+ * - Absolute: http://stash:9999/scene/123/stream.m3u8/0.ts?apikey=xxx&resolution=LOW
+ * - Absolute path: /scene/123/stream.m3u8/0.ts?apikey=xxx&resolution=LOW
+ * - Relative: stream.m3u8/0.ts?apikey=xxx
+ * - Just segment: 0.ts?apikey=xxx
  *
- * All should be rewritten to: /api/scene/{sceneId}/proxy-stream/{path}?{params without apikey}&instanceId=xxx
+ * All are rewritten to: /api/scene/{sceneId}/proxy-stream/{path}?{params without apikey}&instanceId=xxx,
+ * which proxyStashStream serves again (isAllowedStreamPath admits stream.m3u8/{n}.ts).
+ * URI attributes in tags are rewritten the same way. A line that cannot be
+ * rewritten, or that still names apikey afterwards, is replaced by "".
  */
-function rewriteHlsPlaylist(content: string, sceneId: string, _stashBaseUrl: string, instanceId?: string): string {
-  const lines = content.split('\n');
-
-  return lines.map(line => {
-    // Skip empty lines and HLS tags (start with #)
-    if (!line.trim() || line.startsWith('#')) {
-      return line;
-    }
-
-    try {
-      let urlPath: string;
-      let queryParams: URLSearchParams;
-
-      // Check if it's a full URL or a path
-      if (line.includes('://')) {
-        // Absolute URL: http://stash:9999/scene/123/stream/segment.ts?apikey=xxx
-        const url = new URL(line);
-        urlPath = url.pathname;
-        queryParams = url.searchParams;
-      } else if (line.startsWith('/')) {
-        // Absolute path: /scene/123/stream/segment.ts?apikey=xxx
-        const [path, query] = line.split('?');
-        urlPath = path ?? '';
-        queryParams = new URLSearchParams(query || '');
-      } else {
-        // Relative path: stream/segment.ts?apikey=xxx or segment.ts?apikey=xxx
-        const [path, query] = line.split('?');
-        urlPath = path ?? '';
-        queryParams = new URLSearchParams(query || '');
+function rewriteHlsPlaylist(
+  content: string,
+  sceneId: string,
+  _stashBaseUrl: string,
+  instanceId: string
+): string {
+  return content
+    .split("\n")
+    .map((line, index) => {
+      const rewritten = rewriteHlsLine(line, sceneId, instanceId);
+      if (API_KEY_ANYWHERE.test(rewritten)) {
+        // The line has a shape redactUrl may not know, so log only where it was
+        const kind = line.startsWith("#")
+          ? (line.match(/^#[A-Z0-9-]+/)?.[0] ?? "a tag")
+          : "a URI line";
+        logger.warn(
+          `[PROXY] Dropped HLS line ${index + 1} (${kind}): it still names apikey`
+        );
+        return "";
       }
+      return rewritten;
+    })
+    .join("\n");
+}
 
-      // Strip apikey from query params (case-insensitive)
-      queryParams.delete('apikey');
-      queryParams.delete('ApiKey');
-      queryParams.delete('APIKEY');
+// An apikey query parameter in a DASH manifest, after "&" or its XML escape
+// "&amp;", with its value (up to the next separator, quote, tag or space)
+const DASH_TRAILING_API_KEY = /(?:&amp;|&)apikey=[^&"'<\s]*/gi;
+// The same parameter first in its query, with the separator that follows it
+const DASH_LEADING_API_KEY = /\?apikey=[^&"'<\s]*(&amp;|&)?/gi;
 
-      // Add instanceId for multi-instance routing
-      if (instanceId) {
-        queryParams.set('instanceId', instanceId);
-      }
-
-      // Extract the stream path (everything after /scene/{id}/)
-      let streamPath: string;
-      const scenePathMatch = urlPath.match(/\/scene\/\d+\/(.+)/);
-      if (scenePathMatch) {
-        streamPath = scenePathMatch[1] as string;
-      } else {
-        // If no scene path pattern, use the path as-is
-        streamPath = urlPath.startsWith('/') ? urlPath.slice(1) : urlPath;
-      }
-
-      // Build clean query string
-      const cleanQuery = queryParams.toString();
-      const queryString = cleanQuery ? `?${cleanQuery}` : '';
-
-      // Return proxied URL
-      return `/api/scene/${sceneId}/proxy-stream/${streamPath}${queryString}`;
-    } catch {
-      // If parsing fails, return original line (shouldn't happen for valid playlists)
-      logger.warn(`[PROXY] Failed to rewrite HLS line: ${line}`);
-      return line;
-    }
-  }).join('\n');
+/**
+ * Remove apikey query parameters from every URL in a DASH manifest, leaving
+ * the rest of each query well formed. Trailing ones go first, so a query
+ * that starts with apikey keeps its following parameter.
+ */
+function stripDashApiKeys(manifest: string): string {
+  return manifest
+    .replace(DASH_TRAILING_API_KEY, "")
+    .replace(DASH_LEADING_API_KEY, (_match, next: string | undefined) =>
+      next ? "?" : ""
+    );
 }
 
 /**
@@ -119,42 +332,67 @@ function rewriteHlsPlaylist(content: string, sceneId: string, _stashBaseUrl: str
  * GET /api/scene/:sceneId/proxy-stream/stream?instanceId=xxx -> Stash /scene/:sceneId/stream (Direct)
  * GET /api/scene/:sceneId/proxy-stream/stream.m3u8?resolution=STANDARD_HD&instanceId=xxx -> Stash HLS 720p
  * GET /api/scene/:sceneId/proxy-stream/stream.mp4?resolution=STANDARD&instanceId=xxx -> Stash MP4 480p
- * GET /api/scene/:sceneId/proxy-stream/hls/:segment.ts?resolution=STANDARD&instanceId=xxx -> Stash HLS segment
+ * GET /api/scene/:sceneId/proxy-stream/stream.m3u8/:n.ts?resolution=STANDARD&instanceId=xxx -> Stash HLS segment
  *
  * This lets Stash handle all codec detection, transcoding, and quality selection.
  *
- * SECURITY: For HLS playlists (.m3u8), we rewrite internal URLs to strip the Stash API key
- * and route segment requests through Peek's proxy.
+ * SECURITY: authenticateStreamRequest runs first (a session, or a signed link
+ * on the direct stream). The path must be one of Stash's stream files
+ * (isAllowedStreamPath), the scene must be visible to the user, and only
+ * `resolution` and `start` go upstream. For HLS playlists (.m3u8), internal
+ * URLs are rewritten to strip the Stash API key and route segment requests
+ * through Peek's proxy. A DASH manifest (.mpd) has its apikey parameters
+ * stripped, and is refused if it still names apikey. Manifests are fetched
+ * whole, never by Range.
  */
-export const proxyStashStream = async (req: TypedRequest<never, { sceneId: string; streamPath: string; subPath?: string }, { instanceId?: string }>, res: Response) => {
-  try {
-    const { sceneId, streamPath, subPath } = req.params;
-    const instanceId = req.query.instanceId;
+export const proxyStashStream = async (
+  req: TypedAuthRequest<
+    never,
+    { sceneId: string; streamPath: string; subPath?: string },
+    { instanceId?: string }
+  >,
+  res: Response
+) => {
+  const { sceneId, streamPath, subPath } = req.params;
+  const instanceId = req.query.instanceId;
 
-    // Combine path segments if subPath exists (for HLS segments like stream/segment_0.ts)
-    const fullStreamPath = subPath ? `${streamPath}/${subPath}` : streamPath;
+  if (
+    !SCENE_ID_PATTERN.test(sceneId) ||
+    !isAllowedStreamPath(streamPath, subPath)
+  ) {
+    res.status(400).send("Invalid stream path");
+    return;
+  }
+  if (!isValidInstanceId(instanceId)) {
+    res.status(400).json({ error: INSTANCE_ID_REQUIRED });
+    return;
+  }
 
-    // Parse query string from original request, but remove instanceId (it's for Peek routing only)
-    const urlParams = new URLSearchParams(req.url.split('?')[1] || '');
-    urlParams.delete('instanceId');
-    const queryString = urlParams.toString();
+  if (
+    !(await canUserLoadMedia(
+      req.user.id,
+      [{ entityType: "scene", entityId: sceneId }],
+      instanceId
+    ))
+  ) {
+    res.status(404).send("Not found");
+    return;
+  }
 
-    // Get Stash instance configuration
-    let stashBaseUrl: string;
-    let apiKey: string;
+  // Combine path segments if subPath exists (for HLS segments like stream.m3u8/0.ts)
+  const fullStreamPath = subPath ? `${streamPath}/${subPath}` : streamPath;
 
-    try {
-      const creds = getInstanceCredentials(instanceId);
-      stashBaseUrl = creds.baseUrl;
-      apiKey = creds.apiKey;
-    } catch (error) {
-      logger.error("[PROXY] Failed to get Stash instance credentials", { error, instanceId });
-      return res.status(500).send("Stash not configured");
-    }
+  // Only Stash's own stream parameters go upstream; instanceId is Peek
+  // routing and uid/exp/sig are the signed link's claims
+  const queryString = pickStreamQuery(
+    new URLSearchParams(req.url.split("?")[1] ?? "")
+  ).toString();
 
-    const stashUrl = `${stashBaseUrl}/scene/${sceneId}/${fullStreamPath}${queryString ? '?' + queryString : ''}`;
+  const creds = credentialsOrRespond(instanceId, res);
+  if (!creds) return;
+  const { baseUrl: stashBaseUrl, apiKey } = creds;
 
-    logger.debug(`[PROXY] Proxying stream: ${req.url} -> ${stashUrl}`);
+  const stashUrl = `${stashBaseUrl}/scene/${sceneId}/${fullStreamPath}${queryString ? "?" + queryString : ""}`;
 
     // Abort any existing upstream request for this scene before starting a new one.
     const previousController = activeStreamControllers.get(sceneId);
@@ -183,45 +421,117 @@ export const proxyStashStream = async (req: TypedRequest<never, { sceneId: strin
     req.on("close", abortUpstream);
     res.on("close", abortUpstream);
 
-    // Forward request to Stash using fetch
-    const headers: Record<string, string> = { 'ApiKey': apiKey };
-    if (req.headers.range) {
-      headers['Range'] = req.headers.range;
-    }
+  // Forward request to Stash. The fetch aborts when the client disconnects
+  // (seek, refresh, navigate away), which keeps orphaned connections from
+  // downloading entire files, and when Stash sends no headers in time.
+  // Manifests go whole: Stash honours Range on them, and a slice starting
+  // past "apikey=" would carry a bare key through every rewrite below
+  const isManifestPath = /\.(m3u8|mpd)$/.test(fullStreamPath);
+  // A HEAD (an external player probing its link) costs Stash no body. Stash
+  // refuses HEAD (405), so it goes as a GET: for the direct file, which
+  // Stash serves by range, one byte unless the player named a range; a
+  // transcode, a segment or a manifest takes no range and is dropped as soon
+  // as its headers arrive
+  const headOnly = req.method === "HEAD";
+  const rangeAdded =
+    headOnly && fullStreamPath === "stream" && !req.headers.range;
+  const range = rangeAdded
+    ? HEAD_PROBE_RANGE
+    : !isManifestPath
+      ? req.headers.range
+      : undefined;
+  const fetched = await fromStash(res, () =>
+    fetchFromStash(stashUrl, {
+      apiKey,
+      clientRes: res,
+      headersTimeoutMs: STREAM_HEADERS_TIMEOUT_MS,
+      ...(range ? { headers: { Range: range } } : {}),
+    })
+  );
+  if (!fetched) return;
+  const { response, abort } = fetched;
 
-    const response = await fetch(stashUrl, {
-      headers: {
-        'ApiKey': apiKey,
-        'Range': req.headers.range || '', // Forward range requests for seeking
-      },
-      signal: controller.signal,
+  // Stash's own 401, 403 and 5xx are 502 here and its 404 is 404; 206, 304
+  // and 416 (Range) pass through
+  const failure = stashFailure(response.status);
+  if (failure) {
+    logger.warn(
+      `[PROXY] Stash returned ${response.status} for scene=${sceneId} ${fullStreamPath}`
+    );
+    abort.abort();
+    throw failure;
+  }
+
+  // Check if this is an HLS playlist that needs URL rewriting
+  const contentType = response.headers.get("content-type") || "";
+  const isHlsPlaylist =
+    fullStreamPath.endsWith(".m3u8") ||
+    contentType.includes("mpegurl") ||
+    contentType.includes("x-mpegURL");
+  const isDashManifest =
+    fullStreamPath.endsWith(".mpd") || contentType.includes("dash+xml");
+
+  if (headOnly) {
+    answerStreamHead(res, response, {
+      rangeAdded,
+      manifest: isHlsPlaylist ? "hls" : isDashManifest ? "dash" : undefined,
     });
+    abort.abort();
+    return;
+  }
 
-    if (!response.ok) {
-      logger.warn(`[PROXY] Stash returned ${response.status} for ${stashUrl}`);
-      return res.status(response.status).send(`Stash stream error: ${response.statusText}`);
-    }
+  if (isHlsPlaylist) {
+    // For HLS playlists, read the entire response and rewrite URLs
+    const playlistContent = await fromStash(res, () =>
+      readStashText(response, abort, STREAM_IDLE_TIMEOUT_MS)
+    );
+    if (playlistContent === undefined) return;
+    const rewrittenContent = rewriteHlsPlaylist(
+      playlistContent,
+      sceneId,
+      stashBaseUrl,
+      instanceId
+    );
 
-    // Check if this is an HLS playlist that needs URL rewriting
-    const contentType = response.headers.get('content-type') || '';
-    const isHlsPlaylist = fullStreamPath.endsWith('.m3u8') ||
-                          contentType.includes('mpegurl') ||
-                          contentType.includes('x-mpegURL');
+    // Set headers for the rewritten playlist
+    res.status(response.status);
+    res.setHeader("content-type", "application/vnd.apple.mpegurl");
+    res.setHeader("cache-control", "private, no-cache");
+    res.send(rewrittenContent);
 
-    if (isHlsPlaylist) {
-      // For HLS playlists, read the entire response and rewrite URLs
-      const playlistContent = await response.text();
-      const rewrittenContent = rewriteHlsPlaylist(playlistContent, sceneId, stashBaseUrl, instanceId);
+    logger.debug(`[PROXY] Rewrote HLS playlist: ${fullStreamPath}`);
+    return;
+  }
 
-      // Set headers for the rewritten playlist
-      res.status(response.status);
-      res.setHeader('content-type', 'application/vnd.apple.mpegurl');
-      res.setHeader('cache-control', 'no-cache');
-      res.send(rewrittenContent);
+  // Forward status code
+  res.status(response.status);
 
-      logger.debug(`[PROXY] Rewrote HLS playlist: ${fullStreamPath}`);
+  // The response belongs to a signed-in user: keep Stash's freshness, never
+  // let a shared cache store it
+  res.setHeader(
+    "cache-control",
+    privateCacheControl(
+      response.headers.get("cache-control"),
+      "private, no-cache"
+    )
+  );
+
+  // A DASH manifest (about 1 KB) is read whole and sent without apikey
+  if (isDashManifest) {
+    const manifestText = await fromStash(res, () =>
+      readStashText(response, abort, STREAM_IDLE_TIMEOUT_MS)
+    );
+    if (manifestText === undefined) return;
+    const manifest = stripDashApiKeys(manifestText);
+    if (API_KEY_ANYWHERE.test(manifest)) {
+      logger.warn(
+        `[PROXY] Refused a DASH manifest that names apikey: scene=${sceneId} ${fullStreamPath}`
+      );
+      res.status(502).send("Stash stream error");
       return;
     }
+    res.setHeader("content-type", contentType || "application/dash+xml");
+    res.send(manifest);
 
     // Forward status code
     res.status(response.status);
@@ -296,6 +606,20 @@ export const proxyStashStream = async (req: TypedRequest<never, { sceneId: strin
     const { sceneId } = req.params;
     activeStreamControllers.delete(sceneId);
   }
+
+  // Stream response body to client with proper backpressure and cleanup
+  await pipeResponseToClient(
+    response,
+    res,
+    "[PROXY]",
+    STREAM_RESPONSE_HEADERS,
+    {
+      idleTimeoutMs: STREAM_IDLE_TIMEOUT_MS,
+      abort,
+    }
+  );
+
+  logger.debug(`[PROXY] Stream proxied successfully: ${fullStreamPath}`);
 };
 
 // ============================================================================
@@ -306,65 +630,180 @@ export const proxyStashStream = async (req: TypedRequest<never, { sceneId: strin
  * Proxy caption/subtitle files from Stash
  * GET /api/scene/:sceneId/caption?lang=en&type=srt&instanceId=xxx
  *
+ * Requires a Peek session; the scene must be visible to the user. `lang` is
+ * a short code and `type` is srt or vtt; the upstream query is rebuilt with
+ * URLSearchParams so neither can smuggle another parameter.
+ *
  * Stash stores captions as separate .vtt or .srt files alongside video files
  * This endpoint proxies those files and converts SRT to VTT if needed
  */
-export const getCaption = async (req: TypedRequest<never, { sceneId: string }, { lang?: string; type?: string; instanceId?: string }>, res: Response) => {
-  try {
-    const { sceneId } = req.params;
-    const { lang, type, instanceId } = req.query;
+export const getCaption = async (
+  req: TypedAuthRequest<
+    never,
+    { sceneId: string },
+    { lang?: string; type?: string; instanceId?: string }
+  >,
+  res: Response
+) => {
+  const { sceneId } = req.params;
+  const { lang, type, instanceId } = req.query;
 
-    if (!lang || !type) {
-      return res.status(400).send("Missing lang or type parameter");
-    }
-
-    const langStr = lang;
-    const typeStr = type;
-    const instanceIdStr = instanceId ?? '(not specified)';
-
-    logger.info(`[CAPTION] Request: scene=${sceneId}, lang=${langStr}, type=${typeStr}, instanceId=${instanceIdStr}`);
-
-    // Get Stash instance configuration
-    let stashUrl: string;
-    let apiKey: string;
-
-    try {
-      const creds = getInstanceCredentials(instanceId);
-      stashUrl = creds.baseUrl;
-      apiKey = creds.apiKey;
-    } catch (error) {
-      logger.error("[CAPTION] Failed to get Stash instance credentials", { error, instanceId });
-      return res.status(500).send("Stash configuration missing");
-    }
-
-    // Construct Stash caption URL
-    const captionUrl = `${stashUrl}/scene/${sceneId}/caption?lang=${langStr}&type=${typeStr}`;
-    logger.debug(`[CAPTION] Fetching from Stash: ${captionUrl}`);
-
-    // Fetch caption from Stash with API key
-    const response = await fetch(captionUrl, {
-      headers: {
-        'ApiKey': apiKey,
-      },
-    });
-
-    if (!response.ok) {
-      logger.warn(`[CAPTION] Stash returned ${response.status} for scene ${sceneId}`);
-      return res.status(response.status).send("Caption not found");
-    }
-
-    const captionData = await response.text();
-
-    // Stash automatically converts SRT to VTT if needed, so we can just serve it
-    res.setHeader("Content-Type", "text/vtt; charset=utf-8");
-    res.setHeader("Cache-Control", "public, max-age=31536000"); // Cache for 1 year
-    res.send(captionData);
-
-    logger.info(`[CAPTION] Served caption: scene=${sceneId}, lang=${langStr}, size=${captionData.length} bytes`);
-  } catch (error) {
-    logger.error("[CAPTION] Error serving caption", {
-      error: error instanceof Error ? error.message : String(error),
-    });
-    res.status(500).send("Internal server error");
+  if (!lang || !type) {
+    res.status(400).send("Missing lang or type parameter");
+    return;
   }
+
+  if (
+    !SCENE_ID_PATTERN.test(sceneId) ||
+    typeof lang !== "string" ||
+    typeof type !== "string" ||
+    !isAllowedCaption(lang, type)
+  ) {
+    res.status(400).send("Invalid caption parameters");
+    return;
+  }
+  if (!isValidInstanceId(instanceId)) {
+    res.status(400).json({ error: INSTANCE_ID_REQUIRED });
+    return;
+  }
+
+  if (
+    !(await canUserLoadMedia(
+      req.user.id,
+      [{ entityType: "scene", entityId: sceneId }],
+      instanceId
+    ))
+  ) {
+    res.status(404).send("Not found");
+    return;
+  }
+
+  logger.debug(
+    `[CAPTION] Request: scene=${sceneId}, lang=${lang}, type=${type}, instanceId=${instanceId}`
+  );
+
+  const creds = credentialsOrRespond(instanceId, res);
+  if (!creds) return;
+  const { baseUrl: stashUrl, apiKey } = creds;
+
+  // Construct Stash caption URL
+  const captionUrl = new URL(`${stashUrl}/scene/${sceneId}/caption`);
+  captionUrl.searchParams.set("lang", lang);
+  captionUrl.searchParams.set("type", type);
+  logger.debug(`[CAPTION] Fetching from Stash: ${captionUrl.pathname}`);
+
+  // Fetch caption from Stash with API key; answer and body share 15 s
+  const startedAt = Date.now();
+  const fetched = await fromStash(res, () =>
+    fetchFromStash(captionUrl.toString(), {
+      apiKey,
+      clientRes: res,
+      headersTimeoutMs: CAPTION_TIMEOUT_MS,
+    })
+  );
+  if (!fetched) return;
+  const { response, abort } = fetched;
+
+  const failure = stashFailure(response.status);
+  if (failure) {
+    logger.warn(
+      `[CAPTION] Stash returned ${response.status} for scene ${sceneId}`
+    );
+    abort.abort();
+    throw failure instanceof NotFoundError
+      ? new NotFoundError("Caption not found")
+      : failure;
+  }
+
+  const captionData = await fromStash(res, () =>
+    readStashText(
+      response,
+      abort,
+      CAPTION_TIMEOUT_MS - (Date.now() - startedAt)
+    )
+  );
+  if (captionData === undefined) return;
+
+  // Stash automatically converts SRT to VTT if needed, so we can just serve it
+  res.setHeader("Content-Type", "text/vtt; charset=utf-8");
+  res.setHeader("Cache-Control", "private, max-age=86400");
+  res.send(captionData);
+
+  logger.debug(
+    `[CAPTION] Served caption: scene=${sceneId}, lang=${lang}, size=${captionData.length} bytes`
+  );
+};
+
+// ============================================================================
+// EXTERNAL PLAYER LINK
+// ============================================================================
+
+/**
+ * Mint a personal, signed direct-stream link for the external player button.
+ * POST /api/scene/:sceneId/external-player-link { instanceId }
+ *
+ * The link carries the user's id, a 12-hour expiry and an HMAC over those
+ * plus the scene, the instance and the user's passwordChangedAt
+ * (utils/streamLink.ts). authenticateStreamRequest accepts it on the direct
+ * stream without a cookie; proxyStashStream then runs the same access check
+ * as for a session, so the link plays only what this user may see at
+ * request time. A path is returned, not an absolute URL, so the server never
+ * trusts the Host header.
+ */
+export const createExternalPlayerLink = async (
+  req: TypedAuthRequest<ExternalPlayerLinkRequest, { sceneId: string }>,
+  res: TypedResponse<ExternalPlayerLinkResponse | ApiErrorResponse>
+) => {
+  const { sceneId } = req.params;
+  const instanceId = (req.body as { instanceId?: unknown } | undefined)
+    ?.instanceId;
+
+  if (
+    !SCENE_ID_PATTERN.test(sceneId) ||
+    typeof instanceId !== "string" ||
+    !INSTANCE_ID_PATTERN.test(instanceId)
+  ) {
+    res.status(400).json({ error: "Invalid scene or instance" });
+    return;
+  }
+
+  if (!(await canUserAccessEntity(req.user.id, "scene", sceneId, instanceId))) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
+
+  const user = await prisma.user.findUnique({
+    where: { id: req.user.id },
+    select: { passwordChangedAt: true },
+  });
+  if (!user) {
+    res.status(401).json({ error: "Session expired" });
+    return;
+  }
+
+  // The direct stream serves the original file, so its extension is the
+  // container. Only the type leaves the server, never the path.
+  const scene = await prisma.stashScene.findFirst({
+    where: { id: sceneId, stashInstanceId: instanceId, deletedAt: null },
+    select: { filePath: true },
+  });
+
+  const exp = Math.floor(Date.now() / 1000) + STREAM_LINK_TTL_SECONDS;
+  const claims: StreamLinkClaims = {
+    userId: req.user.id,
+    sceneId,
+    instanceId,
+    exp,
+    passwordChangedAtMs: user.passwordChangedAt?.getTime() ?? 0,
+  };
+
+  res.setHeader("Cache-Control", "no-store");
+  res.json({
+    url: buildStreamLinkPath(
+      claims,
+      signStreamLink(claims, getStreamLinkKey())
+    ),
+    expiresAt: new Date(exp * 1000).toISOString(),
+    mimeType: videoMimeType(scene?.filePath ?? null),
+  });
 };

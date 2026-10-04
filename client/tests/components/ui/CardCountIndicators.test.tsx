@@ -1,7 +1,8 @@
-import { describe, it, expect } from "vitest";
+import { render } from "@testing-library/react";
 import { readFileSync } from "fs";
 import { dirname, resolve } from "path";
 import { fileURLToPath } from "url";
+import { describe, expect, it } from "vitest";
 import { CardCountIndicators } from "../../../src/components/ui/CardCountIndicators";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -15,11 +16,32 @@ describe("CardCountIndicators", () => {
 describe("CardCountIndicator hoverDisabled", () => {
   it("passes hoverDisabled to Tooltip for rich content", () => {
     // Read the source file to check implementation details
-    const sourcePath = resolve(__dirname, "../../../src/components/ui/CardCountIndicators.tsx");
+    const sourcePath = resolve(
+      __dirname,
+      "../../../src/components/ui/CardCountIndicators.tsx"
+    );
     const sourceCode = readFileSync(sourcePath, "utf8");
 
     // The component should pass hoverDisabled={true} when tooltipContent is rich (not string)
     expect(sourceCode).toContain("hoverDisabled");
     expect(sourceCode).toContain("isRichTooltip");
+  });
+});
+
+describe("CardCountIndicators counts", () => {
+  const shownCounts = (count: number) => {
+    const { container, unmount } = render(
+      <CardCountIndicators indicators={[{ type: "SCENES", count }]} />
+    );
+    const shown = container.querySelectorAll(".card-indicator-text").length;
+    unmount();
+    return shown;
+  };
+
+  it("a zero count is hidden; NaN is hidden", () => {
+    expect(shownCounts(0)).toBe(0);
+    expect(shownCounts(Number.NaN)).toBe(0);
+    expect(shownCounts(-1)).toBe(0);
+    expect(shownCounts(3)).toBe(1);
   });
 });

@@ -1,4 +1,7 @@
 // shared/types/api/clips.ts
+import type { ClipListRequestInput } from "../filters/index.js";
+import type { ListCount } from "./library.js";
+
 /**
  * Clips API Types
  *
@@ -6,11 +9,67 @@
  */
 
 // =============================================================================
+// CLIP ROW
+// =============================================================================
+
+/** A clip's tag as the row carries it */
+export interface ClipTagRef {
+  id: string;
+  name: string;
+  color: string | null;
+}
+
+/**
+ * A clip as the clips endpoints answer it, with its instance and its
+ * scene's. Raw Stash paths are not sent: the screenshots are proxy URLs, and
+ * the preview is `/api/proxy/clip/:id/preview`. Dates are ISO strings.
+ */
+export interface ClipWithRelations {
+  id: string;
+  instanceId: string;
+  sceneId: string;
+  title: string | null;
+  seconds: number;
+  endSeconds: number | null;
+  primaryTagId: string | null;
+  screenshotUrl: string | null;
+  isGenerated: boolean;
+  stashCreatedAt: string | null;
+  stashUpdatedAt: string | null;
+  primaryTag: ClipTagRef | null;
+  tags: ClipTagRef[];
+  scene: {
+    id: string;
+    instanceId: string;
+    title: string | null;
+    pathScreenshot: string | null;
+    studioId: string | null;
+  };
+}
+
+// =============================================================================
+// FIND CLIPS
+// =============================================================================
+
+/** POST /api/library/clips: the clip list's filter body */
+export type FindClipsRequest = ClipListRequestInput;
+
+/** POST /api/library/clips answers as GET /api/clips does */
+export type FindClipsResponse<Count extends ListCount = number> =
+  GetClipsResponse<Count>;
+
+// =============================================================================
 // GET CLIPS
 // =============================================================================
 
-/** GET /api/clips */
-export interface GetClipsQuery extends Record<string, string | string[] | undefined> {
+/**
+ * GET /api/clips: the old query parameters, kept for callers that still send
+ * them; each maps onto a `clip_filter` field (`POST /api/library/clips`)
+ */
+export interface GetClipsQuery extends Record<
+  string,
+  string | string[] | undefined
+> {
   page?: string;
   perPage?: string;
   sortBy?: string;
@@ -23,14 +82,17 @@ export interface GetClipsQuery extends Record<string, string | string[] | undefi
   studioId?: string;
   q?: string;
   instanceId?: string;
+  /** "false": the page alone, `total` and `totalPages` null */
+  count?: string;
 }
 
-export interface GetClipsResponse {
-  clips: unknown[];
-  total: number;
+/** `total` and `totalPages` are null when the request said `count=false` */
+export interface GetClipsResponse<Count extends ListCount = number> {
+  clips: ClipWithRelations[];
+  total: Count;
   page: number;
   perPage: number;
-  totalPages: number;
+  totalPages: Count;
 }
 
 // =============================================================================
@@ -42,8 +104,8 @@ export interface GetClipByIdParams extends Record<string, string> {
   id: string;
 }
 
-// Note: GetClipByIdResponse depends on server-internal ClipService types
-// and is re-exported from server/types/api/clips.ts instead.
+/** The clip; a bare id held by several instances answers 400 instead */
+export type GetClipByIdResponse = ClipWithRelations;
 
 // =============================================================================
 // GET CLIPS FOR SCENE
@@ -54,11 +116,14 @@ export interface GetClipsForSceneParams extends Record<string, string> {
   id: string;
 }
 
-export interface GetClipsForSceneQuery extends Record<string, string | string[] | undefined> {
+export interface GetClipsForSceneQuery extends Record<
+  string,
+  string | string[] | undefined
+> {
   includeUngenerated?: string;
   instanceId?: string;
 }
 
 export interface GetClipsForSceneResponse {
-  clips: unknown[];
+  clips: ClipWithRelations[];
 }

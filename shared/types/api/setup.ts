@@ -6,6 +6,8 @@
  * These are public endpoints for initial setup wizard.
  */
 
+// Dates are ISO 8601 strings: that is what JSON carries.
+
 // =============================================================================
 // GET SETUP STATUS
 // =============================================================================
@@ -18,7 +20,6 @@ export interface GetSetupStatusResponse {
   setupComplete: boolean;
   hasUsers: boolean;
   hasStashInstance: boolean;
-  userCount: number;
   stashInstanceCount: number;
 }
 
@@ -41,7 +42,7 @@ export interface CreateFirstAdminResponse {
     id: number;
     username: string;
     role: string;
-    createdAt: Date;
+    createdAt: string;
   };
 }
 
@@ -51,7 +52,8 @@ export interface CreateFirstAdminResponse {
 
 /**
  * POST /api/setup/test-stash-connection
- * Test connection to a Stash server
+ * Test connection to a Stash server. Public only before any user or instance
+ * exists; `version` and the reason in `error` are for admins only.
  */
 export interface TestStashConnectionRequest {
   url: string;
@@ -62,8 +64,26 @@ export interface TestStashConnectionResponse {
   success: boolean;
   message?: string;
   error?: string;
-  details?: string;
   version?: string;
+  /** Stash's own error text; only the admin-only test of a saved instance sends it */
+  details?: string;
+}
+
+/**
+ * POST /api/setup/stash-instance/:id/test-connection (admin only)
+ *
+ * Tests a saved instance with its stored API key, which never leaves the
+ * server. A `url` tests that address with the stored key; an `apiKey` tests
+ * a new key (a replacement the admin has typed) against the stored or new
+ * address. The answer is `TestStashConnectionResponse`.
+ */
+export interface TestSavedStashInstanceParams extends Record<string, string> {
+  id: string;
+}
+
+export interface TestSavedStashInstanceRequest {
+  url?: string;
+  apiKey?: string;
 }
 
 // =============================================================================
@@ -77,6 +97,7 @@ export interface TestStashConnectionResponse {
 export interface CreateFirstStashInstanceRequest {
   name?: string;
   url: string;
+  uiUrl?: string;
   apiKey: string;
 }
 
@@ -86,8 +107,9 @@ export interface CreateFirstStashInstanceResponse {
     id: string;
     name: string;
     url: string;
+    uiUrl: string | null;
     enabled: boolean;
-    createdAt: Date;
+    createdAt: string;
   };
 }
 
@@ -104,33 +126,13 @@ export interface GetStashInstanceResponse {
     id: string;
     name: string;
     url: string;
+    uiUrl: string | null;
     enabled: boolean;
     priority: number;
-    createdAt: Date;
-    updatedAt: Date;
+    createdAt: string;
+    updatedAt: string;
   } | null;
   instanceCount: number;
-}
-
-// =============================================================================
-// RESET SETUP
-// =============================================================================
-
-/**
- * POST /api/setup/reset
- * Reset setup state for recovery from partial setup
- */
-export interface ResetSetupRequest {
-  confirm: "RESET_SETUP";
-}
-
-export interface ResetSetupResponse {
-  success: true;
-  message: string;
-  deleted: {
-    users: number;
-    stashInstances: number;
-  };
 }
 
 // =============================================================================
@@ -145,10 +147,17 @@ export interface StashInstanceData {
   name: string;
   description: string | null;
   url: string;
+  uiUrl: string | null;
   enabled: boolean;
   priority: number;
-  createdAt: Date;
-  updatedAt: Date;
+  createdAt: string;
+  updatedAt: string;
+  /**
+   * When its first sync finished with its users' exclusions computed; null
+   * while it runs (the instance is hidden from every user until then) or
+   * after its URL changed
+   */
+  firstSyncedAt: string | null;
 }
 
 /**
@@ -167,6 +176,7 @@ export interface CreateStashInstanceRequest {
   name: string;
   description?: string;
   url: string;
+  uiUrl?: string;
   apiKey: string;
   enabled?: boolean;
   priority?: number;
@@ -175,6 +185,11 @@ export interface CreateStashInstanceRequest {
 export interface CreateStashInstanceResponse {
   success: true;
   instance: StashInstanceData;
+  /**
+   * The instance's first sync: "started", "queued" to start once the running
+   * sync ends, or "none" for a disabled instance
+   */
+  sync: "started" | "queued" | "none";
 }
 
 /**
@@ -189,6 +204,7 @@ export interface UpdateStashInstanceRequest {
   name?: string;
   description?: string;
   url?: string;
+  uiUrl?: string;
   apiKey?: string;
   enabled?: boolean;
   priority?: number;
@@ -197,6 +213,12 @@ export interface UpdateStashInstanceRequest {
 export interface UpdateStashInstanceResponse {
   success: true;
   instance: StashInstanceData;
+  /**
+   * The re-sync a new URL or API key needs, or the first sync of an instance
+   * enabled before one ever finished: "started", "queued" to start once the
+   * running sync ends, or "none" (nothing to fetch, or disabled)
+   */
+  sync: "started" | "queued" | "none";
 }
 
 /**

@@ -1,78 +1,100 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+/**
+ * The timeline's bars (C12, UD-09): each period's count is the list
+ * builder's own count over the list's request (`periodCounts`), so the bars
+ * equal the grid. Weeks are ISO weeks, computed in SQL: the period strings
+ * appear in URLs (`period=2024-W12`) and keep their form.
+ */
+import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
+import prisma from "../../prisma/singleton.js";
+import { galleryQueryBuilder } from "../../services/GalleryQueryBuilder.js";
+import { imageQueryBuilder } from "../../services/ImageQueryBuilder.js";
+import { sceneQueryBuilder } from "../../services/SceneQueryBuilder.js";
+import {
+  type Granularity,
+  TimelineService,
+  periodSql,
+} from "../../services/TimelineService.js";
+import { wholeDaySql } from "../../utils/sqlClauses.js";
+import { parsedListRequest } from "../helpers/fixtures.js";
+import { must } from "../helpers/must.js";
 
-vi.mock("../services/StashInstanceManager.js", () => ({
-  stashInstanceManager: {
-    getDefaultConfig: vi.fn().mockReturnValue({
-      id: "test-instance",
-      name: "Test Stash",
-      url: "http://localhost:9999/graphql",
-      apiKey: "test-api-key",
-    }),
-    getAllConfigs: vi.fn().mockReturnValue([]),
-    loadFromDatabase: vi.fn().mockResolvedValue(undefined),
-  },
-}));
+/** The period one date falls in, computed by SQLite */
+async function periodOf(
+  granularity: Granularity,
+  date: string
+): Promise<string | null> {
+  const rows = await prisma.$queryRawUnsafe<Array<{ p: string | null }>>(
+    `SELECT ${periodSql(granularity, "x.d")} AS p FROM (SELECT ? AS d) x`,
+    date
+  );
+  return must(rows[0], "a period row").p;
+}
 
-import { TimelineService } from "../../services/TimelineService.js";
-
-describe("TimelineService", () => {
-  describe("getStrftimeFormat", () => {
-    it("returns correct format for years granularity", () => {
-      const service = new TimelineService();
-      expect(service.getStrftimeFormat("years")).toBe("%Y");
-    });
-
-    it("returns correct format for months granularity", () => {
-      const service = new TimelineService();
-      expect(service.getStrftimeFormat("months")).toBe("%Y-%m");
-    });
-
-    it("returns correct format for weeks granularity", () => {
-      const service = new TimelineService();
-      expect(service.getStrftimeFormat("weeks")).toBe("%Y-W%W");
-    });
-
-    it("returns correct format for days granularity", () => {
-      const service = new TimelineService();
-      expect(service.getStrftimeFormat("days")).toBe("%Y-%m-%d");
-    });
-
-    it("defaults to months for invalid granularity", () => {
-      const service = new TimelineService();
-      expect(service.getStrftimeFormat("invalid" as any)).toBe("%Y-%m");
-    });
+describe("periodSql", () => {
+  afterAll(async () => {
+    await prisma.$disconnect();
   });
 
-  describe("buildDistributionQuery", () => {
-    it("builds SQL with exclusion JOIN for scenes", () => {
-      const service = new TimelineService();
-      const { sql, params } = service.buildDistributionQuery("scene", 1, "months");
-
-      expect(sql).toContain("SELECT");
-      expect(sql).toContain("strftime('%Y-%m', s.date)");
-      expect(sql).toContain("COUNT(DISTINCT s.id)");
-      expect(sql).toContain("LEFT JOIN UserExcludedEntity");
-      expect(sql).toContain("e.id IS NULL");
-      expect(sql).toContain("s.date IS NOT NULL");
-      expect(sql).toContain("GROUP BY period");
-      expect(sql).toContain("ORDER BY period ASC");
-      expect(params).toContain(1); // userId
-    });
-
-    it("builds SQL for galleries with correct table", () => {
-      const service = new TimelineService();
-      const { sql } = service.buildDistributionQuery("gallery", 1, "years");
-
-      expect(sql).toContain("FROM StashGallery");
-      expect(sql).toContain("strftime('%Y', g.date)");
-    });
-
-    it("builds SQL for images with correct table", () => {
-      const service = new TimelineService();
-      const { sql } = service.buildDistributionQuery("image", 1, "days");
-
-      expect(sql).toContain("FROM StashImage");
-      expect(sql).toContain("strftime('%Y-%m-%d', i.date)");
-    });
+  it.each([
+    ["2024-12-30", "2025-W01"],
+    ["2027-01-01", "2026-W53"],
+    ["2021-01-03", "2020-W53"],
+    ["2025-06-02", "2025-W23"],
+    ["2021-01-04", "2021-W01"],
+    ["2026-12-31", "2026-W53"],
+  ])("the week of %s is the ISO week %s", async (date, week) => {
+    expect(await periodOf("weeks", date)).toBe(week);
   });
+
+  it.each([
+    ["years", "2024"],
+    ["months", "2024-03"],
+    ["days", "2024-03-09"],
+  ] as const)("%s keep today's form", async (granularity, period) => {
+    expect(await periodOf(granularity, "2024-03-09")).toBe(period);
+  });
+
+  it("reads the column it is given", () => {
+    expect(periodSql("months", "g.date")).toBe("strftime('%Y-%m', g.date)");
+    expect(periodSql("days", "i.date")).toBe("i.date");
+  });
+});
+
+describe("TimelineService.getDistribution", () => {
+  const service = new TimelineService();
+  const options = {
+    userId: 3,
+    allowedInstanceIds: ["inst-a"],
+    timeZone: "Europe/Berlin",
+  };
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it.each([
+    ["scene", sceneQueryBuilder, "s.date"],
+    ["gallery", galleryQueryBuilder, "g.date"],
+    ["image", imageQueryBuilder, "i.date"],
+  ] as const)(
+    "%s bars are its list builder's period counts over the request, on its date column's whole day",
+    async (entity, builder, column) => {
+      const counts = vi
+        .spyOn(builder, "periodCounts")
+        .mockResolvedValue([{ period: "2024", count: 2 }]);
+      const request = parsedListRequest(entity, { q: "beach" });
+
+      const bars = await service.getDistribution(entity, request, {
+        ...options,
+        granularity: "years",
+      });
+
+      expect(bars).toEqual([{ period: "2024", count: 2 }]);
+      expect(counts).toHaveBeenCalledWith(
+        { ...options, request, applyExclusions: true },
+        periodSql("years", wholeDaySql(column)),
+        wholeDaySql(column)
+      );
+    }
+  );
 });
