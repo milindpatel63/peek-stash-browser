@@ -557,6 +557,49 @@ section.video-container {
   font-style: italic;
 }
 
+/* VR button (vr/VrControls.ts). The icon is lucide's "rectangle-goggles"
+   (https://lucide.dev, ISC licence, Copyright (c) Lucide Contributors) drawn
+   as a mask, so it takes the control's colour. lucide-react cannot render
+   inside a video.js component. */
+.video-js .vjs-vr-button .vjs-button > .vjs-icon-placeholder::before {
+  content: "";
+  background-color: currentColor;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 6a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-4a2 2 0 0 1-1.6-.8l-1.6-2.13a1 1 0 0 0-1.6 0L9.6 17.2A2 2 0 0 1 8 18H4a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2z'/%3E%3C/svg%3E")
+    center / 1.5em no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 6a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-4a2 2 0 0 1-1.6-.8l-1.6-2.13a1 1 0 0 0-1.6 0L9.6 17.2A2 2 0 0 1 8 18H4a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2z'/%3E%3C/svg%3E")
+    center / 1.5em no-repeat;
+}
+
+.video-js .vjs-vr-button.vjs-hover .vjs-menu {
+  display: none; /* Click-only behavior */
+}
+
+/* Projection names are long. The button sits near the bar's right end, so
+   the menu opens leftwards from its right edge (video.js's default, left
+   -3em, ran past the player and cut the labels) */
+.video-js .vjs-vr-button .vjs-menu {
+  width: 15em;
+  left: auto;
+  right: 0;
+}
+
+.video-js .vjs-vr-button .vjs-menu .vjs-menu-content {
+  max-height: 20em; /* All ten projections and the note */
+}
+
+.video-js .vjs-vr-button .vjs-menu li {
+  font-size: 0.8em;
+  text-transform: none;
+}
+
+.video-js .vjs-vr-button .vjs-menu li.vjs-vr-note {
+  font-weight: normal;
+  font-style: italic;
+  line-height: 1.4;
+  padding: 0.5em 1em;
+  white-space: normal;
+}
+
 /* Skip Buttons - Playlist navigation */
 .video-js .vjs-skip-button::before {
   font-size: 1.8em;
@@ -596,4 +639,487 @@ section.video-container {
   .video-js .vjs-source-selector .vjs-menu li {
     font-size: 10px;
   }
+}
+
+/* AirPlay button (Safari): the icon is a mask, so it takes the control's colour */
+.video-js .vjs-airplay-button .vjs-icon-placeholder::before {
+  content: "";
+  display: block;
+  width: 1.4em;
+  height: 100%;
+  margin: 0 auto;
+  background-color: currentcolor;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M6 22h12l-6-6zM21 3H3c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h4v-2H3V5h18v12h-4v2h4c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2z'/%3E%3C/svg%3E")
+    center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M6 22h12l-6-6zM21 3H3c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h4v-2H3V5h18v12h-4v2h4c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2z'/%3E%3C/svg%3E")
+    center / contain no-repeat;
+}
+
+/* The control bar answers the player's own width, not the viewport's: on the
+   Scene page the Recommended sidebar takes the rest of a wide screen, and the
+   player is about 550 px wide at 1280 px. The video.js element is the
+   container (inline-size only; its height still follows the video's shape).
+
+   Buttons give way in a fixed order as the player narrows: the seek buttons
+   first (the big buttons in the middle keep seeking), then the playback rate,
+   then the time display. Play, volume, source, captions, VR, AirPlay, Cast,
+   Previous, Next and fullscreen always stay. Each threshold is the width of
+   the bar with what is left (506 px with everything, 386 without seek, 326
+   without rate), plus 30 px for a time past an hour, plus 60 px for each
+   optional button shown (captions, VR, the headset button, AirPlay, Cast,
+   and a queue's Previous and Next, which hide with vjs-hidden like the
+   rest). One block per count of optional buttons (direct children of the
+   bar: a menu button holds an inner button of the same class), the sibling
+   combinator counting them, up to all seven. The widths are for 60 px controls: on a phone
+   (38 px controls) the buttons hide a little early. */
+.video-js {
+  container-type: inline-size;
+}
+
+.video-js .vjs-control-bar {
+  @container (width < 536px) {
+    .vjs-seek-button {
+      display: none;
+    }
+  }
+  @container (width < 416px) {
+    .vjs-playback-rate {
+      display: none;
+    }
+  }
+  @container (width < 356px) {
+    :is(.vjs-current-time, .vjs-time-divider, .vjs-duration) {
+      display: none;
+    }
+  }
+}
+
+.video-js
+  .vjs-control-bar:has(
+    > :is(
+        .vjs-subs-caps-button,
+        .vjs-vr-button,
+        .vjs-button-vr,
+        .vjs-airplay-button,
+        .vjs-cast-button,
+        .vjs-skip-button
+      ):not(.vjs-hidden)
+  ) {
+  @container (width < 596px) {
+    .vjs-seek-button {
+      display: none;
+    }
+  }
+  @container (width < 476px) {
+    .vjs-playback-rate {
+      display: none;
+    }
+  }
+  @container (width < 416px) {
+    :is(.vjs-current-time, .vjs-time-divider, .vjs-duration) {
+      display: none;
+    }
+  }
+}
+
+.video-js
+  .vjs-control-bar:has(
+    > :is(
+        .vjs-subs-caps-button,
+        .vjs-vr-button,
+        .vjs-button-vr,
+        .vjs-airplay-button,
+        .vjs-cast-button,
+        .vjs-skip-button
+      ):not(.vjs-hidden)
+      ~ :is(
+        .vjs-subs-caps-button,
+        .vjs-vr-button,
+        .vjs-button-vr,
+        .vjs-airplay-button,
+        .vjs-cast-button,
+        .vjs-skip-button
+      ):not(.vjs-hidden)
+  ) {
+  @container (width < 656px) {
+    .vjs-seek-button {
+      display: none;
+    }
+  }
+  @container (width < 536px) {
+    .vjs-playback-rate {
+      display: none;
+    }
+  }
+  @container (width < 476px) {
+    :is(.vjs-current-time, .vjs-time-divider, .vjs-duration) {
+      display: none;
+    }
+  }
+}
+
+.video-js
+  .vjs-control-bar:has(
+    > :is(
+        .vjs-subs-caps-button,
+        .vjs-vr-button,
+        .vjs-button-vr,
+        .vjs-airplay-button,
+        .vjs-cast-button,
+        .vjs-skip-button
+      ):not(.vjs-hidden)
+      ~ :is(
+        .vjs-subs-caps-button,
+        .vjs-vr-button,
+        .vjs-button-vr,
+        .vjs-airplay-button,
+        .vjs-cast-button,
+        .vjs-skip-button
+      ):not(.vjs-hidden)
+      ~ :is(
+        .vjs-subs-caps-button,
+        .vjs-vr-button,
+        .vjs-button-vr,
+        .vjs-airplay-button,
+        .vjs-cast-button,
+        .vjs-skip-button
+      ):not(.vjs-hidden)
+  ) {
+  @container (width < 716px) {
+    .vjs-seek-button {
+      display: none;
+    }
+  }
+  @container (width < 596px) {
+    .vjs-playback-rate {
+      display: none;
+    }
+  }
+  @container (width < 536px) {
+    :is(.vjs-current-time, .vjs-time-divider, .vjs-duration) {
+      display: none;
+    }
+  }
+}
+
+.video-js
+  .vjs-control-bar:has(
+    > :is(
+        .vjs-subs-caps-button,
+        .vjs-vr-button,
+        .vjs-button-vr,
+        .vjs-airplay-button,
+        .vjs-cast-button,
+        .vjs-skip-button
+      ):not(.vjs-hidden)
+      ~ :is(
+        .vjs-subs-caps-button,
+        .vjs-vr-button,
+        .vjs-button-vr,
+        .vjs-airplay-button,
+        .vjs-cast-button,
+        .vjs-skip-button
+      ):not(.vjs-hidden)
+      ~ :is(
+        .vjs-subs-caps-button,
+        .vjs-vr-button,
+        .vjs-button-vr,
+        .vjs-airplay-button,
+        .vjs-cast-button,
+        .vjs-skip-button
+      ):not(.vjs-hidden)
+      ~ :is(
+        .vjs-subs-caps-button,
+        .vjs-vr-button,
+        .vjs-button-vr,
+        .vjs-airplay-button,
+        .vjs-cast-button,
+        .vjs-skip-button
+      ):not(.vjs-hidden)
+  ) {
+  @container (width < 776px) {
+    .vjs-seek-button {
+      display: none;
+    }
+  }
+  @container (width < 656px) {
+    .vjs-playback-rate {
+      display: none;
+    }
+  }
+  @container (width < 596px) {
+    :is(.vjs-current-time, .vjs-time-divider, .vjs-duration) {
+      display: none;
+    }
+  }
+}
+
+.video-js
+  .vjs-control-bar:has(
+    > :is(
+        .vjs-subs-caps-button,
+        .vjs-vr-button,
+        .vjs-button-vr,
+        .vjs-airplay-button,
+        .vjs-cast-button,
+        .vjs-skip-button
+      ):not(.vjs-hidden)
+      ~ :is(
+        .vjs-subs-caps-button,
+        .vjs-vr-button,
+        .vjs-button-vr,
+        .vjs-airplay-button,
+        .vjs-cast-button,
+        .vjs-skip-button
+      ):not(.vjs-hidden)
+      ~ :is(
+        .vjs-subs-caps-button,
+        .vjs-vr-button,
+        .vjs-button-vr,
+        .vjs-airplay-button,
+        .vjs-cast-button,
+        .vjs-skip-button
+      ):not(.vjs-hidden)
+      ~ :is(
+        .vjs-subs-caps-button,
+        .vjs-vr-button,
+        .vjs-button-vr,
+        .vjs-airplay-button,
+        .vjs-cast-button,
+        .vjs-skip-button
+      ):not(.vjs-hidden)
+      ~ :is(
+        .vjs-subs-caps-button,
+        .vjs-vr-button,
+        .vjs-button-vr,
+        .vjs-airplay-button,
+        .vjs-cast-button,
+        .vjs-skip-button
+      ):not(.vjs-hidden)
+  ) {
+  @container (width < 836px) {
+    .vjs-seek-button {
+      display: none;
+    }
+  }
+  @container (width < 716px) {
+    .vjs-playback-rate {
+      display: none;
+    }
+  }
+  @container (width < 656px) {
+    :is(.vjs-current-time, .vjs-time-divider, .vjs-duration) {
+      display: none;
+    }
+  }
+}
+
+.video-js
+  .vjs-control-bar:has(
+    > :is(
+        .vjs-subs-caps-button,
+        .vjs-vr-button,
+        .vjs-button-vr,
+        .vjs-airplay-button,
+        .vjs-cast-button,
+        .vjs-skip-button
+      ):not(.vjs-hidden)
+      ~ :is(
+        .vjs-subs-caps-button,
+        .vjs-vr-button,
+        .vjs-button-vr,
+        .vjs-airplay-button,
+        .vjs-cast-button,
+        .vjs-skip-button
+      ):not(.vjs-hidden)
+      ~ :is(
+        .vjs-subs-caps-button,
+        .vjs-vr-button,
+        .vjs-button-vr,
+        .vjs-airplay-button,
+        .vjs-cast-button,
+        .vjs-skip-button
+      ):not(.vjs-hidden)
+      ~ :is(
+        .vjs-subs-caps-button,
+        .vjs-vr-button,
+        .vjs-button-vr,
+        .vjs-airplay-button,
+        .vjs-cast-button,
+        .vjs-skip-button
+      ):not(.vjs-hidden)
+      ~ :is(
+        .vjs-subs-caps-button,
+        .vjs-vr-button,
+        .vjs-button-vr,
+        .vjs-airplay-button,
+        .vjs-cast-button,
+        .vjs-skip-button
+      ):not(.vjs-hidden)
+      ~ :is(
+        .vjs-subs-caps-button,
+        .vjs-vr-button,
+        .vjs-button-vr,
+        .vjs-airplay-button,
+        .vjs-cast-button,
+        .vjs-skip-button
+      ):not(.vjs-hidden)
+  ) {
+  @container (width < 896px) {
+    .vjs-seek-button {
+      display: none;
+    }
+  }
+  @container (width < 776px) {
+    .vjs-playback-rate {
+      display: none;
+    }
+  }
+  @container (width < 716px) {
+    :is(.vjs-current-time, .vjs-time-divider, .vjs-duration) {
+      display: none;
+    }
+  }
+}
+
+.video-js
+  .vjs-control-bar:has(
+    > :is(
+        .vjs-subs-caps-button,
+        .vjs-vr-button,
+        .vjs-button-vr,
+        .vjs-airplay-button,
+        .vjs-cast-button,
+        .vjs-skip-button
+      ):not(.vjs-hidden)
+      ~ :is(
+        .vjs-subs-caps-button,
+        .vjs-vr-button,
+        .vjs-button-vr,
+        .vjs-airplay-button,
+        .vjs-cast-button,
+        .vjs-skip-button
+      ):not(.vjs-hidden)
+      ~ :is(
+        .vjs-subs-caps-button,
+        .vjs-vr-button,
+        .vjs-button-vr,
+        .vjs-airplay-button,
+        .vjs-cast-button,
+        .vjs-skip-button
+      ):not(.vjs-hidden)
+      ~ :is(
+        .vjs-subs-caps-button,
+        .vjs-vr-button,
+        .vjs-button-vr,
+        .vjs-airplay-button,
+        .vjs-cast-button,
+        .vjs-skip-button
+      ):not(.vjs-hidden)
+      ~ :is(
+        .vjs-subs-caps-button,
+        .vjs-vr-button,
+        .vjs-button-vr,
+        .vjs-airplay-button,
+        .vjs-cast-button,
+        .vjs-skip-button
+      ):not(.vjs-hidden)
+      ~ :is(
+        .vjs-subs-caps-button,
+        .vjs-vr-button,
+        .vjs-button-vr,
+        .vjs-airplay-button,
+        .vjs-cast-button,
+        .vjs-skip-button
+      ):not(.vjs-hidden)
+      ~ :is(
+        .vjs-subs-caps-button,
+        .vjs-vr-button,
+        .vjs-button-vr,
+        .vjs-airplay-button,
+        .vjs-cast-button,
+        .vjs-skip-button
+      ):not(.vjs-hidden)
+  ) {
+  @container (width < 956px) {
+    .vjs-seek-button {
+      display: none;
+    }
+  }
+  @container (width < 836px) {
+    .vjs-playback-rate {
+      display: none;
+    }
+  }
+  @container (width < 776px) {
+    :is(.vjs-current-time, .vjs-time-divider, .vjs-duration) {
+      display: none;
+    }
+  }
+}
+
+/* Cast button (Chromium on HTTPS): the icon is a mask, so it takes the
+   control's colour; connected, it shows the filled cast icon in the accent */
+.video-js .vjs-cast-button .vjs-icon-placeholder::before {
+  content: "";
+  display: block;
+  width: 1.4em;
+  height: 100%;
+  margin: 0 auto;
+  background-color: currentcolor;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M21 3H3c-1.1 0-2 .9-2 2v3h2V5h18v14h-7v2h7c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zM1 18v3h3c0-1.66-1.34-3-3-3zm0-4v2c2.76 0 5 2.24 5 5h2c0-3.87-3.13-7-7-7zm0-4v2c4.97 0 9 4.03 9 9h2c0-6.08-4.93-11-11-11z'/%3E%3C/svg%3E")
+    center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M21 3H3c-1.1 0-2 .9-2 2v3h2V5h18v14h-7v2h7c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zM1 18v3h3c0-1.66-1.34-3-3-3zm0-4v2c2.76 0 5 2.24 5 5h2c0-3.87-3.13-7-7-7zm0-4v2c4.97 0 9 4.03 9 9h2c0-6.08-4.93-11-11-11z'/%3E%3C/svg%3E")
+    center / contain no-repeat;
+}
+
+.video-js .vjs-cast-button.vjs-cast-connected .vjs-icon-placeholder::before {
+  background-color: var(--accent-primary);
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M1 18v3h3c0-1.66-1.34-3-3-3zm0-4v2c2.76 0 5 2.24 5 5h2c0-3.87-3.13-7-7-7zm18-7H5v1.63c3.96 1.28 7.09 4.41 8.37 8.37H19V7zM1 10v2c4.97 0 9 4.03 9 9h2c0-6.08-4.93-11-11-11zm20-7H3c-1.1 0-2 .9-2 2v3h2V5h18v14h-7v2h7c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2z'/%3E%3C/svg%3E");
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M1 18v3h3c0-1.66-1.34-3-3-3zm0-4v2c2.76 0 5 2.24 5 5h2c0-3.87-3.13-7-7-7zm18-7H5v1.63c3.96 1.28 7.09 4.41 8.37 8.37H19V7zM1 10v2c4.97 0 9 4.03 9 9h2c0-6.08-4.93-11-11-11zm20-7H3c-1.1 0-2 .9-2 2v3h2V5h18v14h-7v2h7c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2z'/%3E%3C/svg%3E");
+}
+
+/* "Casting to <device>": over the top of the player while a cast is attached.
+   The line stays in the page while empty, so the live region announces the
+   change; empty, it has no box and shows nothing. */
+.video-js .vjs-cast-status {
+  position: absolute;
+  top: 0.75em;
+  left: 0.75em;
+  z-index: 2;
+  max-width: calc(100% - 1.5em);
+  pointer-events: none;
+}
+
+.video-js .vjs-cast-status.vjs-cast-status-active {
+  padding: 0.35em 0.75em;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.7);
+  color: #fff;
+  font-family: var(--font-body);
+  font-size: 1.2em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The VR button's notice (WebGL missing, a start that failed): a line over the
+   top of the player, in the cast status line's style. It sits above the
+   control bar's auto-hide and ignores the pointer, so the video's controls
+   stay usable under it. */
+.video-js .vjs-vr-notice {
+  position: absolute;
+  top: 0.75em;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 3;
+  max-width: calc(100% - 1.5em);
+  padding: 0.35em 0.75em;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.8);
+  color: #fff;
+  font-family: var(--font-body);
+  font-size: 1.2em;
+  text-align: center;
+  pointer-events: none;
 }

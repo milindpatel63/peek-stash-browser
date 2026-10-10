@@ -1,4 +1,4 @@
-import type { StashInstance } from "@prisma/client";
+import type { StashInstance, StashScene } from "@prisma/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // ---------------------------------------------------------------------------
 // Imports (after mocks)
@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   createExternalPlayerLink,
+  createSceneMediaLink,
   getCaption,
   proxyStashStream,
 } from "../../controllers/video.js";
@@ -14,14 +15,18 @@ import {
   GatewayTimeoutError,
   NotFoundError,
 } from "../../middleware/errorHandler.js";
+import { authenticateStreamRequest } from "../../middleware/streamAuth.js";
 import prisma from "../../prisma/singleton.js";
+import videoRouter from "../../routes/video.js";
 import { canUserAccessEntity } from "../../services/EntityAccessService.js";
 import { stashInstanceManager } from "../../services/StashInstanceManager.js";
 import { logger } from "../../utils/logger.js";
 import { isAllowedStreamPath } from "../../utils/stashMediaPath.js";
 import {
+  STREAM_LINK_TTL_SECONDS,
   deriveStreamLinkKey,
   isStreamLinkSignatureValid,
+  signStreamLink,
 } from "../../utils/streamLink.js";
 import type * as streamProxyModule from "../../utils/streamProxy.js";
 import {
@@ -34,6 +39,7 @@ import {
   malformed,
   reqFor,
   resFor,
+  runRoute,
 } from "../helpers/controllerTestUtils.js";
 import { stashInstanceRow } from "../helpers/fixtures.js";
 import { anyOf } from "../helpers/matchers.js";
@@ -558,6 +564,169 @@ describe("Video Controller", () => {
     });
 
     // -----------------------------------------------------------------------
+    // A playlist fetched with a media link signs every URL it lists, so a
+    // player with no cookie can follow it (Cast receiver, VLC)
+    // -----------------------------------------------------------------------
+    describe("signed HLS playlist", () => {
+      const EXP = Math.floor(Date.now() / 1000) + STREAM_LINK_TTL_SECONDS;
+      const claims = {
+        userId: 7,
+        sceneId: "123",
+        instanceId: "inst-a",
+        exp: EXP,
+        passwordChangedAtMs: 0,
+        scope: "media" as const,
+      };
+      const SIG = signStreamLink(claims, deriveStreamLinkKey("test-secret"));
+
+      /** The playlist for a request carrying the verified link `sig`. */
+      async function signedPlaylist(
+        upstream: string,
+        sig: string = SIG
+      ): Promise<string> {
+        vi.mocked(global.fetch).mockResolvedValue(makeFetchResponse(upstream));
+        const res = resFor(proxyStashStream);
+        res.locals.streamLink = { uid: 7, exp: EXP, scope: "media", sig };
+        await proxyStashStream(createMockReq(), res);
+        return sentText(res);
+      }
+
+      /** Every URL a playlist lists: URI lines and tag URI attributes. */
+      function listedUrls(playlist: string): string[] {
+        return playlist.split("\n").flatMap((line) => {
+          if (!line.trim()) return [];
+          if (!line.startsWith("#")) return [line];
+          return [...line.matchAll(/URI="([^"]*)"/g)].map((m) => m[1] ?? "");
+        });
+      }
+
+      function expectSigned(url: string, sig: string = SIG): void {
+        const params = new URL(url, "http://x").searchParams;
+        for (const key of ["uid", "exp", "scope", "sig", "instanceId"]) {
+          expect(params.getAll(key), `${key} in ${url}`).toHaveLength(1);
+        }
+        expect(params.get("uid")).toBe("7");
+        expect(params.get("exp")).toBe(String(EXP));
+        expect(params.get("scope")).toBe("media");
+        expect(params.get("sig")).toBe(sig);
+        expect(params.get("instanceId")).toBe("inst-a");
+      }
+
+      it("a playlist fetched with a media link lists segments carrying uid, exp, scope, sig and instanceId", async () => {
+        const playlist = await signedPlaylist(
+          [
+            "#EXTM3U",
+            '#EXT-X-MAP:URI="init.mp4?apikey=SECRET"',
+            "#EXTINF:10.0,",
+            "http://stash:9999/scene/123/stream.m3u8/0.ts?apikey=SECRET&resolution=LOW",
+            "#EXTINF:10.0,",
+            "/scene/123/stream.m3u8/1.ts?apikey=SECRET&resolution=LOW",
+            "#EXTINF:10.0,",
+            "stream.m3u8/2.ts?resolution=LOW",
+            "#EXTINF:10.0,",
+            "3.ts?resolution=LOW&instanceId=other&uid=9&sig=x",
+            "",
+          ].join("\n")
+        );
+
+        const urls = listedUrls(playlist);
+        expect(urls).toHaveLength(5);
+        for (const url of urls) expectSigned(url);
+        expect(playlist).not.toMatch(/apikey/i);
+        expect(playlist).toContain(
+          `/api/scene/123/proxy-stream/stream.m3u8/0.ts?resolution=LOW&instanceId=inst-a&uid=7&exp=${EXP}&scope=media&sig=${SIG}`
+        );
+      });
+
+      it("a session playlist lists segments with no sig", async () => {
+        const playlist = await rewrittenPlaylist(
+          [
+            "#EXTM3U",
+            '#EXT-X-MAP:URI="init.mp4"',
+            "http://stash:9999/scene/123/stream.m3u8/0.ts?apikey=SECRET",
+            "stream.m3u8/1.ts",
+          ].join("\n")
+        );
+
+        expect(playlist).not.toMatch(/sig=|uid=|exp=|scope=/);
+        expect(playlist).toContain("instanceId=inst-a");
+      });
+
+      it("a master playlist's variants are signed, and each variant signs its own segments", async () => {
+        const master = await signedPlaylist(
+          [
+            "#EXTM3U",
+            '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="en",URI="stream.m3u8?resolution=LOW"',
+            "#EXT-X-STREAM-INF:BANDWIDTH=1000",
+            "stream.m3u8?resolution=LOW",
+            "",
+          ].join("\n")
+        );
+        const variants = listedUrls(master);
+        expect(variants).toHaveLength(2);
+
+        for (const variant of variants) {
+          expectSigned(variant);
+          const url = new URL(variant, "http://x");
+          expect(url.pathname).toBe("/api/scene/123/proxy-stream/stream.m3u8");
+
+          // The route accepts the variant as stream.m3u8 on its signature
+          vi.mocked(global.fetch).mockResolvedValue(
+            makeFetchResponse(
+              "#EXTM3U\n#EXTINF:10.0,\n/scene/123/stream.m3u8/0.ts?resolution=LOW\n"
+            )
+          );
+          mockPrisma.user.findUnique.mockResolvedValue(
+            partialRow({ id: 7, username: "u", role: "USER" })
+          );
+          const query = Object.fromEntries(url.searchParams);
+          const req = reqFor(authenticateStreamRequest, {
+            params: { sceneId: "123", streamPath: "stream.m3u8" },
+            query,
+            url: variant,
+          });
+          const res = resFor(proxyStashStream);
+          await runRoute(
+            videoRouter,
+            "get",
+            "/scene/:sceneId/proxy-stream/:streamPath",
+            req,
+            res
+          );
+
+          expect(res.status).not.toHaveBeenCalledWith(401);
+          const segments = listedUrls(sentText(res));
+          expect(segments).toHaveLength(1);
+          for (const segment of segments) expectSigned(segment);
+          vi.mocked(global.fetch).mockClear();
+        }
+      });
+
+      it("a forged sig containing ApiKey still yields signed segment lines, and a real apikey is still dropped", async () => {
+        const forged = `ApiKey${"x".repeat(37)}`;
+        const playlist = await signedPlaylist(
+          [
+            "#EXTM3U",
+            "#EXTINF:10.0,",
+            "stream.m3u8/0.ts?resolution=LOW",
+            '#EXT-X-MAP:URI="init.mp4"',
+            "#EXTINF:10.0,",
+            "/scene/123/apikey=SECRET/1.ts",
+            "",
+          ].join("\n"),
+          forged
+        );
+
+        const lines = playlist.split("\n");
+        expectSigned(must(lines[2]), forged);
+        expectSigned(listedUrls(must(lines[3]))[0] ?? "", forged);
+        // The line naming apikey is gone, the sig on the others is not
+        expect(lines[5]).toBe("");
+        expect(playlist).not.toContain("SECRET");
+      });
+    });
+
+    // -----------------------------------------------------------------------
     // DASH manifest. Stash echoes apikey into segment templates when the key
     // arrives as a query parameter; Peek sends it as a header, but the
     // manifest must never carry it whatever Stash does.
@@ -793,6 +962,58 @@ describe("Video Controller", () => {
 
         await proxyStashStream(req, res);
 
+        expect(mockCanUserAccessEntity).toHaveBeenCalledWith(
+          7,
+          "scene",
+          "123",
+          "inst-a"
+        );
+        expect(res.status).toHaveBeenCalledWith(404);
+        expect(global.fetch).not.toHaveBeenCalled();
+      });
+
+      it("a hidden scene answers 404 to a valid media link", async () => {
+        // Hidden or restricted mid-cast: the link verifies, the access check
+        // still refuses, at the next playlist or segment request
+        mockCanUserAccessEntity.mockResolvedValue(false);
+        mockPrisma.user.findUnique.mockResolvedValue(
+          partialRow({ id: 7, username: "u", role: "USER" })
+        );
+        const claims = {
+          userId: 7,
+          sceneId: "123",
+          instanceId: "inst-a",
+          exp: Math.floor(Date.now() / 1000) + STREAM_LINK_TTL_SECONDS,
+          passwordChangedAtMs: 0,
+          scope: "media" as const,
+        };
+        const sig = signStreamLink(claims, deriveStreamLinkKey("test-secret"));
+        const req = reqFor(authenticateStreamRequest, {
+          params: {
+            sceneId: "123",
+            streamPath: "stream.m3u8",
+            subPath: "0.ts",
+          },
+          query: {
+            instanceId: "inst-a",
+            uid: "7",
+            exp: String(claims.exp),
+            scope: "media",
+            sig,
+          },
+          url: "/api/scene/123/proxy-stream/stream.m3u8/0.ts",
+        });
+        const res = resFor(proxyStashStream);
+
+        await runRoute(
+          videoRouter,
+          "get",
+          "/scene/:sceneId/proxy-stream/:streamPath/:subPath",
+          req,
+          res
+        );
+
+        expect(req.user).toEqual({ id: 7, username: "u", role: "USER" });
         expect(mockCanUserAccessEntity).toHaveBeenCalledWith(
           7,
           "scene",
@@ -1763,6 +1984,279 @@ describe("Video Controller", () => {
       expect(badInstance.status).toHaveBeenCalledWith(400);
 
       expect(mockCanUserAccessEntity).not.toHaveBeenCalled();
+    });
+  });
+
+  // =========================================================================
+  // createSceneMediaLink
+  // =========================================================================
+  describe("createSceneMediaLink", () => {
+    const NOW = new Date("2026-09-23T12:00:00Z");
+    const PASSWORD_CHANGED_AT = new Date("2026-09-01T00:00:00Z");
+    const EXP = 1790208000;
+
+    const sceneRow = (parts: Partial<StashScene> = {}) =>
+      partialRow<StashScene>({
+        streamDirect: true,
+        streamMkv: false,
+        streamResolutions: "ORIGINAL,FULL_HD,STANDARD_HD,STANDARD,LOW",
+        filePath: "/media/a.mp4",
+        fileVideoCodec: "h264",
+        fileAudioCodec: "aac",
+        fileWidth: 1920,
+        fileHeight: 1080,
+        captions: JSON.stringify([
+          { language_code: "en", caption_type: "srt" },
+          { language_code: "de", caption_type: "vtt" },
+        ]),
+        pathScreenshot: "/scene/123/screenshot",
+        ...parts,
+      });
+
+    const mint = async (
+      body: ReqParts<typeof createSceneMediaLink>["body"] = {
+        instanceId: "inst-a",
+      }
+    ) => {
+      const req = reqFor(createSceneMediaLink, {
+        params: { sceneId: "123" },
+        query: {},
+        body,
+        user: USER,
+      });
+      const res = resFor(createSceneMediaLink);
+      await createSceneMediaLink(req, res);
+      return res;
+    };
+
+    const urlsOf = (body: {
+      streams: { url: string }[];
+      cast: { url: string } | null;
+      captions: { url: string }[];
+      poster: string | null;
+    }): string[] => [
+      ...body.streams.map((s) => s.url),
+      ...(body.cast ? [body.cast.url] : []),
+      ...body.captions.map((c) => c.url),
+      ...(body.poster ? [body.poster] : []),
+    ];
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+      vi.setSystemTime(NOW);
+      mockPrisma.user.findUnique.mockResolvedValue(
+        partialRow({ passwordChangedAt: PASSWORD_CHANGED_AT })
+      );
+      mockPrisma.stashScene.findFirst.mockResolvedValue(sceneRow());
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("reads the scene once by id and instance", async () => {
+      await mint();
+
+      expect(mockPrisma.stashScene.findFirst).toHaveBeenCalledTimes(1);
+      expect(mockPrisma.stashScene.findFirst).toHaveBeenCalledWith({
+        where: { id: "123", stashInstanceId: "inst-a", deletedAt: null },
+        select: {
+          streamDirect: true,
+          streamMkv: true,
+          streamResolutions: true,
+          filePath: true,
+          fileVideoCodec: true,
+          fileAudioCodec: true,
+          fileWidth: true,
+          fileHeight: true,
+          captions: true,
+          pathScreenshot: true,
+        },
+      });
+    });
+
+    it("signs every URL with scope media for this user, scene and instance", async () => {
+      const res = await mint();
+      const body = res._getOkBody();
+      expect(body.expiresAt).toBe("2026-09-24T00:00:00.000Z");
+
+      const urls = urlsOf(body);
+      expect(urls.length).toBeGreaterThan(4);
+      for (const url of urls) {
+        const q = new URL(url, "http://peek.test").searchParams;
+        expect(q.get("instanceId")).toBe("inst-a");
+        expect(q.get("uid")).toBe("7");
+        expect(q.get("exp")).toBe(String(EXP));
+        expect(q.get("scope")).toBe("media");
+        expect(
+          isStreamLinkSignatureValid(
+            {
+              userId: 7,
+              sceneId: "123",
+              instanceId: "inst-a",
+              exp: EXP,
+              passwordChangedAtMs: PASSWORD_CHANGED_AT.getTime(),
+              scope: "media",
+            },
+            must(q.get("sig")),
+            deriveStreamLinkKey("test-secret")
+          )
+        ).toBe(true);
+      }
+    });
+
+    it("gives every URL exactly one instanceId, uid, exp, scope and sig", async () => {
+      const body = (await mint())._getOkBody();
+      for (const url of urlsOf(body)) {
+        const q = new URL(url, "http://peek.test").searchParams;
+        for (const key of ["instanceId", "uid", "exp", "scope", "sig"]) {
+          expect(q.getAll(key)).toHaveLength(1);
+        }
+      }
+    });
+
+    it("lists only Direct and HLS in streams, with no DASH, MP4, WebM or MKV transcode", async () => {
+      const body = (await mint())._getOkBody();
+      const files = body.streams.map((s) =>
+        new URL(s.url, "http://peek.test").pathname.split("/").pop()
+      );
+      expect(new Set(files)).toEqual(new Set(["stream", "stream.m3u8"]));
+      expect(body.streams.map((s) => s.label)).toEqual([
+        "Direct stream",
+        "HLS",
+        "HLS Full HD (1080p)",
+        "HLS HD (720p)",
+        "HLS Standard (480p)",
+        "HLS Low (240p)",
+      ]);
+      expect(JSON.stringify(body)).not.toMatch(/stream\.(mpd|mp4|webm|mkv)/);
+    });
+
+    it("gives a Direct cast source for an H.264 AAC MP4", async () => {
+      const body = (await mint())._getOkBody();
+      expect(body.cast).toEqual({
+        url: anyOf(String),
+        contentType: "video/mp4",
+        kind: "direct",
+      });
+      expect(new URL(must(body.cast).url, "http://peek.test").pathname).toBe(
+        "/api/scene/123/proxy-stream/stream"
+      );
+    });
+
+    it("gives an HLS cast source at the chosen tier for an MKV", async () => {
+      mockPrisma.stashScene.findFirst.mockResolvedValue(
+        sceneRow({ filePath: "/media/a.mkv", streamDirect: false })
+      );
+      const body = (await mint())._getOkBody();
+      const cast = must(body.cast);
+      expect(cast.kind).toBe("hls");
+      expect(cast.contentType).toBe("application/x-mpegurl");
+      const url = new URL(cast.url, "http://peek.test");
+      expect(url.pathname).toBe("/api/scene/123/proxy-stream/stream.m3u8");
+      expect(url.searchParams.get("resolution")).toBe("FULL_HD");
+    });
+
+    it("gives a null cast when the scene offers neither", async () => {
+      mockPrisma.stashScene.findFirst.mockResolvedValue(
+        sceneRow({ streamDirect: false, streamResolutions: "" })
+      );
+      const body = (await mint())._getOkBody();
+      expect(body.cast).toBeNull();
+      expect(body.streams).toEqual([]);
+    });
+
+    it("gives a row with null stream columns streams and a cast source from its file fields", async () => {
+      mockPrisma.stashScene.findFirst.mockResolvedValue(
+        sceneRow({
+          streamDirect: null,
+          streamMkv: null,
+          streamResolutions: null,
+        })
+      );
+      const body = (await mint())._getOkBody();
+      expect(body.streams.length).toBeGreaterThan(0);
+      expect(body.streams[0]?.label).toBe("Direct stream");
+      expect(body.cast?.kind).toBe("direct");
+    });
+
+    it("lists one signed URL per caption", async () => {
+      const body = (await mint())._getOkBody();
+      expect(body.captions).toHaveLength(2);
+      expect(body.captions.map((c) => [c.lang, c.type])).toEqual([
+        ["en", "srt"],
+        ["de", "vtt"],
+      ]);
+      const first = new URL(must(body.captions[0]).url, "http://peek.test");
+      expect(first.pathname).toBe("/api/scene/123/caption");
+      expect(first.searchParams.get("lang")).toBe("en");
+      expect(first.searchParams.get("type")).toBe("srt");
+    });
+
+    it("skips a caption whose language or type the caption route would refuse", async () => {
+      mockPrisma.stashScene.findFirst.mockResolvedValue(
+        sceneRow({
+          captions: JSON.stringify([
+            { language_code: "en", caption_type: "srt" },
+            { language_code: "e n", caption_type: "srt" },
+            { language_code: "en", caption_type: "ass" },
+          ]),
+        })
+      );
+      const body = (await mint())._getOkBody();
+      expect(body.captions.map((c) => c.lang)).toEqual(["en"]);
+    });
+
+    it("signs the poster path when the scene has a screenshot", async () => {
+      const body = (await mint())._getOkBody();
+      const poster = new URL(must(body.poster), "http://peek.test");
+      expect(poster.pathname).toBe("/api/scene/123/poster");
+      expect(poster.searchParams.get("scope")).toBe("media");
+    });
+
+    it("gives a null poster without a screenshot", async () => {
+      mockPrisma.stashScene.findFirst.mockResolvedValue(
+        sceneRow({ pathScreenshot: null })
+      );
+      const body = (await mint())._getOkBody();
+      expect(body.poster).toBeNull();
+    });
+
+    it("answers 404 for a scene the user cannot see, with no link minted", async () => {
+      mockCanUserAccessEntity.mockResolvedValue(false);
+      const res = await mint();
+
+      expect(mockCanUserAccessEntity).toHaveBeenCalledWith(
+        7,
+        "scene",
+        "123",
+        "inst-a"
+      );
+      expect(res.status).toHaveBeenCalledWith(404);
+      expect(res.json).toHaveBeenCalledWith({ error: "Not found" });
+      expect(res.json).toHaveBeenCalledTimes(1);
+      expect(mockPrisma.stashScene.findFirst).not.toHaveBeenCalled();
+      expect(JSON.stringify(res.json.mock.calls)).not.toContain("sig=");
+    });
+
+    it("answers 404 for a scene with no cached row", async () => {
+      mockPrisma.stashScene.findFirst.mockResolvedValue(null);
+      const res = await mint();
+      expect(res.status).toHaveBeenCalledWith(404);
+      expect(JSON.stringify(res.json.mock.calls)).not.toContain("sig=");
+    });
+
+    it("answers 400 for a bad scene id or instance", async () => {
+      const badInstance = await mint(malformed({ instanceId: "inst a" }));
+      expect(badInstance.status).toHaveBeenCalledWith(400);
+      const noInstance = await mint(malformed({}));
+      expect(noInstance.status).toHaveBeenCalledWith(400);
+      expect(mockCanUserAccessEntity).not.toHaveBeenCalled();
+    });
+
+    it("sets Cache-Control: no-store", async () => {
+      const res = await mint();
+      expect(res.setHeader).toHaveBeenCalledWith("Cache-Control", "no-store");
     });
   });
 

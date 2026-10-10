@@ -3,6 +3,7 @@ import {
   type Budgets,
   checkBudget,
   circularChunkWarnings,
+  budgets as realBudgets,
 } from "../../scripts/bundleBudget.mjs";
 
 const budgets: Budgets = {
@@ -105,6 +106,48 @@ describe("checkBudget", () => {
     expect(violations[0]).toContain("Entry");
     expect(violations[0]).toContain("545");
     expect(violations[0]).toContain("160");
+  });
+});
+
+describe("the budgets", () => {
+  const sizesWith = (chunk: { name: string; size: number }) => ({
+    chunks: [{ ...chunk, gzip: 0 }],
+    entry: { name: "index", size: kB(100), gzip: kB(30) },
+    firstLoad: [],
+  });
+
+  it("name a vr chunk, the lazy VR code, above the default chunk limit", () => {
+    const vr = realBudgets.chunkKB.vr;
+
+    expect(vr).toBeGreaterThan(realBudgets.maxChunkKB);
+    expect(
+      checkBudget(sizesWith({ name: "vr", size: kB(vr ?? 0) }), realBudgets)
+    ).toEqual([]);
+    expect(
+      checkBudget(
+        sizesWith({ name: "vr", size: kB((vr ?? 0) + 1) }),
+        realBudgets
+      )
+    ).toHaveLength(1);
+  });
+});
+
+describe("the vr-ui budget", () => {
+  it("names a small vr-ui chunk, the VR button and its logic", () => {
+    const ui = realBudgets.chunkKB["vr-ui"];
+
+    expect(ui).toBeDefined();
+    expect(ui).toBeLessThan(10);
+    expect(
+      checkBudget(
+        {
+          chunks: [{ name: "vr-ui", size: (ui ?? 0) * 1000 + 1, gzip: 0 }],
+          entry: { name: "index", size: 100_000, gzip: 30_000 },
+          firstLoad: [],
+        },
+        realBudgets
+      )
+    ).toHaveLength(1);
   });
 });
 

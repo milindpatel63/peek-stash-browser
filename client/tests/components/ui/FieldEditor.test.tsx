@@ -11,6 +11,7 @@ import userEvent from "@testing-library/user-event";
 import { must } from "@tests/testUtils";
 import { describe, expect, it, vi } from "vitest";
 import FieldEditor from "@/components/ui/FieldEditor";
+import { buildSceneFilter } from "@/utils/filterConfig";
 import { type FilterOption, filterOptionsOf } from "@/utils/filterFields";
 import type { PanelState } from "@/utils/filterFields";
 
@@ -143,14 +144,72 @@ describe("a range row", () => {
   it("a whole-unit row truncates", () => {
     const spy = vi.fn<(next: PanelState) => void>();
     render(
-      <Harness option={{ ...optionOf("scene", "rating"), step: 1 }} spy={spy} />
+      <Harness option={{ ...optionOf("scene", "oCount"), step: 1 }} spy={spy} />
     );
 
     fireEvent.change(screen.getByPlaceholderText("Max"), {
       target: { value: "88.7" },
     });
 
-    expect(lastOf(spy)).toEqual({ rating: { max: 88 } });
+    expect(lastOf(spy)).toEqual({ oCount: { max: 88 } });
+  });
+
+  it("a rating is typed on the 0 to 10 scale ratings show and held as rating100", () => {
+    const spy = vi.fn<(next: PanelState) => void>();
+    render(
+      <Harness
+        option={optionOf("scene", "rating")}
+        initial={{ rating: { max: 95 } }}
+        spy={spy}
+      />
+    );
+
+    expect(screen.getByRole("textbox", { name: "Maximum Rating" })).toHaveValue(
+      "9.5"
+    );
+    fireEvent.change(screen.getByRole("textbox", { name: "Minimum Rating" }), {
+      target: { value: "6" },
+    });
+    expect(lastOf(spy)).toEqual({ rating: { min: 60, max: 95 } });
+
+    // A scene rated 6.8 (rating100 68) is at least 6
+    expect(buildSceneFilter({ rating: { min: 60 } })).toEqual({
+      rating100: { modifier: "BETWEEN", value: 60 },
+    });
+
+    fireEvent.change(screen.getByRole("textbox", { name: "Minimum Rating" }), {
+      target: { value: "6.8" },
+    });
+    expect(lastOf(spy)).toEqual({ rating: { min: 68, max: 95 } });
+
+    // One decimal, as the rating slider: a second one is not taken
+    fireEvent.change(screen.getByRole("textbox", { name: "Minimum Rating" }), {
+      target: { value: "6.85" },
+    });
+    expect(screen.getByRole("textbox", { name: "Minimum Rating" })).toHaveValue(
+      "6.8"
+    );
+  });
+
+  it("a rating takes a comma as its decimal point and nothing past 10", () => {
+    const spy = vi.fn<(next: PanelState) => void>();
+    render(<Harness option={optionOf("scene", "rating")} spy={spy} />);
+    const minimum = screen.getByRole("textbox", { name: "Minimum Rating" });
+    const maximum = screen.getByRole("textbox", { name: "Maximum Rating" });
+
+    // A comma locale's decimal keyboard offers ","
+    fireEvent.change(minimum, { target: { value: "6,5" } });
+    expect(lastOf(spy)).toEqual({ rating: { min: 65 } });
+    fireEvent.blur(minimum);
+    expect(minimum).toHaveValue("6.5");
+
+    fireEvent.change(maximum, { target: { value: "10" } });
+    expect(lastOf(spy)).toEqual({ rating: { min: 65, max: 100 } });
+    // Past the scale's 10 is not taken (10.5 would be sent as 105)
+    fireEvent.change(maximum, { target: { value: "10.5" } });
+    fireEvent.change(maximum, { target: { value: "105" } });
+    expect(maximum).toHaveValue("10");
+    expect(lastOf(spy)).toEqual({ rating: { min: 65, max: 100 } });
   });
 
   it("a bound of 0 shows, and a cleared bound leaves the other", () => {
@@ -211,9 +270,9 @@ describe("presence", () => {
     );
 
     expect(
-      screen.getByRole("combobox", { name: "Rating (0-100) condition" })
+      screen.getByRole("combobox", { name: "Rating condition" })
     ).toHaveDisplayValue("Not rated");
-    expect(screen.queryByRole("spinbutton")).toBeNull();
+    expect(screen.queryByRole("textbox", { name: /Rating$/ })).toBeNull();
   });
 
   it("presence hides the value: Studios Has none shows no picker", () => {

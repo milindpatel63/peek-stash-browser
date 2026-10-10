@@ -1,6 +1,8 @@
 import type {
   ExternalPlayerLinkRequest,
   ExternalPlayerLinkResponse,
+  SceneMediaLinkRequest,
+  SceneMediaLinkResponse,
 } from "@peek/shared-types/api/video.js";
 import type { Response } from "express";
 import { NotFoundError } from "../middleware/errorHandler.js";
@@ -22,6 +24,12 @@ import {
   isValidInstanceId,
 } from "../utils/mediaAccess.js";
 import {
+  buildSceneStreams,
+  chooseCastSource,
+  streamOptionsOf,
+} from "../utils/sceneStreams.js";
+import { parseJsonArray } from "../utils/sqlHelpers.js";
+import {
   INSTANCE_ID_PATTERN,
   SCENE_ID_PATTERN,
   isAllowedCaption,
@@ -31,9 +39,12 @@ import {
 import {
   STREAM_LINK_TTL_SECONDS,
   type StreamLinkClaims,
+  applySignedQuery,
   buildStreamLinkPath,
   getStreamLinkKey,
   signStreamLink,
+  signedQuery,
+  signedQueryOf,
 } from "../utils/streamLink.js";
 import {
   HEAD_PROBE_RANGE,
@@ -164,12 +175,15 @@ function deleteApiKeyParams(params: URLSearchParams): void {
 
 /**
  * One URI from a Stash HLS playlist as a Peek proxy-stream path, without
- * apikey and with instanceId. Null when the URI cannot be parsed.
+ * apikey and with instanceId. With `signed` (the media link the playlist was
+ * fetched with) each of its keys is set after instanceId, so a player with
+ * no cookie can follow the URI. Null when the URI cannot be parsed.
  */
 function rewriteStashUri(
   uri: string,
   sceneId: string,
-  instanceId: string
+  instanceId: string,
+  signed?: URLSearchParams
 ): string | null {
   if (!uri.trim()) {
     return null;
@@ -196,6 +210,7 @@ function rewriteStashUri(
 
     // Every segment names the instance, as the playlist request did
     queryParams.set("instanceId", instanceId);
+    if (signed) applySignedQuery(queryParams, signed);
 
     // Extract the stream path (everything after /scene/{id}/)
     let streamPath: string;
@@ -230,7 +245,8 @@ const API_KEY_ANYWHERE = /apikey/i;
 function rewriteHlsLine(
   line: string,
   sceneId: string,
-  instanceId: string
+  instanceId: string,
+  signed?: URLSearchParams
 ): string {
   if (!line.trim()) {
     return line;
@@ -241,7 +257,7 @@ function rewriteHlsLine(
     const rewritten = line.replace(
       HLS_URI_ATTRIBUTE,
       (match, separator: string, uri: string) => {
-        const proxied = rewriteStashUri(uri, sceneId, instanceId);
+        const proxied = rewriteStashUri(uri, sceneId, instanceId, signed);
         if (proxied === null) {
           rewrite.unparsable = true;
           return match;
@@ -256,7 +272,7 @@ function rewriteHlsLine(
     return rewritten;
   }
 
-  const proxied = rewriteStashUri(line, sceneId, instanceId);
+  const proxied = rewriteStashUri(line, sceneId, instanceId, signed);
   if (proxied === null) {
     // Never return the raw line: Stash's playlist lines can carry apikey
     logger.warn(`[PROXY] Failed to rewrite HLS line: ${redactUrl(line)}`);
@@ -278,20 +294,27 @@ function rewriteHlsLine(
  *
  * All are rewritten to: /api/scene/{sceneId}/proxy-stream/{path}?{params without apikey}&instanceId=xxx,
  * which proxyStashStream serves again (isAllowedStreamPath admits stream.m3u8/{n}.ts).
- * URI attributes in tags are rewritten the same way. A line that cannot be
- * rewritten, or that still names apikey afterwards, is replaced by "".
+ * URI attributes in tags are rewritten the same way. With `signed`, every
+ * rewritten URI also carries the media link's `uid`, `exp`, `scope` and `sig`.
+ * A line that cannot be rewritten, or that still names apikey afterwards (not
+ * counting the link's own `sig`, which may spell it by chance), is replaced
+ * by "".
  */
 function rewriteHlsPlaylist(
   content: string,
   sceneId: string,
   _stashBaseUrl: string,
-  instanceId: string
+  instanceId: string,
+  signed?: URLSearchParams
 ): string {
+  const sig = signed?.get("sig");
   return content
     .split("\n")
     .map((line, index) => {
-      const rewritten = rewriteHlsLine(line, sceneId, instanceId);
-      if (API_KEY_ANYWHERE.test(rewritten)) {
+      const rewritten = rewriteHlsLine(line, sceneId, instanceId, signed);
+      // A 43-character sig can spell "apikey" in any case; mask it for the guard
+      const checked = sig ? rewritten.split(sig).join("SIG") : rewritten;
+      if (API_KEY_ANYWHERE.test(checked)) {
         // The line has a shape redactUrl may not know, so log only where it was
         const kind = line.startsWith("#")
           ? (line.match(/^#[A-Z0-9-]+/)?.[0] ?? "a tag")
@@ -336,12 +359,15 @@ function stripDashApiKeys(manifest: string): string {
  *
  * This lets Stash handle all codec detection, transcoding, and quality selection.
  *
- * SECURITY: authenticateStreamRequest runs first (a session, or a signed link
- * on the direct stream). The path must be one of Stash's stream files
+ * SECURITY: authenticateStreamRequest runs first (a session, or a signed link:
+ * a v1 link opens only the direct stream, a media link also the HLS playlist
+ * and its segments). The path must be one of Stash's stream files
  * (isAllowedStreamPath), the scene must be visible to the user, and only
  * `resolution` and `start` go upstream. For HLS playlists (.m3u8), internal
  * URLs are rewritten to strip the Stash API key and route segment requests
- * through Peek's proxy. A DASH manifest (.mpd) has its apikey parameters
+ * through Peek's proxy; when the playlist was fetched with a media link
+ * (res.locals.streamLink), each rewritten URL carries that link's signature,
+ * so a player with no cookie can follow it. A DASH manifest (.mpd) has its apikey parameters
  * stripped, and is refused if it still names apikey. Manifests are fetched
  * whole, never by Range.
  */
@@ -486,11 +512,15 @@ export const proxyStashStream = async (
       readStashText(response, abort, STREAM_IDLE_TIMEOUT_MS)
     );
     if (playlistContent === undefined) return;
+    // A playlist fetched with a media link signs every URL it lists
+    const link = res.locals.streamLink;
+    const signed = link ? signedQueryOf(link, instanceId) : undefined;
     const rewrittenContent = rewriteHlsPlaylist(
       playlistContent,
       sceneId,
       stashBaseUrl,
-      instanceId
+      instanceId,
+      signed
     );
 
     // Set headers for the rewritten playlist
@@ -805,5 +835,163 @@ export const createExternalPlayerLink = async (
     ),
     expiresAt: new Date(exp * 1000).toISOString(),
     mimeType: videoMimeType(scene?.filePath ?? null),
+  });
+};
+
+// ============================================================================
+// MEDIA LINK
+// ============================================================================
+
+/**
+ * Mint one signed media link for a scene (scope `media`) and answer every URL
+ * a Cast receiver or Safari's native player needs: Direct and the HLS tiers,
+ * the one cast source, the captions and the poster.
+ * POST /api/scene/:sceneId/media-link { instanceId }
+ *
+ * Every URL is a path, signed with the same claims, so the server never
+ * trusts the Host header and the client prefixes its own origin. The signed
+ * parameters are merged with `set` into URLs that already hold `instanceId`,
+ * so each key appears once. The link opens only this scene on this instance,
+ * and every request it makes runs the access check again (middleware/streamAuth.ts).
+ */
+export const createSceneMediaLink = async (
+  req: TypedAuthRequest<SceneMediaLinkRequest, { sceneId: string }>,
+  res: TypedResponse<SceneMediaLinkResponse | ApiErrorResponse>
+) => {
+  const { sceneId } = req.params;
+  const instanceId = (req.body as { instanceId?: unknown } | undefined)
+    ?.instanceId;
+
+  if (
+    !SCENE_ID_PATTERN.test(sceneId) ||
+    typeof instanceId !== "string" ||
+    !INSTANCE_ID_PATTERN.test(instanceId)
+  ) {
+    res.status(400).json({ error: "Invalid scene or instance" });
+    return;
+  }
+
+  if (!(await canUserAccessEntity(req.user.id, "scene", sceneId, instanceId))) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
+
+  const user = await prisma.user.findUnique({
+    where: { id: req.user.id },
+    select: { passwordChangedAt: true },
+  });
+  if (!user) {
+    res.status(401).json({ error: "Session expired" });
+    return;
+  }
+
+  const scene = await prisma.stashScene.findFirst({
+    where: { id: sceneId, stashInstanceId: instanceId, deletedAt: null },
+    select: {
+      streamDirect: true,
+      streamMkv: true,
+      streamResolutions: true,
+      filePath: true,
+      fileVideoCodec: true,
+      fileAudioCodec: true,
+      fileWidth: true,
+      fileHeight: true,
+      captions: true,
+      pathScreenshot: true,
+    },
+  });
+  if (!scene) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
+
+  const exp = Math.floor(Date.now() / 1000) + STREAM_LINK_TTL_SECONDS;
+  const claims: StreamLinkClaims = {
+    userId: req.user.id,
+    sceneId,
+    instanceId,
+    exp,
+    passwordChangedAtMs: user.passwordChangedAt?.getTime() ?? 0,
+    scope: "media",
+  };
+  const signed = signedQuery(
+    claims,
+    signStreamLink(claims, getStreamLinkKey())
+  );
+
+  /** A path with its own query plus the signed one, one of each key. */
+  const sign = (path: string, query?: string): string => {
+    const params = new URLSearchParams(query);
+    applySignedQuery(params, signed);
+    return `${path}?${params}`;
+  };
+
+  const options = streamOptionsOf(scene);
+  const streams = buildSceneStreams(sceneId, instanceId, options)
+    .filter((s) => /\/stream(\.m3u8)?\?/.test(s.url))
+    .map((s) => {
+      const [path = "", query] = s.url.split("?");
+      // buildSceneStreams always sets both; the type only allows null
+      return {
+        url: sign(path, query),
+        mime_type: s.mime_type ?? "",
+        label: s.label ?? "",
+      };
+    });
+
+  const choice = chooseCastSource(options, scene);
+  const castStream = choice
+    ? streams.find((s) => {
+        const url = new URL(s.url, "http://peek.invalid");
+        return choice.kind === "direct"
+          ? url.pathname.endsWith("/stream")
+          : url.pathname.endsWith("/stream.m3u8") &&
+              url.searchParams.get("resolution") === choice.resolution;
+      })
+    : undefined;
+  const cast =
+    choice && castStream
+      ? {
+          url: castStream.url,
+          contentType: choice.contentType,
+          kind: choice.kind,
+        }
+      : null;
+
+  const captions = parseJsonArray<{
+    language_code?: unknown;
+    caption_type?: unknown;
+  }>(scene.captions).flatMap((c) => {
+    const lang = c.language_code;
+    const type = c.caption_type;
+    // Only what the caption route would serve
+    if (
+      typeof lang !== "string" ||
+      typeof type !== "string" ||
+      !isAllowedCaption(lang, type)
+    ) {
+      return [];
+    }
+    const query = new URLSearchParams({ lang, type });
+    return [
+      {
+        url: sign(`/api/scene/${sceneId}/caption`, query.toString()),
+        lang,
+        type,
+      },
+    ];
+  });
+
+  const poster = scene.pathScreenshot
+    ? sign(`/api/scene/${sceneId}/poster`)
+    : null;
+
+  res.setHeader("Cache-Control", "no-store");
+  res.json({
+    expiresAt: new Date(exp * 1000).toISOString(),
+    streams,
+    cast,
+    captions,
+    poster,
   });
 };

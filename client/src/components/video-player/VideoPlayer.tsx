@@ -7,6 +7,7 @@ import { useScenePlayer } from "../../contexts/ScenePlayerContext";
 import { usePlaylistMediaKeys } from "../../hooks/useMediaKeys";
 import { useQueueNavigation } from "../../hooks/useQueueNavigation";
 import { useWatchHistory } from "../../hooks/useWatchHistory";
+import { makeCompositeKey } from "../../utils/compositeKey";
 import "./VideoPlayer.css";
 import type { ClipMarkerInput } from "./plugins/markers";
 import { useOrientationFullscreen } from "./useOrientationFullscreen";
@@ -59,8 +60,10 @@ const VideoPlayer = () => {
     autoplayNext,
     repeat,
     restartCount,
+    queueSteps,
     dispatch,
     registerPlayer,
+    requested,
   } = useScenePlayer();
   const { next, prev } = useQueueNavigation();
 
@@ -123,11 +126,15 @@ const VideoPlayer = () => {
     autoplayNext,
     repeat,
     restartCount,
+    queueSteps,
     dispatch,
     nextScene: next,
     prevScene: prev,
     registerPlayer,
     location,
+    sceneRequest: requested
+      ? makeCompositeKey(requested.sceneId, requested.instanceId)
+      : null,
     hasResumedRef,
     initialResumeTimeRef,
     watchHistory,

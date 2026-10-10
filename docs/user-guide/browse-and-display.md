@@ -18,7 +18,7 @@ The default card-based layout showing thumbnails with metadata.
 
 #### Selecting scenes
 
-On the Scenes page (and any scene list), tick a card's checkbox, or press and hold a card, to select scenes for a bulk action (hide, add to a playlist). A selection covers the page you see: it clears when you change the filters, the sort or the page. Shift+click a second checkbox selects every scene between the two, and Select All selects the scenes on the page.
+On the Scenes page (and any scene list), tick a card's checkbox, or press and hold a card, to select scenes for a bulk action (hide, add to a playlist). A selection covers the page you see: it clears when you change the filters, the sort or the page. Shift+click a second checkbox selects every scene between the two, and **Select All**, in the bar at the bottom, selects the scenes on the page.
 
 ### Wall View
 
@@ -27,15 +27,15 @@ A justified gallery layout that preserves aspect ratios.
 - Images and videos fill rows naturally without letterboxing
 - All visible previews can play simultaneously
 - Three zoom levels: Small, Medium, Large
-- Available for: Scenes, Galleries, Images, Performers, Studios, Groups
+- Available for: Scenes, Galleries, Images and Clips
 
-**Wall playback modes** (Settings → Display):
+**Wall playback modes** (Settings → User Preferences → Customization → **Wall View Preview Behavior**; in Wall view on Scenes and Clips, also the cog in the toolbar):
 
 | Mode         | Behavior                                                           |
 | ------------ | ------------------------------------------------------------------ |
-| **Autoplay** | Videos play when visible, up to six at once; hover controls volume |
-| **Hover**    | Static thumbnail until hover, then plays                           |
-| **Static**   | Thumbnails only, no video playback                                 |
+| **Autoplay All** | Videos play when visible, up to six at once; hover controls volume |
+| **Play on Hover Only** | Static thumbnail until hover, then plays                           |
+| **Static Thumbnails** | Thumbnails only, no video playback                                 |
 
 ### Table View
 
@@ -53,7 +53,7 @@ A high-density tabular layout for scanning metadata across many items.
 3. Use arrows to reorder columns
 4. Or right-click any column header → **Hide column**
 
-A table remembers your columns for each type: a change on the Scenes table is saved as your scene columns and is there the next time you open it, on any device. **Settings > Customization > Table Columns** shows and edits the same setting. A View saved in table view shows its own columns when you load it from **Views**; a default View applied when you open a page leaves your saved columns alone; your next column change saves the columns then shown as yours.
+A table remembers your columns for each type: a change on the Scenes table is saved as your scene columns and is there the next time you open it, on any device. **Settings → User Preferences → Customization → Table Columns** shows and edits the same setting. A View saved in table view shows its own columns when you load it from **Views**; a default View applied when you open a page leaves your saved columns alone; your next column change saves the columns then shown as yours.
 
 ### Timeline View
 
@@ -151,7 +151,7 @@ Customize what information appears on cards and detail pages.
 ### Accessing Settings
 
 **Full settings:**
-Settings → Customization → Card Display
+Settings → User Preferences → Customization → Card Display
 
 **Quick access:**
 Click the ⚙️ icon in the search toolbar for current entity type settings.
@@ -164,7 +164,7 @@ Settings vary by entity type. Common options include:
 | ---------------------- | -------------------------------- |
 | **Show studio**        | Display studio name on cards     |
 | **Show date**          | Display date on cards            |
-| **Show rating**        | Display star rating badge        |
+| **Show rating**        | Display the rating badge, a number from 0 to 10 |
 | **Show favorite**      | Display favorite button          |
 | **Show O-counter**     | Display O-counter badge          |
 | **Show description**   | Display description text         |
@@ -208,9 +208,9 @@ The filter bar sits under the search toolbar. Only the filters you use take spac
 
 ### Chips
 
-Each active filter shows as a chip that names its picks and its condition, such as "Tags: none of Anal, with sub-tags" or "Rating: 40 to 80"; a pick that is no longer visible to you reads as "unavailable". Click a chip, or press Enter on it, to open its filter in a panel right under it. The **x** on a chip removes the filter.
+Each active filter shows as a chip that names its picks and its condition, such as "Tags: none of Anal, with sub-tags" or "Rating: 4 to 8"; a pick that is no longer visible to you reads as "unavailable". Click a chip, or press Enter on it, to open its filter in a panel right under it. The **x** on a chip removes the filter.
 
-- **Changes apply as you make them.** Picking a tag, an option or a Yes / No applies at once; typing a number, a date or text applies a moment after you stop, so a rating typed as `60` is one search, not two. Close the panel with Escape, with a click outside it, or by clicking the chip again.
+- **Changes apply as you make them.** Picking a tag, an option or a Yes / No applies at once; typing a number, a date or text applies a moment after you stop, so a rating typed as `6.5` is one search, not three. Close the panel with Escape, with a click outside it, or by clicking the chip again.
 - **Back undoes the whole edit.** Everything you changed in one open panel is one step in your browser history, so Back returns to how the list was before you opened it.
 - The panel's header names the filter and offers **Remove** and the pin buttons (see [Pinned Filters](#pinned-filters)).
 - A page's own filter, such as the studio on a studio's page, shows as a dimmed label before the chips and has no **x**.
@@ -314,7 +314,7 @@ On the Scenes list, **Favorite Tags** lists the scenes that have one of your fav
 
 ### Number Ranges
 
-A number range (rating, height, weight, duration and the like) never matches an item with no value: "rating at most 40" lists only items you rated 40 or less, not the ones you have not rated, and "weight at most 60 kg" only performers with a weight.
+A number range (rating, height, weight, duration and the like) never matches an item with no value: "rating at most 4" lists only items you rated 4 or less, not the ones you have not rated, and "weight at most 60 kg" only performers with a weight.
 
 Ranges take decimals (a penis length of 14.5 cm, a frame rate of 29.97) and a minimum or a maximum on its own includes that value: "at least 10" lists 10 and up. Heights, weights and penis lengths are stored and linked in metric, so an address or View means the same to everyone; with imperial units on, the boxes and chips show feet, inches and pounds and the address still holds centimetres and kilograms.
 
@@ -401,7 +401,7 @@ A View is a saved set of filters, sort and display settings for one list, for qu
 
 - All active filters, groups included (never the page's own filters, such as a studio's, nor the search text or your pins)
 - Sort field and direction
-- View mode (Grid/Wall/Table/Hierarchy)
+- View mode (Grid, Wall, Table, Timeline, Folder or Hierarchy)
 - Grid density (for Grid view)
 - Zoom level (for Wall view)
 - Items per page

@@ -55,8 +55,10 @@ import {
   distinctRefs,
   entityKey,
 } from "../utils/entityRef.js";
+import { shouldLogOnce } from "../utils/logThrottle.js";
 import { logger } from "../utils/logger.js";
 import { summarizeStashStreams } from "../utils/sceneStreams.js";
+import { stashDate } from "../utils/stashDate.js";
 import { stashMediaUrl } from "../utils/stashMediaPath.js";
 import { logSyncFailure } from "../utils/syncLog.js";
 import { clipPreviewProber } from "./ClipPreviewProber.js";
@@ -472,6 +474,9 @@ function getMostRecentTimestamp(
  * ask for changes after it and see none until that date.
  */
 const WATERMARK_MAX_SKEW_MS = 5 * 60 * 1000;
+
+/** A failed read of Stash's VR tag warns once this long per instance */
+const VR_TAG_WARN_MS = 60 * 60 * 1000;
 
 /** How many ids a log line names at most. */
 const LOGGED_IDS = 20;
@@ -1540,7 +1545,7 @@ async function processScenesBatch(
     ${stashInstanceId ? `'${escapeSql(stashInstanceId)}'` : "NULL"},
     ${escapeSqlNullable(scene.title)},
     ${escapeSqlNullable(scene.code)},
-    ${escapeSqlNullable(scene.date)},
+    ${escapeSqlNullable(stashDate(scene.date))},
     ${scene.studio?.id ? `'${escapeSql(scene.studio.id)}'` : "NULL"},
     ${scene.rating100 ?? "NULL"},
     ${file?.duration ? Math.round(file.duration) : "NULL"},
@@ -1741,7 +1746,7 @@ async function processPerformersBatch(
     ${escapeSqlNullable(performer.name)},
     ${escapeSqlNullable(performer.disambiguation)},
     ${escapeSqlNullable(performer.gender)},
-    ${escapeSqlNullable(performer.birthdate)},
+    ${escapeSqlNullable(stashDate(performer.birthdate))},
     ${performer.favorite ? 1 : 0},
     ${performer.rating100 ?? "NULL"},
     ${escapeSqlNullable(performer.details)},
@@ -1759,7 +1764,7 @@ async function processPerformersBatch(
     ${escapeSqlNullable(performer.tattoos)},
     ${escapeSqlNullable(performer.piercings)},
     ${escapeSqlNullable(performer.career_length)},
-    ${escapeSqlNullable(performer.death_date)},
+    ${escapeSqlNullable(stashDate(performer.death_date))},
     ${escapeSqlNullable(performer.url)},
     ${escapeSqlNullable(listJson(performer.urls))},
     ${escapeSqlNullable(performer.image_path)},
@@ -2120,7 +2125,7 @@ async function processGroupsBatch(
     ${stashInstanceId ? `'${escapeSql(stashInstanceId)}'` : "NULL"},
     ${escapeSqlNullable(group.name)},
     ${escapeSqlNullable(group.aliases === "" ? null : group.aliases)},
-    ${escapeSqlNullable(group.date)},
+    ${escapeSqlNullable(stashDate(group.date))},
     ${group.studio?.id ? `'${escapeSql(group.studio.id)}'` : "NULL"},
     ${group.rating100 ?? "NULL"},
     ${duration ? Math.round(duration) : "NULL"},
@@ -2237,7 +2242,7 @@ async function processGalleriesBatch(
     '${escapeSql(gallery.id)}',
     ${stashInstanceId ? `'${escapeSql(stashInstanceId)}'` : "NULL"},
     ${escapeSqlNullable(gallery.title)},
-    ${escapeSqlNullable(gallery.date)},
+    ${escapeSqlNullable(stashDate(gallery.date))},
     ${gallery.studio?.id ? `'${escapeSql(gallery.studio.id)}'` : "NULL"},
     ${gallery.studio?.id ? `'${escapeSql(stashInstanceId)}'` : "NULL"},
     ${gallery.rating100 ?? "NULL"},
@@ -2414,7 +2419,7 @@ async function processImagesBatch(
       ${escapeSqlNullable(image.details)},
       ${escapeSqlNullable(image.photographer)},
       ${escapeSqlNullable(JSON.stringify(image.urls))},
-      ${escapeSqlNullable(image.date)},
+      ${escapeSqlNullable(stashDate(image.date))},
       ${image.studio?.id ? `'${escapeSql(image.studio.id)}'` : "NULL"},
       ${image.studio?.id ? `'${escapeSql(stashInstanceId)}'` : "NULL"},
       ${image.rating100 ?? "NULL"},
@@ -3015,6 +3020,8 @@ class StashSyncService extends EventEmitter {
     try {
       logger.info(`Starting ${name}...`, { stashInstanceId });
 
+      await this.readStashVrTag(stashInstanceId, run);
+
       for (const entityType of SYNC_ORDER) {
         this.checkAbort();
         results.push(
@@ -3100,6 +3107,61 @@ class StashSyncService extends EventEmitter {
 
       throw error;
     }
+  }
+
+  /**
+   * Reads Stash's VR tag (`configuration.ui.vrTag`, a tag name) at the start
+   * of an instance's sync and stores it trimmed in `StashInstance.stashVrTag`
+   * (null when empty, missing or not a string), with one write and only when
+   * the value changed; the library stamp then moves so an open Scene page
+   * refetches its `vr`. A failed read keeps the stored value and the sync
+   * goes on, warning once an hour per instance; an abort ends the sync. The
+   * `ui` map holds every UI setting the Stash user saved: it is never logged.
+   */
+  private async readStashVrTag(
+    stashInstanceId: string,
+    run: SyncRunContext
+  ): Promise<void> {
+    // The address and the stored value as they are before Stash is asked:
+    // the write below names that address, so an admin who changes it
+    // meanwhile drops the write (the sync that change queues reads again)
+    const instance = await prisma.stashInstance.findUnique({
+      where: { id: stashInstanceId },
+      select: { url: true, stashVrTag: true },
+    });
+    if (!instance) return;
+    let vrTag: string | null;
+    try {
+      const stash = this.getStashClient(stashInstanceId);
+      const { configuration } = await stash.configurationUi({}, run.signal);
+      throwIfAborted(run.signal);
+      const ui: unknown = configuration.ui;
+      const raw =
+        typeof ui === "object" && ui !== null
+          ? (ui as Record<string, unknown>)["vrTag"]
+          : undefined;
+      vrTag = typeof raw === "string" ? raw.trim() || null : null;
+    } catch (error) {
+      if (this.isAbort(error)) throw new Error("Sync aborted");
+      if (shouldLogOnce(`sync.vrTag:${stashInstanceId}`, VR_TAG_WARN_MS)) {
+        logger.warn(
+          "Could not read Stash's VR tag; the stored value stays until a sync reads it",
+          { stashInstanceId, error: describeStashError(error) }
+        );
+      }
+      return;
+    }
+
+    if (instance.stashVrTag === vrTag) return;
+    const { count } = await dbWrite("sync.vrTag", () =>
+      prisma.stashInstance.updateMany({
+        where: { id: stashInstanceId, url: instance.url },
+        data: { stashVrTag: vrTag },
+      })
+    );
+    if (count === 0) return;
+    bumpLibrary();
+    logger.info("Stash's VR tag changed", { stashInstanceId, vrTag });
   }
 
   /**

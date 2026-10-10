@@ -32,7 +32,7 @@ const HelpModal = ({ onClose }: Props) => {
         items: [
           {
             keys: ["r 1-5"],
-            description: "Set rating (20%, 40%, 60%, 80%, 100%)",
+            description: "Set rating (2, 4, 6, 8 or 10 out of 10)",
           },
           { keys: ["r 0"], description: "Clear rating" },
           { keys: ["r f"], description: "Toggle Favorite" },
@@ -45,7 +45,7 @@ const HelpModal = ({ onClose }: Props) => {
         items: [
           {
             keys: ["r 1-5"],
-            description: "Set rating (20%, 40%, 60%, 80%, 100%)",
+            description: "Set rating (2, 4, 6, 8 or 10 out of 10)",
           },
           { keys: ["r 0"], description: "Clear rating" },
           { keys: ["r f"], description: "Toggle Favorite" },
@@ -58,7 +58,7 @@ const HelpModal = ({ onClose }: Props) => {
         items: [
           {
             keys: ["r 1-5"],
-            description: "Set rating (20%, 40%, 60%, 80%, 100%)",
+            description: "Set rating (2, 4, 6, 8 or 10 out of 10)",
           },
           { keys: ["r 0"], description: "Clear rating" },
           { keys: ["r f"], description: "Toggle Favorite" },
@@ -71,7 +71,7 @@ const HelpModal = ({ onClose }: Props) => {
         items: [
           {
             keys: ["r 1-5"],
-            description: "Set rating (20%, 40%, 60%, 80%, 100%)",
+            description: "Set rating (2, 4, 6, 8 or 10 out of 10)",
           },
           { keys: ["r 0"], description: "Clear rating" },
           { keys: ["r f"], description: "Toggle Favorite" },
@@ -86,7 +86,7 @@ const HelpModal = ({ onClose }: Props) => {
           { keys: ["Esc"], description: "Close lightbox" },
           {
             keys: ["r 1-5"],
-            description: "Set rating (20%, 40%, 60%, 80%, 100%)",
+            description: "Set rating (2, 4, 6, 8 or 10 out of 10)",
           },
           { keys: ["r 0"], description: "Clear rating" },
           { keys: ["r f"], description: "Toggle Favorite" },
@@ -99,7 +99,7 @@ const HelpModal = ({ onClose }: Props) => {
         items: [
           {
             keys: ["r 1-5"],
-            description: "Set rating (20%, 40%, 60%, 80%, 100%)",
+            description: "Set rating (2, 4, 6, 8 or 10 out of 10)",
           },
           { keys: ["r 0"], description: "Clear rating" },
           { keys: ["r f"], description: "Toggle Favorite" },
@@ -112,7 +112,7 @@ const HelpModal = ({ onClose }: Props) => {
         items: [
           {
             keys: ["r 1-5"],
-            description: "Set rating (20%, 40%, 60%, 80%, 100%)",
+            description: "Set rating (2, 4, 6, 8 or 10 out of 10)",
           },
           { keys: ["r 0"], description: "Clear rating" },
           { keys: ["r f"], description: "Toggle Favorite" },
@@ -181,6 +181,8 @@ const HelpModal = ({ onClose }: Props) => {
           { keys: ["g t"], description: "Navigate to Tags page" },
           { keys: ["g c"], description: "Navigate to Collections page" },
           { keys: ["g l"], description: "Navigate to Galleries page" },
+          { keys: ["g i"], description: "Navigate to Images page" },
+          { keys: ["g k"], description: "Navigate to Clips page" },
           { keys: ["g y"], description: "Navigate to Playlists page" },
           { keys: ["g z"], description: "Navigate to Settings page" },
         ],
@@ -504,7 +506,7 @@ const HelpModal = ({ onClose }: Props) => {
                   )}
                 </div>
 
-                {currentPage !== "global" && (
+                {pageShortcuts !== shortcuts.global && (
                   <div>
                     {shortcuts.global.map((category) =>
                       renderShortcutCategory(category)

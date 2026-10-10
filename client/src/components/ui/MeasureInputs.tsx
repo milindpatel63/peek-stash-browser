@@ -3,13 +3,19 @@
  * Height in feet and inches, Weight in lbs, Penis Length in inches. The
  * state, the URL, presets and requests hold metric (whole cm and kg for
  * Height and Weight, cm with two decimals for Penis Length); these convert
- * what is typed and show the state in the viewer's units.
+ * what is typed and show the state in the viewer's units. `ShownRange` does
+ * the same for a range shown in another scale (a rating100 as 0 to 10).
  *
  * An input keeps the text typed into it while it is being edited ("5." stays
  * "5." on the way to "5.5"): it takes text from the state only on mount and
  * when the state changes from outside (the URL, a preset, Clear).
  */
 import { type CSSProperties, useId, useState } from "react";
+import {
+  type NumberDisplay,
+  shownBound,
+  storedBound,
+} from "../../utils/filterFields";
 import {
   type RangeSide,
   cmToFeetInches,
@@ -69,9 +75,9 @@ function useTypedText(metric: string, show: (metric: string) => string) {
       setText(next);
       setSeen(written);
     },
-    /** Leaving the input: its text, tidied ("5." is "5", "007" is "7") */
+    /** Leaving the input: its text, tidied ("5." is "5", "007" is "7", "6,5" is "6.5") */
     tidy: () => {
-      const number = Number(text);
+      const number = Number(text.replace(",", "."));
       setText(
         text.trim() !== "" && Number.isFinite(number) ? String(number) : ""
       );
@@ -88,7 +94,7 @@ interface UnitInputProps {
   /** What the viewer reads for a metric bound */
   show: (metric: string) => string;
   /** The text that is allowed to be typed */
-  allowed: RegExp;
+  allowed: RegExp | ((typed: string) => boolean);
   /** The metric bound for the typed text, "" for none */
   toMetric: (typed: string, side: RangeSide) => string;
   /** The state with this bound set */
@@ -120,7 +126,9 @@ function UnitInput({
       value={text}
       onChange={(event) => {
         const next = event.target.value;
-        if (!allowed.test(next)) return;
+        const ok =
+          typeof allowed === "function" ? allowed(next) : allowed.test(next);
+        if (!ok) return;
         const written = toMetric(next, side);
         typed(next, written);
         onWrite(written);
@@ -206,6 +214,72 @@ export function ImperialLengthRange({
           inputClasses={inputClasses}
           inputStyle={inputStyle}
           inputMode="decimal"
+        />
+      ))}
+    </div>
+  );
+}
+
+interface ShownRangeProps extends WeightLengthProps {
+  display: NumberDisplay;
+  /** The largest bound, as shown (a rating's 10); more is not taken */
+  max?: number | undefined;
+}
+
+/**
+ * A range shown in another scale than it is stored: a rating100 typed and
+ * shown as 0 to 10 with one decimal, as the rating slider shows it. A comma
+ * is taken as the decimal point (a comma locale's decimal keyboard), and a
+ * bound past `max` is not taken.
+ */
+export function ShownRange({
+  id,
+  value,
+  onChange,
+  label,
+  display,
+  max,
+  inputClasses,
+  inputStyle,
+}: ShownRangeProps) {
+  const range = rangeOf(value);
+  const pattern =
+    display.decimals > 0
+      ? new RegExp(`^\\d*[.,]?\\d{0,${display.decimals}}$`)
+      : WHOLE;
+  const shownNumber = (typed: string) => Number(typed.replace(",", "."));
+  const allowed = (typed: string) => {
+    if (!pattern.test(typed)) return false;
+    const shown = shownNumber(typed);
+    // "" and a lone "." are on the way to a number
+    return max === undefined || !Number.isFinite(shown) || shown <= max;
+  };
+  return (
+    <div className="flex space-x-2">
+      {SIDES.map((side) => (
+        <UnitInput
+          key={side}
+          id={side === "min" ? id : undefined}
+          side={side}
+          label={label}
+          metric={boundText(range[side])}
+          show={(stored) => {
+            const number = Number(stored);
+            return stored === "" || !Number.isFinite(number)
+              ? stored
+              : String(shownBound(number, display));
+          }}
+          allowed={allowed}
+          toMetric={(typed) => {
+            const shown = shownNumber(typed);
+            return typed === "" || !Number.isFinite(shown)
+              ? ""
+              : String(storedBound(shown, display));
+          }}
+          onWrite={(stored) => onChange({ ...range, [side]: stored })}
+          inputClasses={inputClasses}
+          inputStyle={inputStyle}
+          inputMode={display.decimals > 0 ? "decimal" : "numeric"}
         />
       ))}
     </div>

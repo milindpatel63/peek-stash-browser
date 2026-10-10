@@ -1,20 +1,33 @@
 import { useEffect, useRef } from "react";
 import "videojs-seek-buttons";
 import "videojs-seek-buttons/dist/videojs-seek-buttons.css";
+import { useQueryClient } from "@tanstack/react-query";
 import videojs from "video.js";
-import { apiFetch, apiPost, redirectToLogin } from "../../api";
+import { redirectToLogin } from "../../api";
+import {
+  sceneMediaLinkQuery,
+  useSceneMediaLink,
+} from "../../api/hooks/useScenes";
 import { usePlayerHotkeys } from "../../hooks/useMediaKeys";
 import { canDecode } from "../../utils/browserPlayback";
-import { newClientToken } from "../../utils/clientToken";
 import { makeCompositeKey } from "../../utils/compositeKey";
 import { getSceneTitle } from "../../utils/format";
 import { mayTakeFocus } from "../../utils/pageFocus";
+import { type Viewing, createViewing } from "./activitySenders";
+import type { CastAwarePlayer } from "./cast/castMiddleware";
+import type { CastScene } from "./cast/castSession";
+import { useCast } from "./cast/useCast";
+import { canPlayToAirPlay } from "./playbackTarget";
 import { buildPlayerSources } from "./playerSources";
+import type { AirPlayPlayer } from "./plugins/airplay";
+import { startAirPlay } from "./plugins/loadAirPlay";
 import {
   SESSION_EXPIRED_PLAYBACK_MESSAGE,
   isSessionExpired,
 } from "./sessionCheck";
+import type { LinkPlayer, LoadedLink } from "./signedLink";
 import { setupSubtitles } from "./videoPlayerUtils";
+import { type VrModeScene, useVrMode } from "./vr/useVrMode";
 import "./vtt-thumbnails.js";
 import "./plugins/big-buttons.js";
 import "./plugins/markers.js";
@@ -24,37 +37,6 @@ import "./plugins/skip-buttons.js";
 import "./plugins/source-selector.js";
 import "./plugins/track-activity.js";
 import "./plugins/media-session.js";
-
-/**
- * Retry a function with exponential backoff
- * @param {Function} fn - Async function to retry
- * @param {number} maxAttempts - Maximum number of attempts (default: 3)
- * @param {number} baseDelay - Base delay in ms (default: 1000)
- * @returns {Promise} Result of the function or throws after all retries
- */
-async function retryWithBackoff(
-  fn: () => Promise<any>,
-  maxAttempts = 3,
-  baseDelay = 1000
-) {
-  let lastError: unknown;
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      return await fn();
-    } catch (error: unknown) {
-      lastError = error;
-      if (attempt < maxAttempts) {
-        const delay = baseDelay * Math.pow(2, attempt - 1);
-        console.warn(
-          `[RETRY] Attempt ${attempt} failed, retrying in ${delay}ms...`,
-          (error as Error).message
-        );
-        await new Promise((resolve) => setTimeout(resolve, delay));
-      }
-    }
-  }
-  throw lastError;
-}
 
 /**
  * Focus the player, so its keys work, unless the user has moved focus to
@@ -88,11 +70,13 @@ export function useVideoPlayer({
   autoplayNext,
   repeat,
   restartCount,
+  queueSteps = 0,
   dispatch,
   nextScene,
   prevScene,
   registerPlayer,
   location,
+  sceneRequest = null,
   hasResumedRef,
   initialResumeTimeRef,
   watchHistory,
@@ -111,6 +95,8 @@ export function useVideoPlayer({
   repeat: string;
   /** Bumped by a queue step to an entry of the scene already loaded */
   restartCount: number;
+  /** Bumped by each queue step, never by a route change (a cast follows steps) */
+  queueSteps?: number;
   dispatch: (action: any) => void;
   /** The queue's steps (`useQueueNavigation`), which know what is playing */
   nextScene: () => void;
@@ -118,6 +104,11 @@ export function useVideoPlayer({
   /** Tells the player context which player this is (null: it is gone) */
   registerPlayer: (player: { paused(): boolean } | null) => void;
   location: any;
+  /**
+   * The scene the latest load asked for (`requested`, as a composite key):
+   * a new one starts a scene change before its scene lands or its URL shows
+   */
+  sceneRequest?: string | null;
   hasResumedRef: React.RefObject<boolean>;
   initialResumeTimeRef: React.RefObject<number | null>;
   watchHistory: any;
@@ -138,15 +129,36 @@ export function useVideoPlayer({
   // Track previous scene for detecting changes
   const prevSceneKeyRef = useRef<string | null>(null);
 
+  // The scene's one viewing, shared by the local and the cast tracker
+  const viewingRef = useRef<Viewing | null>(null);
+
+  // A browser that can AirPlay (Safari, and every browser on iOS) plays the
+  // signed media link's Direct and HLS, so the AirPlay device, which has no
+  // cookie, can take the stream over; the sources wait for the link, or its
+  // error. The flag, not the data, drives the sources effect: the hourly
+  // renewal reloads nothing.
+  const queryClient = useQueryClient();
+  const signed = canPlayToAirPlay();
+  const link = useSceneMediaLink(sceneId ?? "", sceneInstanceId ?? "", {
+    enabled: signed,
+  });
+  const linkSettled = !signed || link.isSuccess || link.isError;
+  // What the loaded sources were built from, for the expired-link refetch
+  const loadedLinkRef = useRef<LoadedLink | null>(null);
+
   // Keys video.js's controls stop go to the shortcut dispatcher (stable)
   const hotkeys = usePlayerHotkeys();
 
-  // What had focus when the page opened or the route last changed (a scene
-  // change begins with its URL, before the scene lands): the player may take
-  // focus from it, the control that started the change. Recorded before the
-  // effects below run, by declaration order. The route, not the history
-  // key: the queue's controls rewrite the entry at the same URL, and a
-  // control the user toggles while a scene loads starts no change.
+  // What had focus when the page opened or a scene change began: the player
+  // may take focus from it, the control that started the change. A change
+  // begins with its URL (a link to another scene) or with its load (a queue
+  // step, whose URL follows only once its scene lands, so Next pressed while
+  // the last scene still loads is seen before the next one lands). Recorded
+  // before the effects below run, by declaration order. The route, not the
+  // history key: the queue's controls rewrite the entry at the same URL, and
+  // a control the user toggles while a scene loads starts no change. The
+  // first load's start is the mount's, so a control the user focuses before
+  // that load starts keeps focus.
   const focusAtStartRef = useRef<Element | null>(null);
   const { pathname, search } = location as {
     pathname?: string;
@@ -156,6 +168,14 @@ export function useVideoPlayer({
   useEffect(() => {
     focusAtStartRef.current = document.activeElement;
   }, [route]);
+  const lastRequestRef = useRef(sceneRequest);
+  useEffect(() => {
+    const last = lastRequestRef.current;
+    lastRequestRef.current = sceneRequest;
+    if (last !== null && sceneRequest !== last) {
+      focusAtStartRef.current = document.activeElement;
+    }
+  }, [sceneRequest]);
 
   // ============================================================================
   // PLAYER INITIALIZATION (from useVideoPlayerLifecycle)
@@ -175,6 +195,32 @@ export function useVideoPlayer({
 
     // Append to container before initialization
     container.appendChild(videoElement);
+
+    const renewExpiredLink = async () => {
+      const loaded = loadedLinkRef.current;
+      if (!loaded || Date.now() < Date.parse(loaded.expiresAt)) return false;
+      const { id, instanceId } = loaded.scene as {
+        id: string;
+        instanceId: string;
+      };
+      const { renewSignedLink } = await import("./signedLink");
+      return renewSignedLink(
+        playerRef.current as LinkPlayer | null,
+        loaded,
+        () =>
+          queryClient.fetchQuery({
+            ...sceneMediaLinkQuery(id, instanceId),
+            staleTime: 0,
+          }),
+        (streams) =>
+          buildPlayerSources(
+            loaded.scene as Parameters<typeof buildPlayerSources>[0],
+            canDecode,
+            streams
+          ),
+        () => loadedLinkRef.current === loaded
+      );
+    };
 
     // Initialize Video.js (matching Stash configuration)
     const player = videojs(videoElement, {
@@ -220,6 +266,10 @@ export function useVideoPlayer({
         // server is asked first: a lost session goes to login instead.
         sourceSelector: {
           beforeFallback: async () => {
+            // A signed source that fails to load after its link ran out
+            // (a <video> cannot see the 401): sign it again, and the
+            // selector retries the same source at the same time
+            if (await renewExpiredLink()) return false;
             if (!(await isSessionExpired())) return false;
             redirectToLogin(SESSION_EXPIRED_PLAYBACK_MESSAGE);
             return true;
@@ -244,6 +294,10 @@ export function useVideoPlayer({
       focusAtStartRef.current
     );
 
+    // The AirPlay button (and the attribute on the tech's <video>), whose
+    // code loads only where the browser can AirPlay
+    const stopAirPlay = startAirPlay(player as AirPlayPlayer);
+
     // Volume persistence is now handled by persistVolume plugin
     // Watch history tracking is now handled by the trackActivity plugin
 
@@ -251,6 +305,7 @@ export function useVideoPlayer({
     return () => {
       playerRef.current = null;
       registerPlayer(null);
+      stopAirPlay();
 
       try {
         player.dispose();
@@ -265,6 +320,43 @@ export function useVideoPlayer({
 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // The VR button and projection menu (after the player exists: its effects
+  // run once the effect above has made it), and the headset HUD's queue
+  // steps and favourite
+  useVrMode({
+    playerRef,
+    scene: scene as VrModeScene | null | undefined,
+    sceneKey,
+    nextScene,
+    prevScene,
+    queueLength:
+      (playlist as { scenes?: unknown[] } | null)?.scenes?.length ?? 0,
+    dispatch,
+  });
+
+  // ============================================================================
+  // CASTING (after the player exists: its effect reads the player)
+  // ============================================================================
+
+  useCast({
+    playerRef,
+    scene: scene as CastScene | null,
+    sceneKey,
+    dispatch,
+    autoplayNext,
+    repeat,
+    restartCount,
+    queueSteps,
+    playlist,
+    // The user's resume point for the scene, where a cast starts when the
+    // local player has not played (not the Continue Watching resume)
+    resumeTime:
+      (watchHistory as { resumeTime?: number | null } | null)?.resumeTime ??
+      null,
+    minimumPlayPercent,
+    viewing: viewingRef,
+  });
 
   // ============================================================================
   // VTT THUMBNAILS UPDATE (from useVideoPlayerLifecycle)
@@ -326,74 +418,25 @@ export function useVideoPlayer({
 
   useEffect(() => {
     const player = playerRef.current;
-    if (!player || !sceneId) return;
+    if (!player || !sceneId || !sceneInstanceId) return;
 
     const trackActivityPlugin = player.trackActivity();
     if (!trackActivityPlugin) return;
 
-    // Enable tracking
-    trackActivityPlugin.setEnabled(true);
+    // One viewing of this scene, for this tracker and the cast tracker: its
+    // play-count token is the same on every retry and the play counts once,
+    // whichever tracker reaches the threshold. Saves go every 10 s during
+    // playback, at a scene change, and with `keepalive` when the tab is
+    // hidden or the page closes.
+    const viewing = createViewing(sceneId, sceneInstanceId);
+    viewingRef.current = viewing;
+    trackActivityPlugin.saveActivity = viewing.save;
+    trackActivityPlugin.incrementPlayCount = viewing.countPlay;
     trackActivityPlugin.minimumPlayPercent = minimumPlayPercent;
-
-    // One token per viewing of this scene, the same on every retry of its
-    // play-count request: the server counts a token once, so a retry after
-    // a lost answer cannot count the play twice
-    const playToken = newClientToken();
-
-    // Connect plugin callbacks to API endpoints
-    // saveActivity is called periodically (every 10s) during playback, when
-    // the scene changes, and when the tab is hidden or the page closes. The
-    // last two send with `keepalive`, so the request outlives the page, and
-    // once: a retry timer would not.
-    trackActivityPlugin.saveActivity = async (
-      resumeTime: number,
-      playDuration: number,
-      options?: { keepalive?: boolean }
-    ) => {
-      const body = {
-        sceneId,
-        instanceId: sceneInstanceId,
-        resumeTime,
-        playDuration,
-      };
-      try {
-        if (options?.keepalive) {
-          await apiFetch("/watch-history/save-activity", {
-            method: "POST",
-            body: JSON.stringify(body),
-            keepalive: true,
-          });
-        } else {
-          await retryWithBackoff(() =>
-            apiPost("/watch-history/save-activity", body)
-          );
-        }
-      } catch (error) {
-        console.error("Failed to save activity:", error);
-      }
-    };
-
-    // incrementPlayCount is called once per session when threshold is reached
-    trackActivityPlugin.incrementPlayCount = async (options?: {
-      keepalive?: boolean;
-    }) => {
-      const body = { sceneId, instanceId: sceneInstanceId, playToken };
-      try {
-        if (options?.keepalive) {
-          await apiFetch("/watch-history/increment-play-count", {
-            method: "POST",
-            body: JSON.stringify(body),
-            keepalive: true,
-          });
-        } else {
-          await retryWithBackoff(() =>
-            apiPost("/watch-history/increment-play-count", body)
-          );
-        }
-      } catch (error) {
-        console.error("Failed to increment play count:", error);
-      }
-    };
+    // Off while a cast is attached: the cast tracker records the TV
+    trackActivityPlugin.setEnabled(
+      !(player as CastAwarePlayer).peekCastConnected
+    );
 
     return () => {
       trackActivityPlugin.setEnabled(false);
@@ -469,6 +512,13 @@ export function useVideoPlayer({
       return;
     }
 
+    // A browser that can AirPlay waits for the link (or its error) before the sources are set;
+    // until then the last scene's ready flag must not autoplay
+    if (!linkSettled) {
+      dispatch({ type: "SET_READY", payload: false });
+      return;
+    }
+
     // Mark this scene as loaded
     prevSceneKeyRef.current = sceneKey ?? null;
 
@@ -487,7 +537,10 @@ export function useVideoPlayer({
     // Sources are the server's stream paths (Stash's list for this file, as
     // keyless Peek proxy paths), with Direct and MKV after the transcodes
     // when this browser cannot decode the file
-    const sources = buildPlayerSources(scene, canDecode);
+    const streams = link.data?.streams;
+    const sources = buildPlayerSources(scene, canDecode, streams);
+    loadedLinkRef.current =
+      signed && link.data ? { scene, expiresAt: link.data.expiresAt } : null;
 
     // The plugin loads the first, falls back through the rest and shows the
     // rate menu only on Direct and MKV
@@ -515,7 +568,7 @@ export function useVideoPlayer({
     });
 
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sceneKey]); // Stateless: only the scene matters
+  }, [sceneKey, linkSettled]); // Only the scene, and a signed link settling
 
   // ============================================================================
   // RESTART (a queue step to an entry of the same scene)
@@ -546,24 +599,28 @@ export function useVideoPlayer({
     const shouldResume = location.state?.shouldResume;
     const resumeTime = initialResumeTimeRef.current;
 
-    // Handle resume playback before starting
-    if (
-      shouldResume &&
-      !hasResumedRef.current &&
-      resumeTime != null &&
-      resumeTime > 0
-    ) {
-      hasResumedRef.current = true;
-      player.currentTime(resumeTime);
-    }
-
-    // A browser that blocks autoplay with sound may still play it muted
-    player.play()?.catch((err: unknown) => {
-      if (err instanceof DOMException && err.name === "NotAllowedError") {
-        player.muted(true);
-        void player.play()?.catch(() => {});
+    // While casting, the load on the receiver plays the scene there (and a
+    // session playing another scene is not taken over by an autoplay)
+    if (!(player as CastAwarePlayer).peekCastRemote) {
+      // Handle resume playback before starting
+      if (
+        shouldResume &&
+        !hasResumedRef.current &&
+        resumeTime != null &&
+        resumeTime > 0
+      ) {
+        hasResumedRef.current = true;
+        player.currentTime(resumeTime);
       }
-    });
+
+      // A browser that blocks autoplay with sound may still play it muted
+      player.play()?.catch((err: unknown) => {
+        if (err instanceof DOMException && err.name === "NotAllowedError") {
+          player.muted(true);
+          void player.play()?.catch(() => {});
+        }
+      });
+    }
 
     // Clear autoplay flag
     dispatch({ type: "SET_SHOULD_AUTOPLAY", payload: false });

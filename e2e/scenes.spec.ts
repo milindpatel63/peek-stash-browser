@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { ListPage } from "./pages/ListPage";
 import { requireData } from "./support/data";
+import { completeSetup, createUser, deleteUser, signIn } from "./support/users";
 
 /**
  * E2E tests for the Scene Library page.
@@ -30,6 +31,83 @@ test.describe("Scene Library", () => {
     const list = new ListPage(page);
     await list.goto("/scenes");
     requireData(await list.waitForResults("Scene"), "scenes");
+  });
+
+  test("the first selection moves no card, and Select All is in the bottom bar", async ({
+    page,
+  }) => {
+    const list = new ListPage(page);
+    await list.goto("/scenes");
+    const count = requireData(
+      (await list.waitForResults("Scene")) >= 3 ? 3 : null,
+      "3 scenes"
+    );
+    const cards = list.cards("Scene");
+    // Layout offsets: a hovered or selected card scales (a transform), which
+    // moves its bounding box but not its place in the grid
+    const tops = async () =>
+      Promise.all(
+        Array.from({ length: count }, (_, i) =>
+          cards
+            .nth(i)
+            .evaluate((el) => [
+              (el as HTMLElement).offsetLeft,
+              (el as HTMLElement).offsetTop,
+            ])
+        )
+      );
+    const before = await tops();
+
+    await cards
+      .first()
+      .getByRole("button", { name: "Select scene", exact: true })
+      .click();
+    const selectAll = page.getByRole("button", {
+      name: /^Select All \(\d+\)$/,
+    });
+    await expect(selectAll).toBeVisible();
+
+    expect(await tops()).toEqual(before);
+
+    await selectAll.click();
+    await expect(
+      cards.first().getByRole("button", { name: "Deselect scene" })
+    ).toBeVisible();
+    expect(await tops()).toEqual(before);
+  });
+
+  test("the filter chip row scrolls sideways with a themed scrollbar on a phone", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    const list = new ListPage(page);
+    await list.goto("/scenes");
+    await expect(list.filterBar).toBeVisible();
+
+    const row = await list.filterBar.evaluate((el) => {
+      const style = getComputedStyle(el);
+      return {
+        overflowX: style.overflowX,
+        scrollbarWidth: style.scrollbarWidth,
+        scrollbarColor: style.scrollbarColor,
+        overflows: el.scrollWidth > el.clientWidth,
+        scrollLeft: el.scrollLeft,
+      };
+    });
+
+    // Thin and coloured from the theme (the browser's default is "auto" and
+    // a bright track), and still scrollable
+    expect(row.overflowX).toBe("auto");
+    expect(row.scrollbarWidth).toBe("thin");
+    expect(row.scrollbarColor).not.toBe("auto");
+    expect(row.overflows).toBe(true);
+
+    // Focus reaching the last chip scrolls it into view
+    await list.filterBar.getByRole("button").last().focus();
+    // Polled: a smooth scroll would still be under way
+    await expect
+      .poll(() => list.filterBar.evaluate((el) => el.scrollLeft))
+      .toBeGreaterThan(row.scrollLeft);
   });
 
   test("search input accepts text and updates URL", async ({ page }) => {
@@ -140,6 +218,76 @@ test.describe("Scene Library", () => {
 test.describe("Scene page", () => {
   interface FoundScenes {
     findScenes: { scenes: Array<{ id: string; instanceId: string }> };
+  }
+
+  // The O counter and its menu sit in a group the page centres (a phone) or
+  // pins to the right (a desktop): the first O adds the menu to the group, and
+  // the heart and Add to playlist beside it stay where they were
+  for (const viewport of [
+    { width: 1280, height: 720 },
+    { width: 390, height: 844 },
+  ]) {
+    test(`the first O adds its menu without moving the heart and Add to playlist at ${viewport.width}px`, async ({
+      page,
+      browser,
+      baseURL,
+    }) => {
+      const found = await page.request.post("/api/library/scenes", {
+        data: { filter: { per_page: 1 } },
+      });
+      expect(found.ok(), await found.text()).toBeTruthy();
+      const scene = requireData(
+        ((await found.json()) as FoundScenes).findScenes.scenes[0],
+        "scenes"
+      );
+      // An O press is the user's own state: a throwaway user, deleted with it
+      const user = await createUser(page.request, "o-menu");
+      const context = await signIn(browser, baseURL, user);
+      try {
+        await completeSetup(context);
+        const userPage = await context.newPage();
+        await userPage.setViewportSize(viewport);
+        await userPage.goto(
+          `/scene/${scene.id}?instance=${encodeURIComponent(scene.instanceId)}`
+        );
+        // The scene's own controls, not the cards of the Recommended sidebar
+        const controls = userPage.getByRole("region", {
+          name: "Scene actions",
+        });
+        const oButton = controls.getByRole("button", {
+          name: /^Increment O counter/,
+        });
+        const favorite = controls.getByRole("button", {
+          name: "Add to favorites",
+        });
+        const playlist = controls
+          .getByTitle("Add to playlist")
+          .locator("visible=true");
+        await expect(favorite).toBeVisible({ timeout: 15_000 });
+        const menu = controls.getByRole("button", { name: "More options" });
+        await expect(menu).toHaveCount(0);
+        const places = async () => [
+          (await favorite.boundingBox())?.x,
+          (await playlist.boundingBox())?.x,
+        ];
+        const before = await places();
+
+        await oButton.click();
+        await expect(menu).toBeVisible();
+        // Past the press animation (+1, a bolder count)
+        await expect(controls.getByText("+1")).toHaveCount(0);
+
+        // A "1" is a few pixels narrower than a "0", which a centred group
+        // shows by up to half that; the 26 px menu would show as 13
+        const after = await places();
+        before.forEach((x, i) => {
+          expect(Math.abs((after[i] ?? NaN) - (x ?? NaN))).toBeLessThan(3);
+        });
+      } finally {
+        await context.close();
+        await deleteUser(page.request, user.id);
+      }
+    });
   }
 
   test("a scene page requests similar scenes once", async ({ page }) => {

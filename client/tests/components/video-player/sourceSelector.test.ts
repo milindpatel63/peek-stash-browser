@@ -175,6 +175,27 @@ describe("SourceFallback", () => {
     expect(fake.player.currentTime()).toBe(95);
   });
 
+  it("sources refreshed during the check load at their new address, at the same time", async () => {
+    const fake = fakePlayer();
+    const fresh = { ...direct, src: `${direct.src}&sig=new` };
+    const fallback = new SourceFallback(fake.player, fakeMenu(), {
+      // A renewed link: the sources are swapped in place, then it goes on
+      beforeFallback: () => {
+        fallback.refreshSources([fresh, mp4]);
+        return false;
+      },
+    });
+    fallback.setSources([direct, mp4]);
+    fake.setTime(95);
+
+    await fake.fail(MEDIA_ERR_NETWORK);
+    await vi.advanceTimersByTimeAsync(1000);
+    await fake.fire("canplay");
+
+    expect(loadedAfterStart(fake.player)).toEqual([fresh]);
+    expect(fake.player.currentTime()).toBe(95);
+  });
+
   it("a source that plays again after a retry gets its retries back", async () => {
     const fake = fakePlayer();
     const fallback = new SourceFallback(fake.player, fakeMenu());
@@ -238,6 +259,23 @@ describe("SourceFallback", () => {
     await vi.runAllTimersAsync();
 
     expect(loadedAfterStart(fake.player)).toEqual([hls]);
+  });
+
+  // VR on Safari moves from HLS to Direct through select (useVrMode, V9)
+  it("a picked source loads at the current time and plays on", async () => {
+    const fake = fakePlayer();
+    const menu = fakeMenu();
+    const fallback = new SourceFallback(fake.player, menu);
+    fallback.setSources([hls, direct]);
+    fake.setTime(95);
+
+    fallback.select(direct);
+
+    expect(loadedAfterStart(fake.player)).toEqual([direct]);
+    expect(menu.setSelectedSource).toHaveBeenLastCalledWith(direct);
+    expect(fake.player.play).toHaveBeenCalledTimes(1);
+    await fake.fire("canplay");
+    expect(fake.player.currentTime()).toBe(95);
   });
 
   it("after a source the user chose fails, no other source loads", async () => {

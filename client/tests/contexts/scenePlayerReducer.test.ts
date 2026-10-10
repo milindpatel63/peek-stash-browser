@@ -153,6 +153,7 @@ describe("scenePlayerReducer", () => {
         repeat: "none",
         shuffleHistory: [],
         restartCount: 0,
+        queueSteps: 0,
 
         requested: null,
         unavailable: [],
@@ -657,6 +658,63 @@ describe("scenePlayerReducer", () => {
   });
 
   // -------------------------------------------------------------------------
+  // The viewer's favourite on the playing scene
+  // -------------------------------------------------------------------------
+  describe("SET_SCENE_FAVORITE", () => {
+    const playing = untrusted<WithStashUrl<NormalizedScene>>({
+      id: "7",
+      instanceId: "inst-b",
+      title: "A scene",
+      favorite: false,
+      rating: 80,
+      files: [],
+    });
+    const withScene: ScenePlayerReducerState = {
+      ...initialState,
+      scene: playing,
+      oCounter: 3,
+      currentIndex: 2,
+    };
+
+    it("patches only scene.favorite", () => {
+      const result = scenePlayerReducer(withScene, {
+        type: "SET_SCENE_FAVORITE",
+        payload: { sceneId: "7", instanceId: "inst-b", favorite: true },
+      });
+
+      expect(result.scene).toEqual({ ...playing, favorite: true });
+      expect({ ...result, scene: null }).toEqual({
+        ...withScene,
+        scene: null,
+      });
+      // The scene the page holds is left as it was
+      expect(playing.favorite).toBe(false);
+    });
+
+    it.each([
+      ["another scene", { sceneId: "8", instanceId: "inst-b" }],
+      [
+        "the same id on another instance",
+        { sceneId: "7", instanceId: "inst-a" },
+      ],
+    ])("changes nothing for %s", (_name, ref) => {
+      const result = scenePlayerReducer(withScene, {
+        type: "SET_SCENE_FAVORITE",
+        payload: { ...ref, favorite: true },
+      });
+      expect(result).toBe(withScene);
+    });
+
+    it("changes nothing with no scene loaded", () => {
+      const result = scenePlayerReducer(initialState, {
+        type: "SET_SCENE_FAVORITE",
+        payload: { sceneId: "7", instanceId: "inst-b", favorite: true },
+      });
+      expect(result).toBe(initialState);
+    });
+  });
+
+  // -------------------------------------------------------------------------
   // Playlist controls
   // -------------------------------------------------------------------------
   describe("Playlist controls", () => {
@@ -1109,6 +1167,70 @@ describe("scenePlayerReducer", () => {
   // -------------------------------------------------------------------------
   // GOTO_SCENE_INDEX
   // -------------------------------------------------------------------------
+  // A cast follows the page only on a queue step, never on a route change
+  describe("queueSteps", () => {
+    const queued = {
+      ...initialState,
+      playlist: makePlaylist(5),
+      currentIndex: 2,
+    };
+
+    it("NEXT_SCENE, PREV_SCENE and a GOTO_SCENE_INDEX pick each count one step", () => {
+      const next = scenePlayerReducer(queued, { type: "NEXT_SCENE" });
+      const prev = scenePlayerReducer(next, { type: "PREV_SCENE" });
+      const pick = scenePlayerReducer(prev, {
+        type: "GOTO_SCENE_INDEX",
+        payload: { index: 4 },
+      });
+
+      expect([next, prev, pick].map((state) => state.queueSteps)).toEqual([
+        1, 2, 3,
+      ]);
+    });
+
+    it("a step to an entry of the scene already loaded counts too", () => {
+      const state = {
+        ...initialState,
+        playlist: {
+          scenes: [
+            { sceneId: "7", instanceId: "a" },
+            { sceneId: "7", instanceId: "a" },
+          ],
+        },
+      };
+
+      const result = scenePlayerReducer(state, { type: "NEXT_SCENE" });
+
+      expect(result.restartCount).toBe(1);
+      expect(result.queueSteps).toBe(1);
+    });
+
+    it("Back or Forward to an entry of the queue (fromHistory), leaving the queue and a new queue count none", () => {
+      const back = scenePlayerReducer(queued, {
+        type: "GOTO_SCENE_INDEX",
+        payload: { index: 1, shouldAutoplay: false, fromHistory: true },
+      });
+      const leave = scenePlayerReducer(queued, { type: "LEAVE_QUEUE" });
+      const started = scenePlayerReducer(queued, {
+        type: "INITIALIZE",
+        payload: { playlist: makePlaylist(3), currentIndex: 1 },
+      });
+
+      expect(back.currentIndex).toBe(1);
+      expect(back.queueSteps).toBe(0);
+      expect(leave.queueSteps).toBe(0);
+      expect(started.queueSteps).toBe(0);
+    });
+
+    it("a step with nowhere to go counts none", () => {
+      const atEnd = { ...queued, currentIndex: 4 };
+
+      expect(scenePlayerReducer(atEnd, { type: "NEXT_SCENE" }).queueSteps).toBe(
+        0
+      );
+    });
+  });
+
   describe("GOTO_SCENE_INDEX", () => {
     it("sets currentIndex to the given index", () => {
       const state = {

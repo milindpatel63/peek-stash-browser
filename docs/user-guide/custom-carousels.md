@@ -4,16 +4,16 @@ Create personalized homepage carousels using a visual query builder. Custom caro
 
 ## Creating a Custom Carousel
 
-1. Navigate to **Settings** → **Homepage Carousels**
+1. Navigate to **Settings** → **User Preferences** → **Navigation** → **Homepage Carousels**
 2. Click **Create Carousel**
 3. Configure your carousel:
    - **Title**: Give your carousel a descriptive name
    - **Icon**: Choose from a selection of icons
    - **Filter Rules**: Add one or more rules, and optionally groups of rules, to define which scenes appear
-   - **Sort**: Choose how scenes are ordered (Random, Recently Added, etc.). Playlist order needs exactly one playlist rule, and Scene Number needs a collection rule, each at the top level (not inside a group) with the top level set to Match all; without that rule the sort is not offered, and removing the rule puts the sort back to Random
+   - **Sort By** and **Direction**: Choose how scenes are ordered, by any sort of the Scenes page (Random, Created At, Rating and the rest), Descending or Ascending. Playlist order needs exactly one playlist rule, and Scene Number needs a collection rule, each at the top level (not inside a group) with the top level set to Match all; without that rule the sort is not offered, and removing the rule puts the sort back to Random
 
 4. Click **Preview** to see matching scenes
-5. Click **Save** once you're satisfied with the preview
+5. Click **Save** once you're satisfied with the preview. Save works only after a successful Preview, and any change to the rules or sort asks for a new one. When you edit a carousel, the button reads **Update**
 
 ## Filter Rules
 
@@ -48,7 +48,7 @@ A scene appears when it matches at least one of the four. Add rules at the top l
 | Galleries | Scenes linked to specific galleries |
 | Playlists | Scenes in specific playlists: your own and those shared with you |
 | In any of my playlists | Scenes in one of your own playlists, or in none of them |
-| Rating (0-100) | Scenes within a rating range |
+| Rating | Scenes within a rating range, from 0 to 10 as ratings show |
 | Duration (minutes) | Scene length in minutes |
 | Resolution | Video quality, from 144p to 8K and Huge |
 | Bitrate (Mbps) | Video bitrate in Mbps; decimals such as 2.5 are kept |
@@ -139,4 +139,4 @@ Click the trash icon to delete a custom carousel. This action cannot be undone.
 
 - Make sure the carousel is enabled (eye icon should be visible, not crossed out)
 - Try refreshing the page
-- Check Settings → Homepage Carousels to verify it's toggled on
+- Check Settings → User Preferences → Navigation → Homepage Carousels to verify it's toggled on
