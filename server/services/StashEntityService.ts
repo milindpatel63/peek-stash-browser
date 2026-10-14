@@ -20,6 +20,7 @@ import type { SceneScoringRow } from "../types/internal/queryRows.js";
 import type { EntityRef } from "../utils/entityRef.js";
 import { logger } from "../utils/logger.js";
 import { toProxyUrl } from "../utils/proxyUrl.js";
+import { rawDate } from "../utils/rawDate.js";
 import {
   type SceneStreamSource,
   buildSceneStreams,
@@ -28,7 +29,8 @@ import {
 import { instanceColumnClause } from "../utils/sqlClauses.js";
 import { emptyToNull, parseJsonArray } from "../utils/sqlHelpers.js";
 import { getSceneFallbackTitle } from "../utils/titleUtils.js";
-import type { ScoringScene } from "./RecommendationScoringService.js";
+import { KEPT_MIN_SECONDS } from "./RankingComputeService.js";
+import type { LibraryScoringScene } from "./RecommendationScoringService.js";
 import { stashInstanceManager } from "./StashInstanceManager.js";
 import {
   galleryRef,
@@ -95,16 +97,18 @@ class StashEntityService {
   /**
    * The scoring input for Recommended: every live scene the user can see
    * (the exclusion join with the instance, the allowed instances) with its
-   * studio, performer and tag ids and the user's watch data on it, so the
-   * scoring pass in memory reads nothing else. The junction ids come from
-   * two correlated covering-index subqueries rather than a join of both
+   * studio, performer, tag and inherited tag ids and the user's watch data
+   * on it, so the scoring pass in memory reads nothing else. A scene is
+   * kept when the user played it, pressed O on it or watched
+   * KEPT_MIN_SECONDS of it, as the rankings count it. The junction ids come
+   * from correlated covering-index subqueries rather than a join of the
    * junctions (a performer-by-tag cross product per scene): 0.1 s against
    * 0.27 s on prod and 0.9 s against 2.4 s at 200k scenes.
    */
   async getScenesForScoring(
     userId: number,
     allowedInstanceIds: string[]
-  ): Promise<ScoringScene[]> {
+  ): Promise<LibraryScoringScene[]> {
     const startTime = Date.now();
     const instanceFilter = instanceColumnClause(
       "s.stashInstanceId",
@@ -112,12 +116,16 @@ class StashEntityService {
     );
 
     const sql = `
-      SELECT s.id, s.stashInstanceId, s.studioId, COALESCE(wh.oCount, 0) AS oCounter,
+      SELECT s.id, s.stashInstanceId, s.studioId,
         (SELECT group_concat(sp.performerId) FROM ScenePerformer sp
           WHERE sp.sceneId = s.id AND sp.sceneInstanceId = s.stashInstanceId) AS performerIds,
         (SELECT group_concat(st.tagId) FROM SceneTag st
           WHERE st.sceneId = s.id AND st.sceneInstanceId = s.stashInstanceId) AS tagIds,
-        wh.playCount, wh.lastPlayedAt
+        (SELECT group_concat(it.tagId) FROM SceneInheritedTag it
+          WHERE it.sceneId = s.id AND it.sceneInstanceId = s.stashInstanceId) AS inheritedTagIds,
+        COALESCE(wh.oCount, 0) AS oCount, wh.lastPlayedAt,
+        wh.id IS NOT NULL AS hasHistory,
+        COALESCE(wh.playCount > 0 OR wh.oCount > 0 OR wh.playDuration >= ?, 0) AS kept
       FROM StashScene s
       LEFT JOIN UserExcludedEntity e ON e.userId = ? AND e.entityType = 'scene' AND e.entityId = s.id
         AND (e.instanceId = '' OR e.instanceId = s.stashInstanceId)
@@ -127,20 +135,24 @@ class StashEntityService {
 
     const rows = await prisma.$queryRawUnsafe<SceneScoringRow[]>(
       sql,
+      KEPT_MIN_SECONDS,
       userId,
       userId,
       ...instanceFilter.params
     );
 
-    const result: ScoringScene[] = rows.map((row) => ({
+    const ids = (list: string | null) => (list ? list.split(",") : []);
+    const result: LibraryScoringScene[] = rows.map((row) => ({
       id: row.id,
       instanceId: row.stashInstanceId,
       studioId: row.studioId,
-      performerIds: row.performerIds ? row.performerIds.split(",") : [],
-      tagIds: row.tagIds ? row.tagIds.split(",") : [],
-      oCounter: Number(row.oCounter),
-      playCount: row.playCount ?? 0,
-      lastPlayedAt: row.lastPlayedAt,
+      performerIds: ids(row.performerIds),
+      tagIds: ids(row.tagIds),
+      inheritedTagIds: ids(row.inheritedTagIds),
+      oCount: Number(row.oCount),
+      kept: Number(row.kept) === 1,
+      hasHistory: Number(row.hasHistory) === 1,
+      lastPlayedAt: rawDate(row.lastPlayedAt),
     }));
 
     logger.debug("getScenesForScoring", {
@@ -154,40 +166,55 @@ class StashEntityService {
 
   /**
    * The candidates for "Scenes like this": up to maxCandidates scenes on
-   * the seed's instance that share a performer (3 points each), its studio
-   * (2) or a tag (1 each) with the seed, live, and not excluded for the
-   * user, sorted by total weight, then date, then id.
+   * the seed's instance that share a performer, its studio or a tag with
+   * the seed, live, and not excluded for the user, sorted by total weight,
+   * then date, then id. A shared performer or tag counts its entry in
+   * `weights` (a tag or performer not in the list counts nothing), the
+   * studio `weights.studio`; the weights add up.
    *
    * Every branch joins within the seed's instance, so the candidates are
    * all on it and the seed's own access check covers the allowed
-   * instances. The exclusions are an anti-join on UserExcludedEntity, never
-   * a bound list: a user with 100k excluded scenes costs nothing extra.
+   * instances. The weighted lists drive their branch (`json_each` as the
+   * outer loop, CROSS JOIN, then the junction's tag or performer index).
+   * The exclusions are an anti-join on UserExcludedEntity, never a bound
+   * list: a user with 100k excluded scenes costs nothing extra.
    */
   async getSimilarSceneCandidates(
     seed: EntityRef,
     userId: number,
+    weights: {
+      performers: Array<[string, number]>;
+      studio: number;
+      tags: Array<[string, number]>;
+    },
     maxCandidates: number = 500
   ): Promise<SimilarSceneCandidate[]> {
     const startTime = Date.now();
 
     const sql = `
-      WITH candidates AS (
-        SELECT sp2.sceneId, sp2.sceneInstanceId AS inst, 3 AS weight
-        FROM ScenePerformer sp1
-        JOIN ScenePerformer sp2 ON sp2.performerId = sp1.performerId AND sp2.performerInstanceId = sp1.performerInstanceId
-        WHERE sp1.sceneId = ? AND sp1.sceneInstanceId = ?
+      WITH pw AS (
+        SELECT json_extract(value, '$[0]') AS performerId, CAST(json_extract(value, '$[1]') AS REAL) AS weight
+        FROM json_each(?)
+      ), tw AS (
+        SELECT json_extract(value, '$[0]') AS tagId, CAST(json_extract(value, '$[1]') AS REAL) AS weight
+        FROM json_each(?)
+      ), candidates AS (
+        SELECT sp.sceneId, sp.sceneInstanceId AS inst, pw.weight
+        FROM pw
+        CROSS JOIN ScenePerformer sp ON sp.performerId = pw.performerId
+          AND sp.performerInstanceId = ? AND sp.sceneInstanceId = ?
         UNION ALL
-        SELECT s2.id, s2.stashInstanceId, 2
+        SELECT s2.id, s2.stashInstanceId, CAST(? AS REAL)
         FROM StashScene s1
         JOIN StashScene s2 ON s2.studioId = s1.studioId AND s2.stashInstanceId = s1.stashInstanceId
         WHERE s1.id = ? AND s1.stashInstanceId = ? AND s1.studioId IS NOT NULL
         UNION ALL
-        SELECT st2.sceneId, st2.sceneInstanceId, 1
-        FROM SceneTag st1
-        JOIN SceneTag st2 ON st2.tagId = st1.tagId AND st2.tagInstanceId = st1.tagInstanceId
-        WHERE st1.sceneId = ? AND st1.sceneInstanceId = ?
+        SELECT st.sceneId, st.sceneInstanceId, tw.weight
+        FROM tw
+        CROSS JOIN SceneTag st ON st.tagId = tw.tagId
+          AND st.tagInstanceId = ? AND st.sceneInstanceId = ?
       ), scored AS (
-        SELECT sceneId, inst, SUM(weight) AS totalWeight FROM candidates
+        SELECT sceneId, inst, CAST(SUM(weight) AS REAL) AS totalWeight FROM candidates
         WHERE NOT (sceneId = ? AND inst = ?)
         GROUP BY sceneId, inst
       )
@@ -197,7 +224,7 @@ class StashEntityService {
       LEFT JOIN UserExcludedEntity e ON e.userId = ? AND e.entityType = 'scene' AND e.entityId = c.sceneId
         AND (e.instanceId = '' OR e.instanceId = c.inst)
       WHERE e.id IS NULL
-      ORDER BY c.totalWeight DESC, s.date DESC, s.id
+      ORDER BY ROUND(c.totalWeight, 9) DESC, s.date DESC, s.id, s.stashInstanceId
       LIMIT ?
     `;
 
@@ -206,16 +233,19 @@ class StashEntityService {
       Array<{
         sceneId: string;
         instanceId: string;
-        totalWeight: bigint; // SUM of integers
+        totalWeight: number; // always REAL: Prisma types a column by its first row
         date: string | null;
       }>
     >(
       sql,
-      id,
+      JSON.stringify(weights.performers),
+      JSON.stringify(weights.tags),
+      instanceId,
       instanceId, // performers
+      weights.studio,
       id,
       instanceId, // studio
-      id,
+      instanceId,
       instanceId, // tags
       id,
       instanceId, // never the seed itself
@@ -226,7 +256,7 @@ class StashEntityService {
     const result = rows.map((row) => ({
       sceneId: row.sceneId,
       instanceId: row.instanceId,
-      weight: Number(row.totalWeight),
+      weight: row.totalWeight,
       date: row.date,
     }));
 

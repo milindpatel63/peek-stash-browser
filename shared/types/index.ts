@@ -18,7 +18,6 @@ export type {
   NormalizedGallery,
   ImageListItem,
   WithInstanceId,
-  SceneScoringData,
 } from "./entities.js";
 
 // Instance-aware composite key types
@@ -29,6 +28,21 @@ export {
   isEntityRef,
   assertEntityRef,
 } from "./instanceAwareId.js";
+
+// Recommendation preferences
+export {
+  PERFORMER_GENDERS,
+  NO_PARTNER_SCENES,
+  DISCOVERY_MODES,
+  MAX_IGNORED_TAGS,
+  DEFAULT_RECOMMENDATION_PREFERENCES,
+  readRecommendationPreferences,
+  validateRecommendationPreferences,
+} from "./recommendationPreferences.js";
+export type {
+  PerformerGender,
+  RecommendationPreferences,
+} from "./recommendationPreferences.js";
 
 // VR projections
 export { VR_PROJECTIONS } from "./vr.js";

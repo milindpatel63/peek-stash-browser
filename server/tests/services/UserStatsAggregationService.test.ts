@@ -14,7 +14,7 @@ import {
 } from "../../services/UserStatsAggregationService.js";
 import { toProxyUrl } from "../../utils/proxyUrl.js";
 import { must } from "../helpers/must.js";
-import { prismaImpl } from "../helpers/prismaMock.js";
+import { partialRow, prismaImpl } from "../helpers/prismaMock.js";
 
 vi.mock(
   "../../prisma/singleton.js",
@@ -41,6 +41,13 @@ interface Answers {
   mostOdPerformer?: unknown[];
   /** The Library counts, by the table each statement counts */
   library?: Partial<Record<string, number | bigint>>;
+}
+
+/** The viewer's stored recommendation preferences (NULL is the defaults) */
+function preferences(value: unknown): void {
+  mockPrisma.user.findUnique.mockResolvedValue(
+    partialRow({ recommendationPreferences: value as never })
+  );
 }
 
 const flat = (sql: string) => sql.replace(/\s+/g, " ").trim();
@@ -110,6 +117,7 @@ describe("UserStatsAggregationService", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     answer({});
+    preferences(null);
     // The average scene duration, read by RankingComputeService
     mockPrisma.$queryRaw.mockResolvedValue([{ avgDuration: AVERAGE_DURATION }]);
   });
@@ -126,7 +134,8 @@ describe("UserStatsAggregationService", () => {
             playCount: 3,
             playDuration: 100.6,
             oCount: 1,
-            percentileRank: 100,
+            position: 1n,
+            total: 1n,
           },
         ],
       });
@@ -143,8 +152,18 @@ describe("UserStatsAggregationService", () => {
       expect(sql).toContain(
         "WHERE r.userId = ? AND r.entityType = ? AND e.id IS NULL AND x.stashInstanceId IN (?, ?)"
       );
+      // Ranked among the rows kept, then the page taken in the sort's order
       expect(sql).toContain(
-        "ORDER BY r.percentileRank DESC, r.entityId, r.instanceId LIMIT ?"
+        "RANK() OVER (ORDER BY r.engagementScore DESC) AS position, COUNT(*) OVER () AS total"
+      );
+      expect(sql).toContain(
+        "SELECT * FROM ranked ORDER BY engagementScore DESC, id, instanceId LIMIT ?"
+      );
+      expect(sql).toContain(
+        "CROSS JOIN StashPerformer x ON x.id = top.id AND x.stashInstanceId = top.instanceId"
+      );
+      expect(sql).toContain(
+        "ORDER BY top.engagementScore DESC, top.id, top.instanceId"
       );
       expect(params).toEqual([USER, USER, "performer", ...ALLOWED, 10]);
       expect(topPerformers).toEqual([
@@ -190,9 +209,9 @@ describe("UserStatsAggregationService", () => {
 
   describe("sorts", () => {
     it.each([
-      ["engagement", "r.percentileRank", "engagement"],
-      ["oCount", "r.oCount", "oCount"],
-      ["playCount", "r.playCount", "playCount"],
+      ["engagement", "engagementScore", "engagement"],
+      ["oCount", "oCount", "oCount"],
+      ["playCount", "playCount", "playCount"],
     ] as const)(
       "%s orders the rankings by %s and the scenes by %s",
       async (sortBy, rankingColumn, sceneColumn) => {
@@ -208,7 +227,14 @@ describe("UserStatsAggregationService", () => {
             `the ${type} top list`
           );
           expect(sql).toContain(
-            `ORDER BY ${rankingColumn} DESC, r.entityId, r.instanceId LIMIT ?`
+            `SELECT * FROM ranked ORDER BY ${rankingColumn} DESC, id, instanceId LIMIT ?`
+          );
+          expect(sql).toContain(
+            `ORDER BY top.${rankingColumn} DESC, top.id, top.instanceId`
+          );
+          // Whatever the sort, the score is the rank by engagement
+          expect(sql).toContain(
+            "RANK() OVER (ORDER BY r.engagementScore DESC) AS position"
           );
         }
         const [scenes] = statementFor("WITH engaged");
@@ -286,7 +312,7 @@ describe("UserStatsAggregationService", () => {
       });
     });
 
-    it("a scene ranked alone has percentile 0, as a stored ranking alone does", async () => {
+    it("a scene ranked alone has percentile 100, as a stored ranking alone does", async () => {
       answer({
         topScenes: [
           {
@@ -306,7 +332,38 @@ describe("UserStatsAggregationService", () => {
 
       const { topScenes } = await stats();
 
-      expect(topScenes.map((s) => [s.score, s.imageUrl])).toEqual([[0, null]]);
+      expect(topScenes.map((s) => [s.score, s.imageUrl])).toEqual([
+        [100, null],
+      ]);
+    });
+  });
+
+  describe("top list scores", () => {
+    it("are each entity's rank by engagement among the rows the list keeps; one alone is 100", async () => {
+      const row = (id: string, position: bigint, total: bigint) => ({
+        id,
+        instanceId: "inst-a",
+        name: id,
+        imagePath: null,
+        playCount: 1,
+        playDuration: 10,
+        oCount: 1,
+        position,
+        total,
+      });
+      answer({
+        studio: [row("a", 1n, 3n), row("b", 1n, 3n), row("c", 3n, 3n)],
+        tag: [row("t", 1n, 1n)],
+      });
+
+      const { topStudios, topTags } = await stats();
+
+      expect(topStudios.map((s) => [s.id, s.score])).toEqual([
+        ["a", 100],
+        ["b", 100],
+        ["c", 0],
+      ]);
+      expect(topTags.map((t) => [t.id, t.score])).toEqual([["t", 100]]);
     });
   });
 
@@ -336,11 +393,213 @@ describe("UserStatsAggregationService", () => {
       // One row per (scene, instance) the viewer watched: two servers'
       // same id count twice
       const [scenes] = statementFor("AS uniqueScenesWatched");
-      expect(scenes).toContain("COUNT(*) AS uniqueScenesWatched");
+      expect(scenes).toContain(
+        "SUM(CASE WHEN w.playCount > 0 OR w.oCount > 0 THEN 1 ELSE 0 END), 0) AS uniqueScenesWatched"
+      );
       const [images] = statementFor("AS totalImagesViewed");
       expect(images).toContain(
         "FROM ImageViewHistory iv CROSS JOIN StashImage x ON x.id = iv.imageId AND x.stashInstanceId = iv.instanceId"
       );
+    });
+  });
+
+  describe("leads and partners", () => {
+    const row = (id: string, name: string) => ({
+      id,
+      instanceId: "inst-a",
+      name,
+      imagePath: null,
+      playCount: 1,
+      playDuration: 10,
+      oCount: 1,
+      // Second of three: percentile 50
+      position: 2n,
+      total: 3n,
+    });
+
+    /** The top-list statements for performers, in the order they were sent */
+    const performerLists = () =>
+      statements().filter(
+        ([sql, ...params]) =>
+          sql.includes("FROM UserEntityRanking r") &&
+          params.includes("performer")
+      );
+
+    it("with the default preferences Top Performers holds every gender and Top Partners is empty, with no statement", async () => {
+      answer({ performer: [row("1", "One")] });
+
+      const result = await stats();
+
+      expect(result.topPartners).toEqual([]);
+      expect(result.topPerformers.map((p) => p.id)).toEqual(["1"]);
+      expect(performerLists()).toHaveLength(1);
+      const [sql] = must(performerLists()[0]);
+      expect(sql).not.toContain("x.gender");
+      expect(statementFor("h.oCounter AS count")[0]).not.toContain("x.gender");
+    });
+
+    it("with leads FEMALE and partners MALE Top Performers keeps everyone but partners (other genders and no gender too), Top Partners only MALE, Most O'd Performer not a partner", async () => {
+      preferences({
+        leadGenders: ["FEMALE"],
+        partnerGenders: ["MALE"],
+        noPartnerScenes: "normal",
+        discovery: "balanced",
+        ignoredTagIds: [],
+      });
+
+      await stats();
+
+      const [leads, partners] = performerLists();
+      const [leadSql, ...leadParams] = must(leads);
+      expect(leadSql).toContain(
+        "AND (x.gender IS NULL OR x.gender NOT IN (?))"
+      );
+      expect(leadParams).toEqual([
+        USER,
+        USER,
+        "performer",
+        ...ALLOWED,
+        "MALE",
+        10,
+      ]);
+      const [partnerSql, ...partnerParams] = must(partners);
+      expect(partnerSql).toContain("AND x.gender IN (?)");
+      expect(partnerSql).not.toContain("x.gender IS NULL");
+      expect(partnerParams).toEqual([
+        USER,
+        USER,
+        "performer",
+        ...ALLOWED,
+        "MALE",
+        10,
+      ]);
+      const [highlight, ...highlightParams] = statementFor(
+        "h.oCounter AS count"
+      );
+      expect(highlight).toContain(
+        "AND (x.gender IS NULL OR x.gender NOT IN (?))"
+      );
+      expect(highlightParams).toEqual([USER, USER, ...ALLOWED, "MALE"]);
+    });
+
+    it("maps Top Partners rows like Top Performers", async () => {
+      preferences({ leadGenders: ["FEMALE"], partnerGenders: ["MALE"] });
+      answer({ performer: [row("9", "Nine")] });
+
+      const result = await stats();
+
+      expect(result.topPartners.map((p) => [p.id, p.name, p.score])).toEqual([
+        ["9", "Nine", 50],
+      ]);
+    });
+
+    it("with leads set and no partners Top Partners is empty with no statement, and Top Performers and Most O'd Performer hold every gender", async () => {
+      preferences({ leadGenders: ["FEMALE"], partnerGenders: [] });
+
+      const result = await stats();
+
+      expect(result.topPartners).toEqual([]);
+      expect(performerLists()).toHaveLength(1);
+      expect(must(performerLists()[0])[0]).not.toContain("x.gender");
+      expect(statementFor("h.oCounter AS count")[0]).not.toContain("x.gender");
+    });
+
+    it("with two partner genders both are left out of the leads and both make partners", async () => {
+      preferences({
+        leadGenders: ["FEMALE"],
+        partnerGenders: ["MALE", "TRANSGENDER_MALE"],
+      });
+
+      await stats();
+
+      const [leads, partners] = performerLists();
+      const [leadSql, ...leadParams] = must(leads);
+      expect(leadSql).toContain(
+        "AND (x.gender IS NULL OR x.gender NOT IN (?, ?))"
+      );
+      expect(leadParams).toEqual(
+        expect.arrayContaining(["MALE", "TRANSGENDER_MALE"])
+      );
+      const [partnerSql] = must(partners);
+      expect(partnerSql).toContain("AND x.gender IN (?, ?)");
+    });
+  });
+
+  describe("ignored tags", () => {
+    it("Top Tags leaves out each ignored (id, instance) pair, bound", async () => {
+      preferences({ ignoredTagIds: ["3:inst-a", "3:inst-b", "4:inst-a"] });
+
+      await stats();
+
+      const tags = must(
+        statements().find(
+          ([sql, ...params]) =>
+            sql.includes("FROM UserEntityRanking r") && params.includes("tag")
+        )
+      );
+      const [sql, ...params] = tags;
+      expect(sql).toContain(
+        "AND NOT ((x.id = ? AND x.stashInstanceId = ?) OR (x.id = ? AND x.stashInstanceId = ?) OR (x.id = ? AND x.stashInstanceId = ?))"
+      );
+      expect(params).toEqual([
+        USER,
+        USER,
+        "tag",
+        ...ALLOWED,
+        "3",
+        "inst-a",
+        "3",
+        "inst-b",
+        "4",
+        "inst-a",
+        10,
+      ]);
+    });
+
+    it("the ignored tags are left out before the ranking, so they take no percentile", async () => {
+      preferences({ ignoredTagIds: ["3:inst-a"] });
+
+      await stats();
+
+      const [sql] = must(
+        statements().find(
+          ([text, ...params]) =>
+            text.includes("FROM UserEntityRanking r") && params.includes("tag")
+        )
+      );
+      // In the ranked rows' WHERE, before the page is taken from them
+      expect(sql.indexOf("NOT ((x.id")).toBeGreaterThan(
+        sql.indexOf("RANK() OVER")
+      );
+      expect(sql.indexOf("NOT ((x.id")).toBeLessThan(sql.indexOf("top AS ("));
+    });
+
+    it("the other lists do not exclude tags", async () => {
+      preferences({ ignoredTagIds: ["3:inst-a"] });
+
+      await stats();
+
+      for (const type of ["performer", "studio"]) {
+        const [sql] = must(
+          statements().find(
+            ([text, ...params]) =>
+              text.includes("FROM UserEntityRanking r") && params.includes(type)
+          )
+        );
+        expect(sql).not.toContain("NOT ((x.id");
+      }
+    });
+
+    it("with none ignored Top Tags has no exclusion", async () => {
+      await stats();
+
+      const [sql] = must(
+        statements().find(
+          ([text, ...params]) =>
+            text.includes("FROM UserEntityRanking r") && params.includes("tag")
+        )
+      );
+      expect(sql).not.toContain("NOT ((x.id");
     });
   });
 

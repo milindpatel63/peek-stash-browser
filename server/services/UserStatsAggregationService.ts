@@ -9,11 +9,17 @@
  * stats) and looks the entity up by its primary key (`CROSS JOIN`), so its
  * cost follows the viewer's history, not the library.
  *
- * - Top performers, studios and tags read the rankings RankingComputeService
- *   stores (at most an hour old), percentile-based:
+ * - Top performers, partners, studios and tags read the rankings
+ *   RankingComputeService stores (at most an hour old), ordered by:
  *   - Raw engagement: (oCount × 5) + (normalizedDuration) + (playCount)
- *   - Engagement rate: raw engagement / library presence
- *   - Percentile: rank among all entities user has engaged with (100 = top)
+ *   - Percentile of the raw engagement among the entities the list keeps
+ *     (visible, not ignored, of the list's role; 100 = top), ranked per
+ *     request, which a list shows as its score
+ *   The viewer's recommendation preferences split the performers: with
+ *   partner genders set, Top Partners holds the partner genders and Top
+ *   Performers and Most O'd Performer everyone else (a lead gender, another
+ *   gender or none, as Recommended counts them as leads); Top Tags leaves
+ *   out their ignored tags.
  * - Top scenes are ranked here, from the watch history, with the same
  *   weights and percentile (a scene's library presence is 1): 50 ms at 200k
  *   scenes for a user with 17k watched scenes, where storing them cost each
@@ -21,6 +27,7 @@
  * - Totals and highlights read the history and per-user stats directly.
  * - The Library counts are counted per request, as the lists count.
  */
+import type { RecommendationPreferences } from "@peek/shared-types/recommendationPreferences.js";
 import prisma from "../prisma/singleton.js";
 import type {
   EngagementStats,
@@ -46,6 +53,10 @@ import {
   percentileRank,
   rankingComputeService,
 } from "./RankingComputeService.js";
+import {
+  ignoredTagRefs,
+  readUserRecommendationPreferences,
+} from "./userRecommendationPreferences.js";
 
 /**
  * Valid sort options for top lists
@@ -95,11 +106,11 @@ type EntitySource = keyof typeof ENTITY_SOURCES;
 /** The entity types with stored rankings, each a top list */
 type RankedType = "performer" | "studio" | "tag";
 
-/** The ranking column each sort orders the stored rankings by */
+/** The column each sort orders the ranked rows by */
 const RANKING_SORT: Record<TopListSortBy, string> = {
-  engagement: "r.percentileRank",
-  oCount: "r.oCount",
-  playCount: "r.playCount",
+  engagement: "engagementScore",
+  oCount: "oCount",
+  playCount: "playCount",
 };
 
 /** The column each sort orders the scenes ranked from history by */
@@ -108,6 +119,55 @@ const SCENE_SORT: Record<TopListSortBy, string> = {
   oCount: "oCount",
   playCount: "playCount",
 };
+
+/** `(?, ?)` for a list of values, bound */
+const placeholders = (values: readonly string[]) =>
+  values.map(() => "?").join(", ");
+
+/**
+ * The condition on the joined performer `x` that keeps leads: everyone who
+ * is not a partner (a lead gender, another gender, no gender), as Recommended
+ * scores a performer of another gender as a lead at half weight. None when
+ * the viewer has no partner genders (everyone is a lead).
+ */
+function leadClause(prefs: RecommendationPreferences): SqlFragment | undefined {
+  const { partnerGenders } = prefs;
+  if (partnerGenders.length === 0) return undefined;
+  return {
+    sql: `(x.gender IS NULL OR x.gender NOT IN (${placeholders(partnerGenders)}))`,
+    params: [...partnerGenders],
+  };
+}
+
+/**
+ * The condition that keeps partners: the partner genders. None when the
+ * viewer has no leads or no partner genders (the list is then empty).
+ */
+function partnerClause(
+  prefs: RecommendationPreferences
+): SqlFragment | undefined {
+  const { leadGenders, partnerGenders } = prefs;
+  if (leadGenders.length === 0 || partnerGenders.length === 0) return undefined;
+  return {
+    sql: `x.gender IN (${placeholders(partnerGenders)})`,
+    params: [...partnerGenders],
+  };
+}
+
+/**
+ * The viewer's ignored tags as one bound exclusion (at most
+ * MAX_IGNORED_TAGS pairs), none when there are none
+ */
+function ignoredTagsClause(
+  prefs: RecommendationPreferences
+): SqlFragment | undefined {
+  const refs = ignoredTagRefs(prefs);
+  if (refs.length === 0) return undefined;
+  return {
+    sql: `NOT (${refs.map(() => "(x.id = ? AND x.stashInstanceId = ?)").join(" OR ")})`,
+    params: refs.flatMap((ref) => [ref.id, ref.instanceId]),
+  };
+}
 
 /** Where each highlight reads its count, and the entity it names */
 const HIGHLIGHT_SOURCES = {
@@ -162,7 +222,10 @@ interface RankedRow extends NamedRow {
   playCount: number;
   playDuration: number;
   oCount: number;
-  percentileRank: number;
+  /** RANK() by engagement among the rows kept: 1 for the most engaged */
+  position: bigint | number;
+  /** How many rows were kept */
+  total: bigint | number;
 }
 
 interface HistoryRankedSceneRow extends TitledRow {
@@ -280,6 +343,7 @@ class UserStatsAggregationService {
     options: UserStatsOptions
   ): Promise<UserStatsResponse> {
     const { sortBy = "engagement", allowedInstanceIds } = options;
+    const prefs = await readUserRecommendationPreferences(userId);
 
     // One statement after another: sent together, they contend for the
     // pool's connections and the disk (at 200k scenes, for a user with 17k
@@ -298,8 +362,19 @@ class UserStatsAggregationService {
       "performer",
       userId,
       allowedInstanceIds,
-      sortBy
+      sortBy,
+      leadClause(prefs)
     );
+    const partners = partnerClause(prefs);
+    const topPartners = partners
+      ? await this.getTopEntities(
+          "performer",
+          userId,
+          allowedInstanceIds,
+          sortBy,
+          partners
+        )
+      : [];
     const topStudios = await this.getTopEntities(
       "studio",
       userId,
@@ -310,7 +385,8 @@ class UserStatsAggregationService {
       "tag",
       userId,
       allowedInstanceIds,
-      sortBy
+      sortBy,
+      ignoredTagsClause(prefs)
     );
     const mostWatchedScene = await this.getSceneHighlight(
       HIGHLIGHT_SOURCES.mostWatchedScene,
@@ -328,7 +404,8 @@ class UserStatsAggregationService {
     );
     const mostOdPerformer = await this.getPerformerHighlight(
       userId,
-      allowedInstanceIds
+      allowedInstanceIds,
+      leadClause(prefs)
     );
 
     return {
@@ -336,6 +413,7 @@ class UserStatsAggregationService {
       engagement,
       topScenes,
       topPerformers,
+      topPartners,
       topStudios,
       topTags,
       mostWatchedScene,
@@ -391,7 +469,8 @@ class UserStatsAggregationService {
   /**
    * Engagement totals over the scenes and images the viewer may see. Each
    * history row is one (entity, instance), so a count of rows counts two
-   * servers' same id twice.
+   * servers' same id twice. A scene counts as watched when it was played or
+   * O'd: opening it makes a history row too.
    */
   private async getEngagementStats(
     userId: number,
@@ -414,7 +493,7 @@ class UserStatsAggregationService {
           COALESCE(SUM(w.playDuration), 0) AS totalWatchTime,
           COALESCE(SUM(w.playCount), 0) AS totalPlayCount,
           COALESCE(SUM(w.oCount), 0) AS totalOCount,
-          COUNT(*) AS uniqueScenesWatched
+          COALESCE(SUM(CASE WHEN w.playCount > 0 OR w.oCount > 0 THEN 1 ELSE 0 END), 0) AS uniqueScenesWatched
         FROM WatchHistory w
         ${scene.joins}
         WHERE w.userId = ? AND ${scene.where}`,
@@ -449,13 +528,18 @@ class UserStatsAggregationService {
   /**
    * A top list of performers, studios or tags from the stored rankings, in
    * the sort's order: only entities the viewer may see now, whatever they
-   * were when the rankings were computed.
+   * were when the rankings were computed. `extra` is one more condition on
+   * the joined entity `x` (a gender, ignored tags). The score is each
+   * entity's percentile by engagement among the rows the list keeps, ranked
+   * here by a window as the top scenes are: the stored percentile counts
+   * hidden, ignored, other-instance and other-role entities too.
    */
   private async getTopEntities(
     entity: RankedType,
     userId: number,
     allowedInstanceIds: readonly string[],
-    sortBy: TopListSortBy
+    sortBy: TopListSortBy,
+    extra?: SqlFragment
   ): Promise<TopPerformer[] | TopStudio[] | TopTag[]> {
     const visible = visibleEntity(
       entity,
@@ -463,20 +547,33 @@ class UserStatsAggregationService {
       userId,
       allowedInstanceIds
     );
+    const sort = RANKING_SORT[sortBy];
     const rows = await prisma.$queryRawUnsafe<RankedRow[]>(
-      `SELECT r.entityId AS id, r.instanceId AS instanceId,
-        r.playCount AS playCount, r.playDuration AS playDuration,
-        r.oCount AS oCount, r.percentileRank AS percentileRank,
+      `WITH ranked AS (
+        SELECT r.entityId AS id, r.instanceId AS instanceId,
+          r.playCount AS playCount, r.playDuration AS playDuration,
+          r.oCount AS oCount, r.engagementScore AS engagementScore,
+          RANK() OVER (ORDER BY r.engagementScore DESC) AS position,
+          COUNT(*) OVER () AS total
+        FROM UserEntityRanking r
+        ${visible.joins}
+        WHERE r.userId = ? AND r.entityType = ? AND ${visible.where}${extra ? ` AND ${extra.sql}` : ""}
+      ),
+      top AS (
+        SELECT * FROM ranked ORDER BY ${sort} DESC, id, instanceId LIMIT ?
+      )
+      SELECT top.id AS id, top.instanceId AS instanceId,
+        top.playCount AS playCount, top.playDuration AS playDuration,
+        top.oCount AS oCount, top.position AS position, top.total AS total,
         ${ENTITY_SOURCES[entity].columns}
-      FROM UserEntityRanking r
-      ${visible.joins}
-      WHERE r.userId = ? AND r.entityType = ? AND ${visible.where}
-      ORDER BY ${RANKING_SORT[sortBy]} DESC, r.entityId, r.instanceId
-      LIMIT ?`,
+      FROM top
+      CROSS JOIN ${ENTITY_SOURCES[entity].table} x ON x.id = top.id AND x.stashInstanceId = top.instanceId
+      ORDER BY top.${sort} DESC, top.id, top.instanceId`,
       ...visible.joinParams,
       userId,
       entity,
       ...visible.whereParams,
+      ...(extra?.params ?? []),
       TOP_LIST_LIMIT
     );
 
@@ -488,7 +585,7 @@ class UserStatsAggregationService {
       playCount: row.playCount,
       playDuration: Math.round(row.playDuration),
       oCount: row.oCount,
-      score: row.percentileRank,
+      score: percentileRank(Number(row.position) - 1, Number(row.total)),
     }));
   }
 
@@ -565,12 +662,14 @@ class UserStatsAggregationService {
 
   /**
    * The viewer's row with the highest count in a highlight's source, for
-   * an entity they may see (ties: the lowest id, then instance)
+   * an entity they may see (ties: the lowest id, then instance). `extra` is
+   * one more condition on the joined entity `x`.
    */
   private async getHighlight<Row extends NamedRow | TitledRow>(
     source: HighlightSource,
     userId: number,
-    allowedInstanceIds: readonly string[]
+    allowedInstanceIds: readonly string[],
+    extra?: SqlFragment
   ): Promise<HighlightRow<Row> | undefined> {
     const visible = visibleEntity(
       source.entity,
@@ -583,12 +682,13 @@ class UserStatsAggregationService {
         h.${source.count} AS count, ${ENTITY_SOURCES[source.entity].columns}
       FROM ${source.from} h
       ${visible.joins}
-      WHERE h.userId = ? AND h.${source.count} > 0 AND ${visible.where}
+      WHERE h.userId = ? AND h.${source.count} > 0 AND ${visible.where}${extra ? ` AND ${extra.sql}` : ""}
       ORDER BY h.${source.count} DESC, h.${source.idColumn}, h.instanceId
       LIMIT 1`,
       ...visible.joinParams,
       userId,
-      ...visible.whereParams
+      ...visible.whereParams,
+      ...(extra?.params ?? [])
     );
     return rows[0];
   }
@@ -640,15 +740,20 @@ class UserStatsAggregationService {
     };
   }
 
-  /** The performer with the most Os across their scenes */
+  /**
+   * The performer with the most Os across their scenes: not a partner when
+   * the viewer has partner genders (`lead` is that condition)
+   */
   private async getPerformerHighlight(
     userId: number,
-    allowedInstanceIds: readonly string[]
+    allowedInstanceIds: readonly string[],
+    lead?: SqlFragment
   ): Promise<HighlightPerformer | null> {
     const row = await this.getHighlight<NamedRow>(
       HIGHLIGHT_SOURCES.mostOdPerformer,
       userId,
-      allowedInstanceIds
+      allowedInstanceIds,
+      lead
     );
     if (!row) return null;
     return {
